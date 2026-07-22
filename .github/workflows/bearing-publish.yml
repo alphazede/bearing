@@ -21,6 +21,7 @@ permissions:
   checks: read
   contents: read
   id-token: write
+  security-events: read
 
 concurrency:
   group: bearing-npm-publish
@@ -77,6 +78,8 @@ jobs:
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD)"
+          main_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+          test "$checked_out_sha" = "$main_sha"
           checks_file="${RUNNER_TEMP}/bearing-check-runs.json"
           gh api --paginate --slurp \
             "/repos/${GITHUB_REPOSITORY}/commits/${checked_out_sha}/check-runs?filter=latest&per_page=100" \
@@ -85,7 +88,7 @@ jobs:
           const { readFileSync } = require("node:fs");
           const pages = JSON.parse(readFileSync(process.env.CHECKS_FILE, "utf8"));
           const runs = pages.flatMap((page) => page.check_runs ?? []);
-          for (const name of ["quality", "Analyze JavaScript and TypeScript", "Semgrep scan", "CodeQL"]) {
+          for (const name of ["quality", "Analyze JavaScript and TypeScript", "Semgrep scan"]) {
             const latest = runs.filter((run) => run.name === name).sort((a, b) => b.id - a.id)[0];
             if (!latest) throw new Error(`Required check is missing: ${name}`);
             if (latest.status !== "completed" || latest.conclusion !== "success") {
@@ -93,6 +96,16 @@ jobs:
             }
             console.log(`Verified ${name}: ${latest.html_url}`);
           }
+          NODE
+          alerts_file="${RUNNER_TEMP}/bearing-codeql-alerts.json"
+          gh api --paginate --slurp \
+            "/repos/${GITHUB_REPOSITORY}/code-scanning/alerts?ref=refs/heads/main&state=open&tool_name=CodeQL&per_page=100" \
+            > "$alerts_file"
+          ALERTS_FILE="$alerts_file" node <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const alerts = JSON.parse(readFileSync(process.env.ALERTS_FILE, "utf8")).flat();
+          if (alerts.length) throw new Error(`CodeQL has ${alerts.length} open alert(s) on refs/heads/main`);
+          console.log("Verified CodeQL: no open alerts on refs/heads/main");
           NODE
 
       - name: Install
