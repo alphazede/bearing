@@ -1,0 +1,9 @@
+{
+  "title": "RelayDesk customer import",
+  "steps": ["Validate CSV", "Preview changes", "Commit accepted records", "Review duplicate count"],
+  "metrics": [
+    { "label": "Accepted fixture records", "value": 2, "evidence": "data/import.csv" },
+    { "label": "Duplicate fixture records", "value": 1, "evidence": "data/import.csv" }
+  ],
+  "unsupportedClaims": []
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@fictional/relaydesk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Small deterministic B2B SaaS fixture for Bearing demos.",
+  "license": "CC0-1.0",
+  "type": "module",
+  "fixtureFacts": {
+    "commercialModel": "Fictional monthly subscription with starter and team plans"
+  }
+}

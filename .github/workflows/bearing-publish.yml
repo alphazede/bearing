@@ -1,0 +1,119 @@
+name: Publish Bearing npm package
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish (must be bearing-v0.1.0)
+        required: true
+        type: string
+      confirm:
+        description: Type @alphazede/bearing@0.1.0 to publish
+        required: true
+        type: string
+      bootstrap_npm_token:
+        description: Use NPM_TOKEN only for the one-time first publish
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  checks: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: bearing-npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: npm-publish
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.14.0'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+
+      - name: Set up current npm
+        run: npm install --global npm@11.5.1
+
+      - name: Verify immutable release tag and confirmation
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          CONFIRMATION: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          node -e "const p=require('./package.json'); if (!p.name || !p.version) throw new Error('package identity is required')"
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          expected_tag="bearing-v${package_version}"
+          expected_confirmation="${package_name}@${package_version}"
+          test "$REQUESTED_TAG" = "$expected_tag"
+          test "$CONFIRMATION" = "$expected_confirmation"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${expected_tag}^{commit}")"
+
+      - name: Verify required hosted checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          checks_file="${RUNNER_TEMP}/bearing-check-runs.json"
+          gh api --paginate --slurp \
+            "/repos/${GITHUB_REPOSITORY}/commits/${checked_out_sha}/check-runs?filter=latest&per_page=100" \
+            > "$checks_file"
+          CHECKS_FILE="$checks_file" node <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const pages = JSON.parse(readFileSync(process.env.CHECKS_FILE, "utf8"));
+          const runs = pages.flatMap((page) => page.check_runs ?? []);
+          for (const name of ["quality", "Analyze JavaScript and TypeScript", "Semgrep scan", "CodeQL"]) {
+            const latest = runs.filter((run) => run.name === name).sort((a, b) => b.id - a.id)[0];
+            if (!latest) throw new Error(`Required check is missing: ${name}`);
+            if (latest.status !== "completed" || latest.conclusion !== "success") {
+              throw new Error(`Required check is not successful: ${name} (${latest.status}/${latest.conclusion ?? "none"})`);
+            }
+            console.log(`Verified ${name}: ${latest.html_url}`);
+          }
+          NODE
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify release
+        run: |
+          pnpm typecheck
+          pnpm test
+          pnpm test:integration
+          pnpm build
+          pnpm eval:native
+          pnpm audit --audit-level=moderate
+          npm pack --dry-run --json
+
+      - name: Publish first release with bootstrap token
+        if: inputs.bootstrap_npm_token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
+
+      - name: Publish with trusted publishing
+        if: ${{ !inputs.bootstrap_npm_token }}
+        run: npm publish --provenance --access public

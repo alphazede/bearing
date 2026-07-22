@@ -1,0 +1,22 @@
+[
+  {
+    "id": "dd.product-capability",
+    "question": "What does the product demonstrably do?",
+    "expectedStatus": "answered",
+    "evidence": ["src/import-customers.mjs", "docs/product-facts.json"]
+  },
+  {
+    "id": "dd.security-certification",
+    "question": "Does the company hold a third-party security certification?",
+    "expectedStatus": "blocked",
+    "evidence": [],
+    "unresolvedOwner": "Security Lead"
+  },
+  {
+    "id": "dd.retention",
+    "question": "What is verified customer retention?",
+    "expectedStatus": "blocked",
+    "evidence": [],
+    "unresolvedOwner": "Finance Lead"
+  }
+]
