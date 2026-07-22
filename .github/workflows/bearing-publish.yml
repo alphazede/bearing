@@ -21,6 +21,7 @@ permissions:
   checks: read
   contents: read
   id-token: write
+  pull-requests: read
   security-events: read
 
 concurrency:
@@ -88,7 +89,7 @@ jobs:
           const { readFileSync } = require("node:fs");
           const pages = JSON.parse(readFileSync(process.env.CHECKS_FILE, "utf8"));
           const runs = pages.flatMap((page) => page.check_runs ?? []);
-          for (const name of ["quality", "Analyze JavaScript and TypeScript", "Semgrep scan", "CodeQL"]) {
+          for (const name of ["quality", "Analyze JavaScript and TypeScript", "Semgrep scan"]) {
             const latest = runs.filter((run) => run.name === name).sort((a, b) => b.id - a.id)[0];
             if (!latest) throw new Error(`Required check is missing: ${name}`);
             if (latest.status !== "completed" || latest.conclusion !== "success") {
@@ -96,6 +97,33 @@ jobs:
             }
             console.log(`Verified ${name}: ${latest.html_url}`);
           }
+          NODE
+          pulls_file="${RUNNER_TEMP}/bearing-merged-pulls.json"
+          pr_head_file="${RUNNER_TEMP}/bearing-pr-head.txt"
+          gh api --paginate --slurp \
+            "/repos/${GITHUB_REPOSITORY}/commits/${checked_out_sha}/pulls?per_page=100" \
+            > "$pulls_file"
+          CHECKED_OUT_SHA="$checked_out_sha" PULLS_FILE="$pulls_file" PR_HEAD_FILE="$pr_head_file" node <<'NODE'
+          const { readFileSync, writeFileSync } = require("node:fs");
+          const pulls = JSON.parse(readFileSync(process.env.PULLS_FILE, "utf8")).flat();
+          const matches = pulls.filter((pull) => pull.merged_at && pull.merge_commit_sha === process.env.CHECKED_OUT_SHA);
+          if (matches.length !== 1) throw new Error(`Expected one merged PR for the main SHA; found ${matches.length}`);
+          writeFileSync(process.env.PR_HEAD_FILE, matches[0].head.sha);
+          NODE
+          pr_head_sha="$(<"$pr_head_file")"
+          codeql_checks_file="${RUNNER_TEMP}/bearing-codeql-check-runs.json"
+          gh api --paginate --slurp \
+            "/repos/${GITHUB_REPOSITORY}/commits/${pr_head_sha}/check-runs?filter=latest&per_page=100" \
+            > "$codeql_checks_file"
+          CHECKS_FILE="$codeql_checks_file" node <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const pages = JSON.parse(readFileSync(process.env.CHECKS_FILE, "utf8"));
+          const latest = pages.flatMap((page) => page.check_runs ?? []).filter((run) => run.name === "CodeQL").sort((a, b) => b.id - a.id)[0];
+          if (!latest) throw new Error("Required PR-head check is missing: CodeQL");
+          if (latest.status !== "completed" || latest.conclusion !== "success") {
+            throw new Error(`Required PR-head check is not successful: CodeQL (${latest.status}/${latest.conclusion ?? "none"})`);
+          }
+          console.log(`Verified PR-head CodeQL: ${latest.html_url}`);
           NODE
           alerts_file="${RUNNER_TEMP}/bearing-codeql-alerts.json"
           gh api --paginate --slurp \
