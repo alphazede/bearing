@@ -17,11 +17,20 @@ describe("Bearing Codex plugin contract", () => {
     expect(packageJson.author).toBe("William Rumph / AlphaZede");
     expect(packageJson.license).toBe("MIT OR Apache-2.0");
     expect(packageJson.files).toEqual(expect.arrayContaining([
-      ".codex-plugin/", "skills/", "LICENSE-MIT", "LICENSE-APACHE",
+      ".codex-plugin/", "skills/", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE",
     ]));
     expect(manifest.license).toBe(packageJson.license);
     expect(packageJson.files).not.toContain("commands/");
     await expect(read("../commands/bearing.toml")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("ships a private vulnerability-reporting policy", async () => {
+    const security = await read("../SECURITY.md");
+    expect(security).toContain("private vulnerability reporting");
+    expect(security).toContain("Do not open a public issue");
+    const readme = await read("../README.md");
+    expect(readme).toContain("[SECURITY.md](SECURITY.md)");
+    expect(readme).toContain("/security/advisories/new");
   });
 
   it("limits the skill to explicit planning-first launches", async () => {

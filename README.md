@@ -190,6 +190,14 @@ AlphaZede's underlying workflow skills, planning conventions, and bounded-agent 
 - SkillsBench execution, hosted CI, package publication, deployment, and owner-recorded video evidence are unverified or pending.
 - Optional RAG-assisted context, external config discovery, OAuth/setup flows, alias migrations, and skill lifecycle changes are not enabled by this package's browser flow.
 
+## Security
+
+Report suspected vulnerabilities through GitHub's [private vulnerability
+reporting form](https://github.com/alphazede/bearing/security/advisories/new),
+not a public issue. See [SECURITY.md](SECURITY.md) for supported versions,
+report contents, response targets, disclosure, and safe-harbor terms. Use
+[public issues](https://github.com/alphazede/bearing/issues) for ordinary bugs.
+
 ## License
 
 Licensed, at your option, under either the [Apache License 2.0](LICENSE-APACHE)
