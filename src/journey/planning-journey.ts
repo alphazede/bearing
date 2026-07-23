@@ -4,6 +4,7 @@ import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
 import { BUILTIN_ROUTES, createAgentAdapter, type ProcessActivity, type ProcessRunner, type RouteDescriptor } from "../adapters/adapters.js";
 import type { ResolvedRun, Selection } from "../profile/profile.js";
+import { createFocusContext, validateFocusCompletion, type CommandEvidence, type FocusContext } from "./focus-mode.js";
 import { setBearingsWorkspace } from "./repository-map.js";
 
 export type JourneyStage = "set-bearings" | "gather-supplies" | "map-route" | "draft-implementation" | "execute-explorer" | "execute-expedition" | "review";
@@ -19,9 +20,10 @@ export interface JourneyRequest {
   readonly gatherMode?: "questions" | "apply";
   readonly planDirectory?: string;
   readonly reviewPrompt?: string;
+  readonly gateFailureFingerprint?: string;
   readonly providerSessionId?: string;
 }
-export type JourneyFailureCode = "input_invalid" | "selection_mismatch" | "crewmate_unavailable" | "adapter_failed" | "cancelled" | "interrupted" | "token_budget" | "result_missing" | "result_malformed" | "artifact_invalid";
+export type JourneyFailureCode = "input_invalid" | "selection_mismatch" | "crewmate_unavailable" | "adapter_failed" | "cancelled" | "interrupted" | "token_budget" | "result_missing" | "result_malformed" | "artifact_invalid" | "focus_invalid" | "completion_invalid";
 export interface PlanningAssignment {
   readonly slice: string;
   readonly role: string;
@@ -109,7 +111,9 @@ function validRequest(request: JourneyRequest): boolean {
   if (!(request.stage in STAGE_SKILLS) || !Array.isArray(request.priorOwnerQa) || request.priorOwnerQa.length > MAX_QA) return false;
   return (request.gatherMode === undefined || request.stage === "gather-supplies") &&
     (request.providerSessionId === undefined || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.providerSessionId)) &&
-    (request.reviewPrompt === undefined || text(request.reviewPrompt)) && request.priorOwnerQa.every((entry) => typeof entry === "object" && entry !== null && text(entry.question) && text(entry.answer));
+    (request.reviewPrompt === undefined || text(request.reviewPrompt)) &&
+    (request.gateFailureFingerprint === undefined || text(request.gateFailureFingerprint, 512)) &&
+    request.priorOwnerQa.every((entry) => typeof entry === "object" && entry !== null && text(entry.question) && text(entry.answer));
 }
 
 const MAX_PACKAGED_SKILL_BYTES = 64 * 1024;
@@ -122,7 +126,7 @@ async function packagedSkills(stage: JourneyStage): Promise<string> {
   return ["Packaged Bearing skills (authoritative workflow instructions for this stage):", ...sources].join("\n\n");
 }
 
-function prompt(request: JourneyRequest, planDirectory: string | undefined, skillInstructions: string): string {
+function prompt(request: JourneyRequest, planDirectory: string | undefined, skillInstructions: string, focus?: FocusContext): string {
   const gatheringQuestions = request.stage === "gather-supplies" && request.gatherMode === "questions";
   const availableQuestions = Math.min(MAX_GATHER_QUESTIONS, Math.max(0, MAX_QA - request.priorOwnerQa.length));
   const grilling = gatheringQuestions
@@ -164,16 +168,22 @@ function prompt(request: JourneyRequest, planDirectory: string | undefined, skil
     `Validated plan directory: ${planDirectory ? JSON.stringify(planDirectory) : "none"}`,
     ...(planDirectory && request.stage !== "set-bearings" ? ["Reuse current session context and perform only bounded live verification when necessary. Do not require or create plan-local prompt artifacts."] : []),
     ...(request.reviewPrompt ? [`Review guidance: ${JSON.stringify(request.reviewPrompt)}`] : []),
+    ...(focus ? [
+      `BEARING_FOCUS ${JSON.stringify(focus.envelope)}`,
+      "Bearing Focus mode is active. Act only on acceptance, required evidence, or the current blocker. Preserve this envelope when delegating a bounded subset to Crewmates. Runtime validation will reject out-of-scope paths, incomplete receipts, missing command evidence, and false completion even if provider hooks are unavailable.",
+    ] : []),
     "Do not claim completion without actual work and evidence in this agent receipt. Do not invent artifacts, routes, sessions, or authority.",
     gatheringQuestions
       ? 'End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"questions","questions":["first question","second question"],"nextStageEstimate":{"stage":"gather-supplies","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific workload basis"}}. Replace the uppercase placeholders with your honest integer estimate; do not copy a canned duration. Use an empty array when no owner decisions are needed. The optional estimate covers the remaining Gather Supplies apply/write step; omit it when you cannot honestly estimate it.'
       : request.stage === "gather-supplies" && request.gatherMode === "apply"
         ? 'End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["relative/existing/path"],"nextStageEstimate":{"stage":"map-route","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific full-phase workload basis"}}. Replace the uppercase placeholders with your honest integer estimate; do not copy a canned duration. The optional estimate covers the complete Map the Route phase; omit it when you cannot honestly estimate it.'
-        : `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question","nextStageEstimate":{"stage":"${request.stage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific remaining-work basis"}} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["relative/existing/path"],"nextStageEstimate":{"stage":"${nextActionStage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific full-phase workload basis"}}. Replace the uppercase placeholders with honest integer estimates; do not copy a canned duration. A question estimate covers all work remaining in the same stage after the answer. Omit nextStageEstimate when you cannot honestly estimate it.`,
+        : focus
+          ? `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question"} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["every relative path changed during this invocation"],"evidence":[{"commandId":"CMD-ID","status":"passed","summary":"bounded observed result"}]}. On success include every command ID from BEARING_FOCUS exactly once. Never mark failed, skipped, missing, unknown, or duplicate evidence as passed.`
+          : `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question","nextStageEstimate":{"stage":"${request.stage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific remaining-work basis"}} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["relative/existing/path"],"nextStageEstimate":{"stage":"${nextActionStage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific full-phase workload basis"}}. Replace the uppercase placeholders with honest integer estimates; do not copy a canned duration. A question estimate covers all work remaining in the same stage after the answer. Omit nextStageEstimate when you cannot honestly estimate it.`,
   ].join("\n");
 }
 
-type Envelope = { readonly kind: "question"; readonly question: string; readonly nextStageEstimate?: NextStageEstimate } | { readonly kind: "questions"; readonly questions: readonly string[]; readonly nextStageEstimate?: NextStageEstimate } | { readonly kind: "action"; readonly summary: string; readonly artifacts: readonly string[]; readonly nextStageEstimate?: NextStageEstimate };
+type Envelope = { readonly kind: "question"; readonly question: string; readonly nextStageEstimate?: NextStageEstimate } | { readonly kind: "questions"; readonly questions: readonly string[]; readonly nextStageEstimate?: NextStageEstimate } | { readonly kind: "action"; readonly summary: string; readonly artifacts: readonly string[]; readonly evidence?: readonly CommandEvidence[]; readonly nextStageEstimate?: NextStageEstimate };
 function estimate(value: unknown): value is NextStageEstimate {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
@@ -189,6 +199,15 @@ function optionalEstimate(value: unknown): { readonly value?: NextStageEstimate;
   const basis = typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>).basis : undefined;
   return { dropped: typeof basis === "string" && basis.length > MAX_ESTIMATE_BASIS ? "basis_too_long" : "invalid" };
 }
+function commandEvidence(value: unknown): value is readonly CommandEvidence[] {
+  return Array.isArray(value) && value.length <= 128 && value.every((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+    const item = entry as Record<string, unknown>;
+    return Object.keys(item).length === 3 && Object.keys(item).every((key) => ["commandId", "status", "summary"].includes(key)) &&
+      typeof item.commandId === "string" && /^(?:CMD|PROC)-[A-Z0-9][A-Z0-9.-]*$/.test(item.commandId) &&
+      (item.status === "passed" || item.status === "failed") && text(item.summary, 512);
+  });
+}
 function envelope(value: string, maxQuestions = MAX_QA - 1): ParsedEnvelope | "missing" | "malformed" {
   const line = value.trim().split(/\r?\n/).at(-1) ?? "";
   const prefix = "BEARING_RESULT ";
@@ -202,7 +221,7 @@ function envelope(value: string, maxQuestions = MAX_QA - 1): ParsedEnvelope | "m
     const next = optionalEstimate(record.nextStageEstimate);
     if (record.kind === "question" && Object.keys(record).every((key) => ["kind", "question", "nextStageEstimate"].includes(key)) && [2, 3].includes(Object.keys(record).length) && text(record.question)) return { receipt: { kind: "question", question: record.question, ...(next.value ? { nextStageEstimate: next.value } : {}) }, ...(next.dropped ? { droppedEstimate: next.dropped } : {}) };
     if (record.kind === "questions" && Object.keys(record).every((key) => ["kind", "questions", "nextStageEstimate"].includes(key)) && [2, 3].includes(Object.keys(record).length) && Array.isArray(record.questions) && record.questions.length <= maxQuestions && record.questions.every((question) => text(question)) && new Set(record.questions).size === record.questions.length) return { receipt: { kind: "questions", questions: record.questions as string[], ...(next.value ? { nextStageEstimate: next.value } : {}) }, ...(next.dropped ? { droppedEstimate: next.dropped } : {}) };
-    if (record.kind === "action" && Object.keys(record).every((key) => ["kind", "summary", "artifacts", "nextStageEstimate"].includes(key)) && [3, 4].includes(Object.keys(record).length) && text(record.summary) && Array.isArray(record.artifacts) && record.artifacts.length > 0 && record.artifacts.length <= MAX_ARTIFACTS && record.artifacts.every(pathText) && new Set(record.artifacts).size === record.artifacts.length) return { receipt: { kind: "action", summary: record.summary, artifacts: record.artifacts as string[], ...(next.value ? { nextStageEstimate: next.value } : {}) }, ...(next.dropped ? { droppedEstimate: next.dropped } : {}) };
+    if (record.kind === "action" && Object.keys(record).every((key) => ["kind", "summary", "artifacts", "evidence", "nextStageEstimate"].includes(key)) && [3, 4, 5].includes(Object.keys(record).length) && text(record.summary) && Array.isArray(record.artifacts) && record.artifacts.length > 0 && record.artifacts.length <= MAX_ARTIFACTS && record.artifacts.every(pathText) && new Set(record.artifacts).size === record.artifacts.length && (record.evidence === undefined || commandEvidence(record.evidence))) return { receipt: { kind: "action", summary: record.summary, artifacts: record.artifacts as string[], ...(record.evidence ? { evidence: record.evidence } : {}), ...(next.value ? { nextStageEstimate: next.value } : {}) }, ...(next.dropped ? { droppedEstimate: next.dropped } : {}) };
     return "malformed";
   } catch { return "malformed"; }
 }
@@ -397,7 +416,7 @@ const FINAL_QA_COMPLETE_PREFIX = '<section id="bearing-final-qa" data-status="co
 const FINAL_QA_COMPLETE_MIDDLE = "</p><p>Validation evidence: ";
 const FINAL_QA_COMPLETE_SUFFIX = "</p></section>";
 
-function renderPlanningReview(sources: readonly [string, string][]): string {
+export function renderPlanningReview(sources: readonly [string, string][]): string {
   const planningFlow = '<figure><div class="flow" role="img" aria-label="Planning flow from plan specification through final QA"><span>Plan specification</span><b>→</b><span>Design</span><b>→</b><span>SEIT test map</span><b>→</b><span>Implementation</span><b>→</b><span>Final QA</span></div><figcaption>Planning flow</figcaption><p class="text-equivalent">Text equivalent: acceptance and risks drive design contracts; SEIT maps those contracts to proof; implementation slices reference the map; final QA records actual evidence.</p></figure>';
   const traceFlow = '<figure><div class="flow" role="img" aria-label="Traceability from requirements to execution evidence"><span>AC / RISK</span><b>↔</b><span>DES / CONTRACT</span><b>↔</b><span>SEIT / CMD</span><b>↔</b><span>Slice manifest</span></div><figcaption>Traceability map</figcaption><p class="text-equivalent">Text equivalent: stable IDs connect each requirement or risk to its design boundary, positive and negative test cases, command, evidence, and bounded execution slice.</p></figure>';
   return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bearing planning review</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:1100px;margin:auto;padding:2rem;color:#17202a;background:#f7f8fa}main{background:#ffffff;padding:2rem;border:1px solid #67788a;border-radius:12px}nav{display:flex;gap:1rem;flex-wrap:wrap}figure{margin:2rem 0;padding:1rem;border:1px solid #a8b2bd;border-radius:8px}.flow{display:flex;align-items:center;gap:.65rem;flex-wrap:wrap}.flow span{padding:.55rem .8rem;background:#eef1f4;border-radius:6px}figcaption,summary{font-weight:700}.text-equivalent{margin-bottom:0}details{margin:1rem 0}summary{cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef1f4;padding:1rem;border-radius:8px}</style></head><body><main><h1>Bearing planning review</h1><p>This deterministic view is generated from the four current planning sources.</p>${sourceNavigation(sources)}<section aria-labelledby="bearing-diagrams"><h2 id="bearing-diagrams">Plan maps</h2>${planningFlow}${traceFlow}</section>${sourceSection(sources)}${FINAL_QA_PENDING}</main></body></html>\n`;
@@ -412,7 +431,7 @@ function validFinalQaSection(section: string): boolean {
   return planned.trim().length > 0 && validation.trim().length > 0 && !planned.includes("<") && !planned.includes(">") && !validation.includes("<") && !validation.includes(">");
 }
 
-async function executionReviewValid(root: string, planDirectory: string | undefined): Promise<boolean> {
+export async function executionReviewValid(root: string, planDirectory: string | undefined): Promise<boolean> {
   if (!planDirectory) return false;
   const directory = resolve(root, planDirectory), names = await readdir(directory);
   const planName = names.find((name) => name === "plan-spec.md" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-map\.md$/.test(name));
@@ -504,6 +523,7 @@ export class JourneyService {
   private readonly cancelled = new Set<string>();
   private readonly activity = new Map<string, { stage: JourneyStage; nextSequence: number; trail: JourneyActivity[] }>();
   private readonly providerSessions = new Map<string, string>();
+  private readonly focusContexts = new Map<string, FocusContext>();
   constructor(private readonly runner: ProcessRunner) {}
 
   cancel(runId: string): void { this.cancelled.add(runId); const processRunId = this.active.get(runId); if (processRunId) void this.runner.cancel?.(processRunId); }
@@ -516,6 +536,13 @@ export class JourneyService {
 
   private providerSessionKey(repositoryPath: string, runId: string, selection: Selection): string {
     return JSON.stringify([repositoryPath, runId, selection.provider, selection.model, selection.reasoning]);
+  }
+
+  private focusKey(repositoryPath: string, runId: string): string { return JSON.stringify([repositoryPath, runId]); }
+
+  private sameFocusContract(left: FocusContext, right: FocusContext): boolean {
+    const stable = (focus: FocusContext) => ({ ...focus.envelope, currentBlocker: "none", gateFailureFingerprint: "none", reviewPath: focus.reviewPath });
+    return JSON.stringify(stable(left)) === JSON.stringify(stable(right));
   }
 
   private beginStage(runId: string, stage: JourneyStage): void {
@@ -560,8 +587,33 @@ export class JourneyService {
         return { status: "action", summary: workspace.resumed ? "Bearings resumed locally." : "Bearings set locally.", artifacts: workspace.artifacts, tokens: 0 };
       } catch { return { status: "failure", code: "artifact_invalid", tokens: 0 }; }
     }
+    const executionStage = request.stage === "execute-explorer" || request.stage === "execute-expedition";
+    let focus: FocusContext | undefined;
+    let focusKey: string | undefined;
+    if (executionStage) {
+      if (!planDirectory) return { status: "failure", code: "focus_invalid", tokens: 0 };
+      const candidate = await createFocusContext({
+        root: repositoryPath,
+        planDirectory,
+        role: request.stage === "execute-expedition" ? "navigator" : "explorer",
+        objective: request.workGoal,
+        ...(request.reviewPrompt ? { currentBlocker: request.reviewPrompt } : {}),
+        ...(request.gateFailureFingerprint ? { gateFailureFingerprint: request.gateFailureFingerprint } : {}),
+      }).catch(() => undefined);
+      focusKey = this.focusKey(repositoryPath, request.runId);
+      const original = this.focusContexts.get(focusKey);
+      if (!candidate || original && !this.sameFocusContract(original, candidate)) {
+        this.recordActivity(request.runId, activityStage, { kind: "focus.rejected", status: "invalid" });
+        return { status: "failure", code: "focus_invalid", tokens: 0 };
+      }
+      focus = original
+        ? { ...original, envelope: { ...original.envelope, currentBlocker: candidate.envelope.currentBlocker, gateFailureFingerprint: candidate.envelope.gateFailureFingerprint } }
+        : candidate;
+      this.focusContexts.set(focusKey, focus);
+      this.recordActivity(request.runId, activityStage, { kind: "focus.ready", status: "validated" });
+    }
     let taskPrompt: string;
-    try { taskPrompt = prompt(request, planDirectory, await packagedSkills(request.stage)); }
+    try { taskPrompt = prompt(request, planDirectory, await packagedSkills(request.stage), focus); }
     catch { return { status: "failure", code: "adapter_failed", tokens: 0 }; }
     let tokens = 0;
     let events: unknown;
@@ -589,7 +641,7 @@ export class JourneyService {
       const journeySession = request.stage !== "review";
       const providerSessionKey = this.providerSessionKey(repositoryPath, request.runId, request.selection);
       const continuation = journeySession ? request.providerSessionId ?? this.providerSessions.get(providerSessionKey) : undefined;
-      try { receipt = await adapter.execute({ runId: processRunId, sessionScope: request.runId, repositoryPath, role: { ...projected, sessionId: journeySession ? projected.sessionId : null, authority: { ...projected.authority, write: questionDiscovery ? false : projected.authority.write, network: request.selection.provider === "agy", externalAction: false }, toolAllow: questionDiscovery ? projected.toolAllow.filter((tool) => !/write|edit/i.test(tool)) : projected.toolAllow }, task: { prompt: taskPrompt }, onActivity: (activity) => this.recordActivity(request.runId, activityStage, activity), ...(continuation ? { providerSessionId: continuation } : {}), ...(request.stage === "execute-expedition" ? { allowSubagents: true } : {}) }); }
+      try { receipt = await adapter.execute({ runId: processRunId, sessionScope: request.runId, repositoryPath, role: { ...projected, sessionId: journeySession ? projected.sessionId : null, authority: { ...projected.authority, write: questionDiscovery ? false : projected.authority.write, network: request.selection.provider === "agy", externalAction: false }, toolAllow: questionDiscovery ? projected.toolAllow.filter((tool) => !/write|edit/i.test(tool)) : projected.toolAllow }, task: { prompt: taskPrompt }, onActivity: (activity) => this.recordActivity(request.runId, activityStage, activity), ...(continuation ? { providerSessionId: continuation } : {}), ...(executionStage ? { focusMode: true } : {}), ...(request.stage === "execute-expedition" ? { allowSubagents: true } : {}) }); }
       catch { return { status: "failure", code: "adapter_failed", tokens: 0 }; }
       if (receipt.status !== "completed") return { status: "failure", code: this.cancelled.has(request.runId) && (receipt.status === "blocked_reconcile" || receipt.failure === "unknown_side_effect") ? "interrupted" : receipt.failure === "token_budget" ? "token_budget" : receipt.failure === "cancelled" ? "cancelled" : "adapter_failed", tokens: receipt.usage.tokens };
       if (journeySession && receipt.providerSessionId) this.providerSessions.set(providerSessionKey, receipt.providerSessionId);
@@ -633,11 +685,19 @@ export class JourneyService {
     }
     if (!stageArtifactsValid(request.stage, parsed.artifacts, planDirectory)) return { status: "failure", code: "artifact_invalid", tokens };
     const review = request.stage === "draft-implementation" ? await planningReview(repositoryPath, planDirectory, request.selection).catch(() => undefined) : undefined;
-    const executionStage = request.stage === "execute-explorer" || request.stage === "execute-expedition";
     const finalReviewValid = executionStage ? await executionReviewValid(repositoryPath, planDirectory).catch(() => false) : true;
     if (this.cancelled.has(request.runId)) return { status: "failure", code: "cancelled", tokens };
     if (request.stage === "draft-implementation" && !review) return { status: "failure", code: "artifact_invalid", tokens };
     if (!finalReviewValid) return { status: "failure", code: "artifact_invalid", tokens };
+    if (executionStage && focus) {
+      const completion = await validateFocusCompletion(focus, repositoryPath, parsed.artifacts, parsed.evidence ?? []).catch(() => ({ ok: false as const, reason: "git_state" as const }));
+      if (!completion.ok) {
+        this.recordActivity(request.runId, activityStage, { kind: "focus.rejected", status: completion.reason });
+        return { status: "failure", code: "completion_invalid", tokens };
+      }
+      this.recordActivity(request.runId, activityStage, { kind: "focus.completed", status: "validated" });
+      this.focusContexts.delete(focusKey!);
+    } else if (parsed.evidence) return { status: "failure", code: "result_malformed", tokens };
     const artifacts = request.stage === "draft-implementation" && planDirectory ? [...new Set([...parsed.artifacts, posix.join(planDirectory, "review.html")])] : parsed.artifacts;
     return { status: "action", summary: parsed.summary, artifacts, tokens, ...(review ? { planningReview: review } : {}), ...(nextStageEstimate ? { nextStageEstimate } : {}) };
   }

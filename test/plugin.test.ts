@@ -1,8 +1,12 @@
 import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const read = (path: string) => readFile(new URL(path, import.meta.url), "utf8");
 const prose = (value: string) => value.replace(/\s+/g, " ").trim();
+const exec = promisify(execFile);
 
 describe("Bearing plugin contract", () => {
   it("declares matching Codex and Claude Code plugins", async () => {
@@ -12,14 +16,16 @@ describe("Bearing plugin contract", () => {
     expect(codexManifest).toMatchObject({
       name: "bearing",
       skills: "./plugin-skills/",
+      hooks: "./hooks/claude-codex-hooks.json",
       author: { name: "William Rumph / AlphaZede" },
       interface: { developerName: "William Rumph / AlphaZede" },
     });
-    expect(codexManifest.version).toBe("0.1.1");
+    expect(codexManifest.version).toBe("0.1.2");
     expect(claudeManifest).toMatchObject({
       name: "bearing",
-      version: "0.1.1",
+      version: "0.1.2",
       skills: "./plugin-skills/",
+      hooks: "./hooks/claude-codex-hooks.json",
       author: { name: "William Rumph / AlphaZede" },
     });
     expect(marketplace).toMatchObject({
@@ -30,7 +36,7 @@ describe("Bearing plugin contract", () => {
     expect(packageJson.author).toBe("William Rumph / AlphaZede");
     expect(packageJson.license).toBe("MIT OR Apache-2.0");
     expect(packageJson.files).toEqual(expect.arrayContaining([
-      ".claude-plugin/", ".codex-plugin/", "plugin-skills/", "skills/", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE",
+      ".claude-plugin/", ".codex-plugin/", "plugin-skills/", "skills/", "hooks/", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE",
     ]));
     expect(codexManifest.license).toBe(packageJson.license);
     expect(claudeManifest.license).toBe(packageJson.license);
@@ -55,6 +61,7 @@ describe("Bearing plugin contract", () => {
     expect(skillProse).toContain("keep PATH first");
     expect(skillProse).toContain("`../../dist/cli.js` relative to this `SKILL.md` directory");
     expect(skillProse).toContain("Never resolve the fallback from the current or target repository");
+    expect(skillProse).toContain("never reuse a listener from another or stale Bearing installation");
     expect(skillProse).toContain("filesystem-wide plugin discovery");
     expect(skillProse).toContain("with `start --detach`");
     expect(skillProse).not.toContain("start --no-open");
@@ -88,6 +95,38 @@ describe("Bearing plugin contract", () => {
     }
   });
 
+  it("exposes guarded direct roles without exposing raw workflow skills", async () => {
+    for (const name of ["explorer", "navigator", "crewmate"]) {
+      const skill = await read(`../plugin-skills/${name}/SKILL.md`);
+      const skillProse = prose(skill);
+      expect(skill).toMatch(new RegExp(`^---\\nname: ${name}\\ndescription: [^\\n]+\\n---\\n`));
+      expect(skillProse).toContain("bearing focus begin --request");
+      expect(skillProse).toContain("bearing focus validate --run");
+      expect(skillProse).toContain(`../../skills/${name}/SKILL.md`);
+      expect(skillProse).toContain("Do not claim completion unless it returns `ok: true`");
+    }
+    const crewmate = prose(await read("../plugin-skills/crewmate/SKILL.md"));
+    expect(crewmate).toContain("current owner request explicitly authorizes");
+    expect(crewmate).toContain("Never edit Focus state, infer external authority");
+  });
+
+  it("keeps Focus hooks silent outside Bearing and advisory inside it", async () => {
+    const hook = fileURLToPath(new URL("../hooks/focus-reminder.cjs", import.meta.url));
+    const disabled = await exec(process.execPath, [hook, "UserPromptSubmit"], { env: { PATH: process.env.PATH ?? "" } });
+    expect(disabled.stdout).toBe("");
+    const claude = await exec(process.execPath, [hook, "UserPromptSubmit"], { env: { PATH: process.env.PATH ?? "", BEARING_FOCUS: "1" } });
+    expect(claude.stdout).toContain("Bearing Focus mode is active");
+    const codex = await exec(process.execPath, [hook, "SubagentStart"], { env: { PATH: process.env.PATH ?? "", BEARING_FOCUS: "1", PLUGIN_DATA: "/tmp/bearing-hook-test" } });
+    expect(JSON.parse(codex.stdout)).toMatchObject({ systemMessage: "BEARING:FOCUS", hookSpecificOutput: { hookEventName: "SubagentStart" } });
+  });
+
+  it("tracks the built launcher required by fresh Git plugin installs", async () => {
+    const repository = new URL("..", import.meta.url);
+    const { stdout } = await exec("git", ["ls-files", "--error-unmatch", "dist/cli.js"], { cwd: repository });
+    expect(stdout.trim()).toBe("dist/cli.js");
+    await expect(read("../dist/cli.js")).resolves.toContain("#!/usr/bin/env node");
+  });
+
   it("documents both plugin entry points and packaged skill customization", async () => {
     const readme = await read("../README.md");
     const readmeProse = prose(readme);
@@ -99,7 +138,9 @@ describe("Bearing plugin contract", () => {
     expect(readmeProse).toContain("public npm package is `@alphazede/bearing`");
     expect(readmeProse).toContain("reads the relevant packaged `SKILL.md` files and embeds them");
     expect(readmeProse).toContain("do not need AlphaZede's private skill installation");
-    expect(readmeProse).toContain("Only the launcher in `plugin-skills/` is exposed");
+    expect(readmeProse).toContain("guarded Explorer, Navigator, and Crewmate wrappers");
+    expect(readmeProse).toContain("The hook is optional");
+    expect(readmeProse).toContain("one-use loopback guard process");
     expect(readmeProse).toContain("security boundaries, artifact validation, approval checks, and deterministic `review.html` generation");
     expect(readmeProse).toContain("not launch on SessionStart");
     expect(readmeProse).toContain("After an explicit invocation");

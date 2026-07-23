@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LauncherDeps } from "../src/cli";
-import { defaultOpenBrowser, isDirectInvocation, parseStartArgs, run } from "../src/cli";
+import { defaultOpenBrowser, isDirectInvocation, parseFocusArgs, parseStartArgs, run } from "../src/cli";
 
 function newCtx() {
   const out: string[] = [];
@@ -119,7 +119,35 @@ describe("parseStartArgs", () => {
   });
 });
 
+describe("parseFocusArgs", () => {
+  it("accepts only bounded begin and validate forms", () => {
+    expect(parseFocusArgs(["focus", "begin", "--request", ".bearing/focus/request.json"])).toEqual({ ok: true, action: "begin", requestPath: ".bearing/focus/request.json" });
+    expect(parseFocusArgs(["focus", "validate", "--run", "019f8d4e-a637-7e71-8c76-af9d7ec91adf", "--receipt", ".bearing/focus/receipt.json"])).toEqual({ ok: true, action: "validate", runId: "019f8d4e-a637-7e71-8c76-af9d7ec91adf", receiptPath: ".bearing/focus/receipt.json" });
+    for (const args of [
+      ["focus", "begin"],
+      ["focus", "begin", "--request", "a", "--request", "b"],
+      ["focus", "validate", "--receipt", "a"],
+      ["focus", "delete", "--run", "x"],
+    ]) expect(parseFocusArgs(args)).toEqual({ ok: false });
+  });
+});
+
 describe("run launcher", () => {
+  it("launches standalone Focus state in the detached guard boundary", async () => {
+    const ctx = newCtx();
+    const calls: unknown[] = [];
+    await run(["focus", "begin", "--request", ".bearing/focus/request.json"], {
+      ...ctx.d,
+      cwd: "/tmp/focus-repository",
+      launchFocusGuard: async (requestPath, cwd) => {
+        calls.push([requestPath, cwd]);
+        return { ok: true, runId: `v1.12345.${"a".repeat(64)}`, envelope: { role: "crewmate" } };
+      },
+    });
+    expect(calls).toEqual([[".bearing/focus/request.json", "/tmp/focus-repository"]]);
+    expect(JSON.parse(ctx.out.join(""))).toMatchObject({ ok: true, runId: `v1.12345.${"a".repeat(64)}` });
+  });
+
   it("detaches through the portable child launcher and prints its URL", async () => {
     const ctx = newCtx();
     const launched: string[][] = [];

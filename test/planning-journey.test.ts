@@ -1,12 +1,15 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ProcessInvocation, ProcessResult, ProcessRunner } from "../src/adapters/adapters.js";
-import { JourneyService, type JourneyRequest, type JourneyStage } from "../src/journey/planning-journey.js";
+import { JourneyService, renderPlanningReview, type JourneyRequest, type JourneyStage } from "../src/journey/planning-journey.js";
 import { parseAgentProfile, resolveRun, type ResolvedRun, type Selection } from "../src/profile/profile.js";
 
 const roots: string[] = [];
+const exec = promisify(execFile);
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 class StubRunner implements ProcessRunner {
@@ -33,6 +36,7 @@ function resolved(selection: Selection): ResolvedRun {
 
 async function request(overrides: Partial<JourneyRequest> = {}): Promise<JourneyRequest> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bearing-journey-"))); roots.push(root);
+  await exec("git", ["init", "-q"], { cwd: root });
   const selection = { provider: "codex", model: "*", reasoning: "medium" };
   return { selection, run: resolved(selection), repositoryPath: root, runId: "journey-1", workGoal: "Add bounded account import", stage: "gather-supplies", priorOwnerQa: [{ question: "CSV or JSON?", answer: "CSV" }], ...overrides };
 }
@@ -269,6 +273,66 @@ describe("JourneyService", () => {
     expect(service.providerSessionId(input.repositoryPath, input.runId, input.selection)).toBe(thread);
   });
 
+  it("reinjects Focus on provider resume and carries the repair blocker fingerprint", async () => {
+    const thread = "019f8d4e-a637-7e71-8c76-af9d7ec91adf";
+    const question = completed('BEARING_RESULT {"kind":"question","question":"Continue?"}');
+    const runner = new QueueRunner([{ ...question, providerSessionId: thread }, question]);
+    const service = new JourneyService(runner);
+    const input = await request({ stage: "execute-explorer", planDirectory: "docs/plans/import" });
+    await writePlanningPackage(input.repositoryPath);
+    expect((await service.execute(input)).status).toBe("question");
+    expect((await service.execute({ ...input, providerSessionId: thread, reviewPrompt: "Repair only the missing receipt.", gateFailureFingerprint: "execute-explorer:completion_invalid:plan" })).status).toBe("question");
+    expect(runner.calls).toHaveLength(2);
+    for (const call of runner.calls) {
+      expect(call.stdin).toContain("BEARING_FOCUS");
+      expect(call.stdin).toContain("Do not perform unrelated work.");
+      expect(call.environment).toEqual({ BEARING_FOCUS: "1" });
+    }
+    expect(runner.calls[1].args).toEqual(expect.arrayContaining(["exec", "resume", thread]));
+    expect(runner.calls[1].stdin).toContain('\"currentBlocker\":\"Repair only the missing receipt.\"');
+    expect(runner.calls[1].stdin).toContain('\"gateFailureFingerprint\":\"execute-explorer:completion_invalid:plan\"');
+  });
+
+  it("preserves the original Focus baseline across a question and rejects the earlier undeclared edit", async () => {
+    const input = await request({ stage: "execute-explorer", planDirectory: "docs/plans/import" });
+    await writePlanningPackage(input.repositoryPath);
+    const finalReview = renderPlanningReview([["plan-spec.md", planFixture], ["design.md", designFixture], ["seit.md", seitFixture], ["implementation.md", implementationFixture]])
+      .replace('<section id="bearing-final-qa" data-status="pending"><h2>Actual implementation and QA</h2><p>Pending implementation and validation.</p></section>', '<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: src/import.ts changed exactly as planned.</p><p>Validation evidence: CMD-UNIT passed.</p></section>');
+    let call = 0;
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      run: async () => {
+        call += 1;
+        if (call === 1) {
+          await writeFile(join(input.repositoryPath, "notes.txt"), "undeclared edit before question\n");
+          return completed('BEARING_RESULT {"kind":"question","question":"Continue?"}');
+        }
+        await mkdir(join(input.repositoryPath, "src"), { recursive: true });
+        await Promise.all([
+          writeFile(join(input.repositoryPath, "src/import.ts"), "export const imported = true;\n"),
+          writeFile(join(input.repositoryPath, "docs/plans/import/review.html"), finalReview),
+        ]);
+        return completed(`BEARING_RESULT ${JSON.stringify({ kind: "action", summary: "Import complete.", artifacts: ["notes.txt", "src/import.ts", "docs/plans/import/review.html"], evidence: [{ commandId: "CMD-UNIT", status: "passed", summary: "focused tests passed" }] })}`);
+      },
+    };
+    const service = new JourneyService(runner);
+    expect((await service.execute(input)).status).toBe("question");
+    expect(await service.execute(input)).toEqual({ status: "failure", code: "completion_invalid", tokens: 5 });
+  });
+
+  it("rejects a resumed execution when its approved Focus sources disappear", async () => {
+    const thread = "019f8d4e-a637-7e71-8c76-af9d7ec91adf";
+    const question = completed('BEARING_RESULT {"kind":"question","question":"Continue?"}');
+    const runner = new QueueRunner([{ ...question, providerSessionId: thread }, question]);
+    const service = new JourneyService(runner);
+    const input = await request({ stage: "execute-explorer", planDirectory: "docs/plans/import" });
+    await writePlanningPackage(input.repositoryPath);
+    expect((await service.execute(input)).status).toBe("question");
+    await writeFile(join(input.repositoryPath, "docs/plans/import/implementation.md"), "# malformed\n");
+    expect(await service.execute({ ...input, providerSessionId: thread })).toEqual({ status: "failure", code: "focus_invalid", tokens: 0 });
+    expect(runner.calls).toHaveLength(1);
+  });
+
   it("accepts three bounded questions, rejects a fourth, and accepts no material questions", async () => {
     const longQuestions = Array.from({ length: 3 }, (_, index) => `${index}:`.padEnd(4095, "x") + "?");
     const runner = new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: longQuestions })}`));
@@ -293,7 +357,9 @@ describe("JourneyService", () => {
   it("enables Grok subagents for Expedition only", async () => {
     const selection = { provider: "grok", model: "grok-build", reasoning: "medium" };
     const expeditionRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Proceed with both lanes?"}'));
-    expect((await new JourneyService(expeditionRunner).execute(await request({ stage: "execute-expedition", selection, run: resolved(selection) }))).status).toBe("question");
+    const expedition = await request({ stage: "execute-expedition", selection, run: resolved(selection), planDirectory: "docs/plans/import" });
+    await writePlanningPackage(expedition.repositoryPath);
+    expect((await new JourneyService(expeditionRunner).execute(expedition)).status).toBe("question");
     expect(expeditionRunner.calls[0].args.slice(0, 2)).toEqual(["--allow-subagents", "--"]);
     expect(expeditionRunner.calls[0].args).not.toContain("--no-subagents");
     expect(expeditionRunner.calls[0].stdin).toContain('{"provider":"grok","model":"grok-build","reasoning":"medium"}');
@@ -302,7 +368,9 @@ describe("JourneyService", () => {
     expect(expeditionRunner.calls[0].stdin).toMatch(/Keep parallel lanes until the entire phase is integrated.*Never force-remove/);
 
     const preserveRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Proceed?"}'));
-    await new JourneyService(preserveRunner).execute(await request({ stage: "execute-explorer", priorOwnerQa: [{ question: "Cleanup merged worktrees", answer: "off" }] }));
+    const preserve = await request({ stage: "execute-explorer", planDirectory: "docs/plans/import", priorOwnerQa: [{ question: "Cleanup merged worktrees", answer: "off" }] });
+    await writePlanningPackage(preserve.repositoryPath);
+    await new JourneyService(preserveRunner).execute(preserve);
     expect(preserveRunner.calls[0].stdin).toContain("Preserve every temporary worktree and branch; the owner disabled automatic cleanup.");
 
     const normalRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Any constraints?"}'));
@@ -326,7 +394,10 @@ describe("JourneyService", () => {
     const skills = { "gather-supplies": ["gather-supplies"], "map-route": ["map-the-route"], "draft-implementation": ["map-the-route"], "execute-explorer": ["explorer", "crewmate", "surveyor"], "execute-expedition": ["navigator", "explorer", "crewmate", "surveyor"] } as const;
     for (const [stage, names] of Object.entries(skills) as [Exclude<JourneyStage, "review">, readonly string[]][]) {
       const runner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Continue?"}'));
-      expect((await new JourneyService(runner).execute(await request({ stage }))).status).toBe("question");
+      const execution = stage === "execute-explorer" || stage === "execute-expedition";
+      const input = await request({ stage, ...(execution ? { planDirectory: "docs/plans/import" } : {}) });
+      if (execution) await writePlanningPackage(input.repositoryPath);
+      expect((await new JourneyService(runner).execute(input)).status).toBe("question");
       for (const name of names) expect(runner.calls[0].stdin).toContain(`### ${name}\n---\nname: ${name}`);
       expect(runner.calls[0].stdin).not.toMatch(/\$(?:to-plan|grill-with-docs|design-driven-build|conductor-orchestrate|ultimate-loop|implementer|gate-review)\b/);
     }
@@ -427,15 +498,30 @@ describe("JourneyService", () => {
     const complete = '<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: README changed exactly as planned.</p><p>Validation evidence: focused checks passed.</p></section>';
     expect(baseline.match(/id="bearing-final-qa"/g)).toHaveLength(1);
     expect(baseline).toContain(pending);
-    await writeFile(join(draft.repositoryPath, "README.md"), "# Updated\n");
-    const artifacts = ["README.md", "docs/plans/import/review.html"];
+    const artifacts = ["src/import.ts", "docs/plans/import/review.html"];
+    const evidence = [{ commandId: "CMD-UNIT", status: "passed", summary: "focused checks passed" }];
     const execute = async (review: string, returnedArtifacts = artifacts) => {
-      await writeFile(reviewPath, review);
-      const runner = new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "action", summary: "Execution complete.", artifacts: returnedArtifacts })}`));
+      await mkdir(join(draft.repositoryPath, "src"), { recursive: true });
+      await Promise.all([
+        writeFile(reviewPath, baseline),
+        writeFile(join(draft.repositoryPath, "src/import.ts"), "export const imported = false;\n"),
+      ]);
+      const calls: ProcessInvocation[] = [];
+      const runner: ProcessRunner = {
+        executableAvailable: () => true,
+        run: async (invocation) => {
+          calls.push(invocation);
+          await Promise.all([
+            writeFile(reviewPath, review),
+            writeFile(join(draft.repositoryPath, "src/import.ts"), "export const imported = true;\n"),
+          ]);
+          return completed(`BEARING_RESULT ${JSON.stringify({ kind: "action", summary: "Execution complete.", artifacts: returnedArtifacts, evidence })}`);
+        },
+      };
       const result = await new JourneyService(runner).execute({ ...draft, stage: "execute-explorer" });
-      expect(runner.calls[0].stdin).toContain('<section id="bearing-final-qa" data-status="complete">');
-      expect(runner.calls[0].stdin).toContain('attribute-free `<p>` and use plain text only: no nested HTML, markup, `<`, or `>`');
-      expect(runner.calls[0].stdin).toContain("review.html and every actual changed artifact");
+      expect(calls[0].stdin).toContain('<section id="bearing-final-qa" data-status="complete">');
+      expect(calls[0].stdin).toContain('attribute-free `<p>` and use plain text only: no nested HTML, markup, `<`, or `>`');
+      expect(calls[0].stdin).toContain("review.html and every actual changed artifact");
       return result;
     };
 
@@ -824,7 +910,9 @@ describe("JourneyService", () => {
 
   it("reports adapter failure without claiming an action", async () => {
     const runner = new StubRunner({ exitCode: 1 });
-    expect(await new JourneyService(runner).execute(await request({ stage: "execute-explorer" }))).toEqual({ status: "failure", code: "adapter_failed", tokens: 0 });
+    const input = await request({ stage: "execute-explorer", planDirectory: "docs/plans/import" });
+    await writePlanningPackage(input.repositoryPath);
+    expect(await new JourneyService(runner).execute(input)).toEqual({ status: "failure", code: "adapter_failed", tokens: 0 });
   });
 
   it("reports token-budget failure distinctly for adapter and native review paths", async () => {

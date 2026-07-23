@@ -6,13 +6,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { NodeProcessRunner } from "./adapters/process-runner.js";
 import { REASONING_LEVELS } from "./onboarding/readiness.js";
 import type { RunOverrides } from "./profile/profile.js";
+import { beginStandaloneFocus, validateStandaloneFocus, type StandaloneFocusBegin } from "./journey/standalone-focus.js";
 import {
   LocalSessionService,
   createRequestHandler,
 } from "./server/local-session.js";
 
-const USAGE = "usage: bearing start [--detach] [--no-open] [safe shared overrides]\n";
+const USAGE = "usage: bearing start [--detach] [--no-open] [safe shared overrides]\n       bearing focus begin --request <relative-json>\n       bearing focus validate --run <opaque-run-id> --receipt <relative-json>\n";
 const DETACHED_CHILD = "BEARING_DETACHED_CHILD";
+const FOCUS_GUARD_CHILD = "BEARING_FOCUS_GUARD_CHILD";
 
 export interface Writer {
   write(s: string): boolean;
@@ -29,9 +31,28 @@ export interface LauncherDeps {
   launchDetached?: (args: string[]) => Promise<string>;
   /** Reports readiness from the persistent child to its parent process. */
   notifyReady?: (url: string) => void;
+  /** Repository root for guarded standalone focus commands; defaults to cwd. */
+  cwd?: string;
+  /** Launches the isolated in-memory Focus guard; injectable for tests. */
+  launchFocusGuard?: (requestPath: string, cwd: string) => Promise<StandaloneFocusBegin>;
 }
 
 export type ParseResult = { ok: true; detach: boolean; noOpen: boolean; overrides: RunOverrides } | { ok: false };
+export type FocusParseResult = { ok: true; action: "begin"; requestPath: string } | { ok: true; action: "validate"; runId: string; receiptPath: string } | { ok: false };
+
+export function parseFocusArgs(args: string[]): FocusParseResult {
+  if (args[0] !== "focus" || !["begin", "validate"].includes(args[1] ?? "")) return { ok: false };
+  const values = new Map<string, string>();
+  for (let index = 2; index < args.length; index += 1) {
+    const name = args[index];
+    const value = args[++index];
+    if (!/^--(?:request|run|receipt)$/.test(name) || !value || value.startsWith("--") || value.length > 4096 || values.has(name)) return { ok: false };
+    values.set(name, value);
+  }
+  if (args[1] === "begin" && values.size === 1 && values.has("--request")) return { ok: true, action: "begin", requestPath: values.get("--request")! };
+  if (args[1] === "validate" && values.size === 2 && values.has("--run") && values.has("--receipt")) return { ok: true, action: "validate", runId: values.get("--run")!, receiptPath: values.get("--receipt")! };
+  return { ok: false };
+}
 
 const VALUE_FLAGS = new Set(["agent", "provider", "model", "reasoning", "decision-depth", "tools", "exclude-tools", "timeout", "max-turns", "budget"]);
 const BOOLEAN_FLAGS = new Set(["detach", "no-open", "no-session", "offline"]);
@@ -109,6 +130,47 @@ type DetachedSpawn = (
   options: { detached: true; stdio: ["ignore", "ignore", "ignore", "ipc"]; env: NodeJS.ProcessEnv },
 ) => ChildProcess;
 
+type FocusGuardSpawn = (
+  command: string,
+  args: string[],
+  options: { cwd: string; detached: true; stdio: ["ignore", "ignore", "ignore", "ipc"]; env: NodeJS.ProcessEnv },
+) => ChildProcess;
+
+/** Start the standalone validator as a detached process so its state is not agent-writable. */
+export function defaultLaunchFocusGuard(requestPath: string, cwd: string, spawnFn: FocusGuardSpawn = spawn): Promise<StandaloneFocusBegin> {
+  const child = spawnFn(process.execPath, [fileURLToPath(import.meta.url), "focus", "guard", "--request", requestPath], {
+    cwd,
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+    env: { ...process.env, [FOCUS_GUARD_CHILD]: "1" },
+  });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error, result?: StandaloneFocusBegin) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      child.removeAllListeners();
+      if (child.connected) child.disconnect();
+      child.unref();
+      if (error) reject(error);
+      else resolve(result!);
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish(new Error("focus guard did not become ready"));
+    }, 10_000);
+    timeout.unref();
+    child.once("error", (error) => finish(error));
+    child.once("exit", (code) => finish(new Error(`focus guard exited before ready (${code ?? "signal"})`)));
+    child.on("message", (message: unknown) => {
+      if (typeof message !== "object" || message === null || (message as { type?: unknown }).type !== "bearing-focus-ready") return;
+      const result = (message as { result?: StandaloneFocusBegin }).result;
+      if (result && typeof result === "object" && typeof result.ok === "boolean") finish(undefined, result);
+    });
+  });
+}
+
 /** Start a platform-neutral detached copy and wait until it reports its URL. */
 export function defaultLaunchDetached(
   args: string[],
@@ -146,9 +208,9 @@ export function defaultLaunchDetached(
   });
 }
 
+// ponytail: injected seam only so opener-error safety is testable without a real browser.
 export function defaultOpenBrowser(
   url: string,
-  // ponytail: injected seam only so the opener-error safety is testable without a real browser.
   spawnFn: (cmd: string, args: string[], opts: { stdio: "ignore"; detached: true }) => ChildProcess = spawn,
 ): void {
   const platform = process.platform;
@@ -186,6 +248,33 @@ export function run(args: string[], deps: LauncherDeps = {}): Promise<Server | u
   const stdout = deps.stdout ?? process.stdout;
   const stderr = deps.stderr ?? process.stderr;
   const exit = deps.exit ?? ((code: number) => process.exit(code));
+
+  if (process.env[FOCUS_GUARD_CHILD] === "1" && args[0] === "focus" && args[1] === "guard" && args[2] === "--request" && args.length === 4) {
+    return beginStandaloneFocus(deps.cwd ?? process.cwd(), args[3]).then((result) => {
+      process.send?.({ type: "bearing-focus-ready", result });
+      process.disconnect?.();
+      if (!result.ok) exit(1);
+      return undefined;
+    });
+  }
+
+  if (args[0] === "focus") {
+    const parsedFocus = parseFocusArgs(args);
+    if (!parsedFocus.ok) {
+      stderr.write(USAGE);
+      exit(2);
+      return Promise.resolve(undefined);
+    }
+    const cwd = deps.cwd ?? process.cwd();
+    const operation = parsedFocus.action === "begin"
+      ? (deps.launchFocusGuard ?? defaultLaunchFocusGuard)(parsedFocus.requestPath, cwd)
+      : validateStandaloneFocus(cwd, parsedFocus.runId, parsedFocus.receiptPath);
+    return operation.then((result) => {
+      stdout.write(`${JSON.stringify(result)}\n`);
+      if (!result.ok) exit(1);
+      return undefined;
+    });
+  }
 
   const parsed = parseStartArgs(args);
   if (!parsed.ok) {

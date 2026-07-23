@@ -869,11 +869,11 @@ type RecoveryReport = {
   readonly failureClass: "agent_receipt_or_artifact_validation";
   readonly code: FailureResult["code"];
   readonly retryLevel: "repair" | "simplify";
-  readonly version: "0.1.1";
+  readonly version: "0.1.2";
 };
 
 function recoverableFailure(result: JourneyResult): result is FailureResult {
-  return result.status === "failure" && ["result_missing", "result_malformed", "artifact_invalid"].includes(result.code);
+  return result.status === "failure" && ["result_missing", "result_malformed", "artifact_invalid", "focus_invalid", "completion_invalid"].includes(result.code);
 }
 
 function recoveryFingerprint(stage: JourneyStage, result: FailureResult, state: BrowserJourney): string {
@@ -1029,7 +1029,7 @@ function handleJourneyPost(req: IncomingMessage, res: ServerResponse, service: L
     if (stageChanged || ownerSteered) clearRecovery(state);
     if ((state.recovery?.repeats ?? 0) >= 3 && state.lastResult && recoverableFailure(state.lastResult)) {
       const links = state.artifacts.flatMap((path, index) => /\.(?:html|md)$/i.test(path) ? [{ path, url: `/api/v1/journey/${encodeURIComponent(value.runId)}/artifacts/${index}` }] : []);
-      writeShowcaseJson(res, { ...state.lastResult, artifacts: state.artifacts, artifactLinks: links, recovery: { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: state.lastResult.code, retryLevel: "simplify", version: "0.1.1" } satisfies RecoveryReport });
+      writeShowcaseJson(res, { ...state.lastResult, artifacts: state.artifacts, artifactLinks: links, recovery: { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: state.lastResult.code, retryLevel: "simplify", version: "0.1.2" } satisfies RecoveryReport });
       return;
     }
     if (value.answer) {
@@ -1070,7 +1070,7 @@ function handleJourneyPost(req: IncomingMessage, res: ServerResponse, service: L
     catch { state.busy = false; state.status = "failed"; writeRejection(res, 503); return; }
     let result: JourneyResult;
     let gatherMode = value.stage === "gather-supplies" ? value.answer || value.reviewChange || state.gatherQuestionsDiscovered ? "apply" as const : "questions" as const : undefined;
-    const execute = (reviewPrompt?: string) => journey.execute({ selection, run, repositoryPath, runId: value.runId, workGoal: state!.goal, stage: value.stage, priorOwnerQa: state!.qa, planDirectory: state!.planDirectory, ...(gatherMode ? { gatherMode } : {}), ...(reviewPrompt ? { reviewPrompt } : {}), ...(state!.providerSessionId ? { providerSessionId: state!.providerSessionId } : {}) });
+    const execute = (reviewPrompt?: string) => journey.execute({ selection, run, repositoryPath, runId: value.runId, workGoal: state!.goal, stage: value.stage, priorOwnerQa: state!.qa, planDirectory: state!.planDirectory, ...(gatherMode ? { gatherMode } : {}), ...(reviewPrompt ? { reviewPrompt } : {}), ...(state!.recovery?.fingerprint ? { gateFailureFingerprint: state!.recovery.fingerprint } : {}), ...(state!.providerSessionId ? { providerSessionId: state!.providerSessionId } : {}) });
     let recoveryReport: RecoveryReport | undefined;
     try {
       result = await execute();
@@ -1102,10 +1102,10 @@ function handleJourneyPost(req: IncomingMessage, res: ServerResponse, service: L
         result = await execute(recoveryGuidance(lastRetryLevel, result.code));
       }
       if (result.status !== "failure" && firstFailure) {
-        recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure, retryLevel: lastRetryLevel, version: "0.1.1" };
+        recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure, retryLevel: lastRetryLevel, version: "0.1.2" };
         clearRecovery(state);
       } else if (recoverableFailure(result) && state.recovery?.repeats === 3) {
-        recoveryReport = { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: result.code, retryLevel: "simplify", version: "0.1.1" };
+        recoveryReport = { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: result.code, retryLevel: "simplify", version: "0.1.2" };
       } else if (!recoverableFailure(result)) clearRecovery(state);
     } catch {
       result = { status: "failure" as const, code: "adapter_failed" as const, tokens: 0 };

@@ -268,8 +268,9 @@ describe("repository-first onboarding HTTP", () => {
 
   it("persists the verified route and drives the real journey through contained HTML evidence", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-journey-")); roots.push(root);
+    execFileSync("git", ["init", "-q"], { cwd: root });
     const planDirectory = `docs/plans/${new Date().toISOString().slice(0, 10)}-ship-bounded-evidence-without-losing-owner-control`;
-    const implementation = "---\ntype: implementation\nstatus: draft\nplan_spec: ./plan-spec.md\ndesign: ./design.md\nseit: ./seit.md\n---\n\n# Implementation\n\n## Phase 1 — Build\n\n### Slice 1.1 — Deliver\n\n**Goal.** Deliver bounded evidence.\n\n**Requirement IDs.** AC-1\n\n**Design IDs.** DES-1, CONTRACT-1\n\n**SEIT proof rows.** SEIT-1\n\n**Type.** /tdd\n\n**Design lenses.** CDD\n\n**Implementation role.** Backend Engineer\n\n**Agent model route.** Codex agent default\n\n**Agent reasoning level.** low.\n\n**Ponytail mode.** full\n\n**Review path.** native review\n\n### 1.1 execution manifest\n\n**Write set.** `src/evidence.ts` only.\n\n**Command IDs.** CMD-UNIT\n\n**Stop condition.** Stop if focused validation fails.\n\n**Human decision.** None.";
+    const implementation = "---\ntype: implementation\nstatus: draft\nplan_spec: ./plan-spec.md\ndesign: ./design.md\nseit: ./seit.md\n---\n\n# Implementation\n\n## Phase 1 — Build\n\n### Slice 1.1 — Deliver\n\n**Goal.** Deliver bounded evidence.\n\n**Requirement IDs.** AC-1\n\n**Design IDs.** DES-1, CONTRACT-1\n\n**SEIT proof rows.** SEIT-1\n\n**Type.** /tdd\n\n**Design lenses.** CDD\n\n**Implementation role.** Backend Engineer\n\n**Agent model route.** Codex agent default\n\n**Agent reasoning level.** low.\n\n**Ponytail mode.** full\n\n**Review path.** native review\n\n### 1.1 execution manifest\n\n**Write set.** `README.md` only.\n\n**Command IDs.** CMD-UNIT\n\n**Stop condition.** Stop if focused validation fails.\n\n**Human decision.** None.";
     const planning = { "plan-spec.md": "---\ntype: plan-spec\nstatus: complete\n---\n\n## Acceptance criteria\n\n- **AC-1** — Deliver bounded evidence. Literal source text: href=\"./plan-spec.md\"\n\n## Risks and open questions\n\n- **RISK-1** — Invalid evidence must fail closed.\n", "design.md": "---\ntype: design\nstatus: complete\n---\n\n## Use Cases and Communication Flows\n\nComplete flow.\n\n## Interface Option Check\n\ninterface_options: not needed - fixture\n\n## OOPDSA Implementation Design\n\n- **DES-1** — Use the existing evidence boundary.\n- **CONTRACT-1** — Reject invalid evidence without writes.\n", "seit.md": "---\ntype: seit\nstatus: complete\n---\n\n## Required Commands\n\n- **CMD-UNIT** — `pnpm test`\n\n## Traceability Matrix\n\n| SEIT row ID | Acceptance/risk ID | Design/contract ID | Boundary/test layer | Positive case | Negative/failure case | Command/procedure ID | Evidence |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| SEIT-1 | AC-1 | DES-1, CONTRACT-1 | unit | valid evidence passes | invalid evidence fails closed | CMD-UNIT | test report |\n\n## Cross-cutting Checks\n\nComplete checks.\n", "implementation.md": implementation } as const;
     const escaped = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
     const complete = (content?: string) => ({ exitCode: 0, events: [{ type: "complete", ...(content ? { data: { content } } : {}) }], usage: { tokens: 7 } });
@@ -282,7 +283,7 @@ describe("repository-first onboarding HTTP", () => {
       complete(action("Review changes gathered", [`${planDirectory}/plan-spec.md`])),
       complete(action("Route and implementation redrafted", [`${planDirectory}/design.md`, `${planDirectory}/seit.md`, `${planDirectory}/implementation.md`, `${planDirectory}/review.html`])),
       complete('BEARING_RESULT {"kind":"question","question":"May I replace the generated client?"}'),
-      complete(action("Explorer completed bounded work", ["README.md", `${planDirectory}/review.html`])),
+      complete(`BEARING_RESULT ${JSON.stringify({ kind: "action", summary: "Explorer completed bounded work", artifacts: ["README.md", `${planDirectory}/review.html`], evidence: [{ commandId: "CMD-UNIT", status: "passed", summary: "focused browser journey passed" }] })}`),
       complete("No findings."),
     ]);
     const processRunner: ProcessRunner = {
@@ -320,7 +321,7 @@ describe("repository-first onboarding HTTP", () => {
     for (const [name, content] of Object.entries(planning)) await writeFile(join(root, planDirectory, name), content);
     await writeFile(join(root, planDirectory, "review.html"), `<!doctype html><title>Evidence</title><nav><a class="source-link" data-kind="planning" href="./prompts/repository-map.md">repository-map.md</a>${Object.keys(planning).map((name) => `<a class="source-link" data-kind="planning" href="./${name}">${name}</a>`).join("")}<a href="../outside.md">Outside</a><a href="./missing.md">Missing</a><a href="./README.md">README</a><a href="/plan-spec.md">Absolute</a><a href="./plan-spec.md#source">Fragment</a><a href="./plan-spec.md?raw=1">Query</a><a href=./plan-spec.md>Unquoted</a><span href="./design.md">Not an anchor</span><!-- <a href="./plan-spec.md">Comment</a> --></nav>${Object.entries(planning).map(([name, content]) => `<h2>${name}</h2><pre>${escaped(content)}</pre>`).join("")}`);
     await writeFile(join(root, planDirectory, "prompts", "context.md"), "# Context");
-    expect(JSON.parse((await journey("gather-supplies")).body)).toMatchObject({ status: "question", question: "Which acceptance risk matters most?", recovery: { status: "repaired", stage: "gather-supplies", failureClass: "agent_receipt_or_artifact_validation", code: "result_missing", retryLevel: "repair", version: "0.1.1" } });
+    expect(JSON.parse((await journey("gather-supplies")).body)).toMatchObject({ status: "question", question: "Which acceptance risk matters most?", recovery: { status: "repaired", stage: "gather-supplies", failureClass: "agent_receipt_or_artifact_validation", code: "result_missing", retryLevel: "repair", version: "0.1.2" } });
     expect((await journey("map-route", { answer: "Data loss" })).status).toBe(409);
     const planningQuestion = JSON.parse((await call(port, "GET", `/api/v1/runs/${runId}`, undefined, cookie)).body).pendingDecision;
     expect(planningQuestion).toMatchObject({ question: "Which acceptance risk matters most?" });
@@ -331,11 +332,19 @@ describe("repository-first onboarding HTTP", () => {
     expect(JSON.parse((await journey("map-route")).body)).toMatchObject({ status: "action", summary: "Route and implementation redrafted" });
     expect((await journey("execute-explorer", { executionMode: "explorer", reviewCadence: "phase" })).status).toBe(409);
     await recordPlanningApproval(port, cookie, runId);
-    expect(JSON.parse((await journey("execute-explorer", { executionMode: "explorer", reviewCadence: "phase", cleanupMergedWorktrees: true })).body)).toMatchObject({ status: "question", question: "May I replace the generated client?" });
+    const firstExecution = JSON.parse((await journey("execute-explorer", { executionMode: "explorer", reviewCadence: "phase", cleanupMergedWorktrees: true })).body);
+    if (firstExecution.status !== "question") throw new Error(JSON.stringify(firstExecution));
+    expect(firstExecution).toMatchObject({ status: "question", question: "May I replace the generated client?" });
     const executionQuestion = JSON.parse((await call(port, "GET", `/api/v1/runs/${runId}`, undefined, cookie)).body).pendingDecision;
     expect(executionQuestion).toMatchObject({ question: "May I replace the generated client?" });
     await postOwnerCommand(port, cookie, runId, "recordOwnerAnswer", { decisionId: executionQuestion.decisionId, answer: "Yes, keep the public API stable" });
-    expect(JSON.parse((await journey("execute-explorer", { answer: "Yes, keep the public API stable" })).body)).toMatchObject({ status: "action" });
+    const completedExecution = JSON.parse((await journey("execute-explorer", { answer: "Yes, keep the public API stable" })).body);
+    if (completedExecution.status !== "action") {
+      const diagnostic = JSON.parse((await call(port, "GET", `/api/v1/journey/${runId}/status`, undefined, cookie)).body);
+      const gitStatus = execFileSync("git", ["status", "--short"], { cwd: root, encoding: "utf8" });
+      throw new Error(JSON.stringify({ completedExecution, activityTrail: diagnostic.activityTrail, gitStatus }));
+    }
+    expect(completedExecution).toMatchObject({ status: "action" });
     expect(await readFile(join(root, "README.md"), "utf8")).toBe("# Explorer output\n");
     expect(await readFile(join(root, planDirectory, "review.html"), "utf8")).toContain('<section id="bearing-final-qa" data-status="complete">');
     const reviewed = JSON.parse((await journey("review")).body);

@@ -1,5 +1,4 @@
 node_modules/
-dist/
 coverage/
 .bearing/
 .playwright-cli/

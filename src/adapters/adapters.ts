@@ -62,7 +62,7 @@ export interface ProcessRunner {
 
 export interface Inspection { readonly route: RouteDescriptor; readonly available: boolean; readonly capabilities: readonly string[]; }
 export interface Verification { readonly ok: boolean; readonly failure?: "unavailable" | "verification_failed"; }
-export interface ExecuteRequest { readonly runId: string; readonly sessionScope?: string; readonly repositoryPath: string; readonly role: RoleProjection; readonly task: { readonly prompt: string }; readonly fallbackRoute?: string; readonly allowSubagents?: boolean; readonly providerSessionId?: string; readonly onActivity?: (activity: ProcessActivity) => void; }
+export interface ExecuteRequest { readonly runId: string; readonly sessionScope?: string; readonly repositoryPath: string; readonly role: RoleProjection; readonly task: { readonly prompt: string }; readonly fallbackRoute?: string; readonly allowSubagents?: boolean; readonly focusMode?: boolean; readonly providerSessionId?: string; readonly onActivity?: (activity: ProcessActivity) => void; }
 export interface ExecutionReceipt {
   readonly status: ExecutionStatus;
   readonly requestedRoute: string;
@@ -187,7 +187,7 @@ function buildInvocation(route: RouteDescriptor, selection: Selection, request: 
   if (role.authority.externalAction || !role.authority.read || !role.authority.workspace) return { ok: false, warnings: ["authority_unsupported"] };
   if (!route.reasoningLevels.includes(selection.reasoning)) return { ok: false, warnings: ["reasoning_unsupported"] };
   if (!role.authority.write && role.toolAllow.some((tool) => /write|edit|shell|bash/i.test(tool))) return { ok: false, warnings: ["tool_authority_conflict"] };
-  const common = { routeId: route.id, executable: route.executable, stdin: request.task.prompt, cwd: request.repositoryPath, timeoutMs: role.limits.timeoutMs, runId: request.runId, ...(request.onActivity ? { onActivity: request.onActivity } : {}) };
+  const common = { routeId: route.id, executable: route.executable, stdin: request.task.prompt, cwd: request.repositoryPath, timeoutMs: role.limits.timeoutMs, runId: request.runId, ...(request.focusMode ? { environment: { BEARING_FOCUS: "1" } } : {}), ...(request.onActivity ? { onActivity: request.onActivity } : {}) };
   if (route.provider === "codex") {
     if (role.toolDeny.some((tool) => tool !== "external-action")) return { ok: false, warnings: ["codex_tool_deny_unsupported"] };
     if (role.authority.network) return { ok: false, warnings: ["codex_network_policy_unsupported"] };

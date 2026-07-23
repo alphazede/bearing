@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/focus-reminder.cjs\" UserPromptSubmit",
+            "timeout": 5,
+            "statusMessage": "Reinforcing Bearing Focus mode..."
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/focus-reminder.cjs\" SubagentStart",
+            "timeout": 5,
+            "statusMessage": "Reinforcing Bearing Focus mode..."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -12,8 +12,9 @@ The public npm package is `@alphazede/bearing`.
 
 - `src/` — application source.
 - `test/` — automated tests.
-- `plugin-skills/` — the single host-discoverable Bearing launcher.
+- `plugin-skills/` — guarded host-discoverable Bearing, Explorer, Navigator, and Crewmate entrypoints.
 - `skills/` — Bearing's editable internal workflow skills; the plugin does not expose them directly.
+- `hooks/` — optional Codex and Claude reminders that activate only inside a Bearing Focus process.
 - `examples/fictional-b2b/` — deterministic public-safe examples, showcase, and QA data.
 - `assets/` — interface artwork.
 
@@ -98,9 +99,11 @@ Bearing ships its complete internal workflow vocabulary in `skills/`: **Set Bear
 **Crewmate**, and **Surveyor**. At runtime Bearing reads the relevant packaged
 `SKILL.md` files and embeds them in the selected harness request. Customers do
 not need AlphaZede's private skill installation, and the harness does not need
-to discover these skills globally. Only the launcher in `plugin-skills/` is
-exposed through the Codex and Claude Code plugin manifests, so an internal
-execution role cannot bypass Bearing's approvals and validation.
+to discover these skills globally. `plugin-skills/` exposes the launcher plus
+guarded Explorer, Navigator, and Crewmate wrappers. A direct wrapper requires an
+approved plan, starts a Focus snapshot, loads its corresponding internal skill,
+and validates the final receipt; the raw internal role files are not exposed as
+commands.
 
 To customize a source build, edit the corresponding `skills/<name>/SKILL.md`
 file, keep its `name` and `description` frontmatter valid, then rebuild and run
@@ -109,6 +112,30 @@ validation, approval checks, and deterministic `review.html` generation; skill
 text cannot weaken those guarantees. Reinstalling or upgrading the npm package
 replaces edits made directly inside an installed package, so durable changes
 belong in a fork or source checkout.
+
+### Focus mode and direct roles
+
+During Explorer or Expedition execution, Bearing derives one compact Focus
+envelope from `plan-spec.md`, `seit.md`, and each `implementation.md` execution
+manifest. The envelope fixes the objective, current acceptance criterion,
+allowed paths, SEIT command IDs, blocker, remaining slices, and gate-failure
+fingerprint. Bearing snapshots Git before execution and rejects completion when
+the agent changes an undeclared path, omits a changed artifact, omits or
+duplicates command evidence, reports a failed command as completion, makes no
+product change, or leaves `review.html` stale.
+
+The same validator backs the guarded `$explorer`, `$navigator`, and `$crewmate`
+plugin skills. Their temporary request and receipt stay under the selected
+repository's ignored `.bearing/focus/` state, while the immutable snapshot stays
+inside a one-use loopback guard process and cannot be rewritten as a workspace
+file. Direct GitHub issue comments or closure require explicit authority for the
+exact issue;
+finding a bug never grants permission to publish repository data.
+
+Codex and Claude plugins also ship a short Focus reminder hook. Bearing enables
+it only for the provider process it starts, including resumes and subagents.
+The hook is optional: disabling or removing it does not remove TypeScript Focus
+validation, which remains the completion boundary.
 
 ## First launch
 

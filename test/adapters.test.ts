@@ -36,6 +36,14 @@ describe("provider-neutral adapters", () => {
     expect(runner.calls[0]?.onActivity).toBe(onActivity);
   });
 
+  it("scopes the optional hook reminder environment to Focus invocations", async () => {
+    const runner = new SyntheticRunner();
+    await adapter(runner).execute({ runId: "focused", repositoryPath, role: role(), task: { prompt: "do work" }, focusMode: true });
+    expect(runner.calls[0]?.environment).toEqual({ BEARING_FOCUS: "1" });
+    await adapter(runner).execute({ runId: "ordinary", repositoryPath, role: role(), task: { prompt: "do work" } });
+    expect(runner.calls[1]?.environment).toBeUndefined();
+  });
+
   it("allows Grok subagents only through an explicit execution request", async () => {
     const selection = { provider: "grok", model: "grok-build", reasoning: "medium" };
     const runner = new SyntheticRunner();
