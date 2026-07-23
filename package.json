@@ -25,8 +25,7 @@
     "fixtures/fictional-b2b/",
     "skills/",
     "README.md",
-    "LICENSE",
-    "SUBMISSION.md"
+    "LICENSE"
   ],
   "packageManager": "pnpm@10.33.0",
   "type": "module",
