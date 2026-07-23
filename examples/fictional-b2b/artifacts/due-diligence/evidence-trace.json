@@ -1,0 +1,5 @@
+{
+  "dd.product-capability": ["src/import-customers.mjs", "docs/product-facts.json"],
+  "dd.security-certification": [],
+  "dd.retention": []
+}

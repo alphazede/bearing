@@ -1,0 +1,7 @@
+{
+  "committed": true,
+  "records": [
+    { "id": "acct-101", "action": "imported" },
+    { "id": "acct-102", "action": "imported" }
+  ]
+}

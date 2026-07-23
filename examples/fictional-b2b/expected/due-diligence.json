@@ -1,0 +1,18 @@
+[
+  {
+    "questionId": "dd.product-capability",
+    "status": "answered",
+    "answer": "RelayDesk imports approved CSV customer records and reports duplicate IDs.",
+    "evidence": ["src/import-customers.mjs", "docs/product-facts.json"]
+  },
+  {
+    "questionId": "dd.security-certification",
+    "status": "blocked",
+    "unresolvedOwner": "Security Lead"
+  },
+  {
+    "questionId": "dd.retention",
+    "status": "blocked",
+    "unresolvedOwner": "Finance Lead"
+  }
+]

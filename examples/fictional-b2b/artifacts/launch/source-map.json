@@ -1,0 +1,4 @@
+{
+  "sources": ["src/import-customers.mjs", "data/import.csv"],
+  "unsupportedClaims": ["Guaranteed to cut onboarding time by 40 percent"]
+}

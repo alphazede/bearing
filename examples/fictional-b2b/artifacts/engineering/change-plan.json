@@ -1,0 +1,5 @@
+{
+  "action": "import approved customer records",
+  "source": "data/import.csv",
+  "roleGate": "engineering-owner approval required"
+}

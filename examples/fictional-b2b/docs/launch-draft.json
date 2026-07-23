@@ -1,0 +1,13 @@
+{
+  "title": "RelayDesk launch brief draft",
+  "audience": "B2B onboarding teams",
+  "capability": {
+    "claim": "Imports approved customer records and reports duplicates",
+    "evidence": "src/import-customers.mjs"
+  },
+  "marketPromise": {
+    "claim": "Guaranteed to cut onboarding time by 40 percent",
+    "evidence": null,
+    "status": "unsupported"
+  }
+}
