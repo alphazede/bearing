@@ -1,0 +1,21 @@
+{
+  "name": "bearing",
+  "interface": {
+    "displayName": "Bearing"
+  },
+  "plugins": [
+    {
+      "name": "bearing",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/alphazede/bearing.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

@@ -59,14 +59,20 @@ The URL contains a one-time capability in its fragment; do not share it.
 
 ## Codex plugin
 
-The packaged repo-local plugin provides the `bearing` skill. In a Codex session
-where this package is installed, invoke `$bearing` or ask Codex to use the
+Add the Bearing marketplace and install its plugin:
+
+```sh
+codex plugin marketplace add alphazede/bearing
+codex plugin add bearing@bearing
+```
+
+Start a new Codex session, then invoke `$bearing` or ask Codex to use the
 Bearing skill. Codex starts the existing local Bearing CLI in persistent mode
 from the current repository, keeps it running, reports its loopback URL, and
 begins the planning-first journey. It does not launch on SessionStart, install
-software, publish a marketplace entry, or change Codex native collaboration
-behavior. After an explicit invocation, the CLI's default `start` command
-best-effort opens the browser automatically.
+software, or change Codex native collaboration behavior. After an explicit
+invocation, the CLI's default `start` command best-effort opens the browser
+automatically.
 
 If the active Codex sandbox blocks the loopback listener, Codex asks for owner
 approval to rerun only the Bearing CLI launch with host escalation. That launch
