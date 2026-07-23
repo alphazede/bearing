@@ -98,8 +98,9 @@ Bearing ships its complete internal workflow vocabulary in `skills/`: **Set Bear
 **Gather Supplies**, **Map the Route**, **Explorer**, **Navigator**,
 **Crewmate**, and **Surveyor**. At runtime Bearing reads the relevant packaged
 `SKILL.md` files and embeds them in the selected harness request. Customers do
-not need AlphaZede's private skill installation, and the harness does not need
-to discover these skills globally. `plugin-skills/` exposes the launcher plus
+not need AlphaZede's private skill installation. Each raw internal skill disables
+both user and model invocation, so a harness cannot use it as an unguarded
+command. `plugin-skills/` exposes the launcher plus
 guarded Explorer, Navigator, and Crewmate wrappers. A direct wrapper requires an
 approved plan, starts a Focus snapshot, loads its corresponding internal skill,
 and validates the final receipt; the raw internal role files are not exposed as

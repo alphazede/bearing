@@ -1,6 +1,8 @@
 ---
 name: set-bearings
 description: Create or resume Bearing's local plan workspace and repository map when the Bearing journey enters Set Bearings.
+user-invocable: false
+disable-model-invocation: true
 ---
 
 # Set Bearings

@@ -26,6 +26,9 @@ async function assertInstall(root: string): Promise<void> {
   const fallback = await exec(process.execPath, [join(root, "dist/cli.js"), "bogus"], { cwd: root, env: { PATH: join(root, "empty-path") } }).catch((error) => error as { code?: number; stderr?: string });
   expect(fallback.code).toBe(2);
   expect(fallback.stderr).toContain("usage: bearing");
+  const internalSkill = await readFile(join(root, "skills/crewmate/SKILL.md"), "utf8");
+  expect(internalSkill).toContain("user-invocable: false");
+  expect(internalSkill).toContain("disable-model-invocation: true");
 }
 
 describe("packaged plugin installation", () => {

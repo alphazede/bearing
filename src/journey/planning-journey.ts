@@ -120,7 +120,7 @@ const MAX_PACKAGED_SKILL_BYTES = 64 * 1024;
 async function packagedSkills(stage: JourneyStage): Promise<string> {
   const sources = await Promise.all(STAGE_SKILLS[stage].map(async (name) => {
     const source = await readFile(new URL(`../../skills/${name}/SKILL.md`, import.meta.url), "utf8");
-    if (Buffer.byteLength(source) > MAX_PACKAGED_SKILL_BYTES || /\u0000/.test(source) || !new RegExp(`^---\\r?\\nname: ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\r?\\ndescription: [^\\r\\n]+\\r?\\n---(?:\\r?\\n|$)`).test(source)) throw new Error("packaged skill invalid");
+    if (Buffer.byteLength(source) > MAX_PACKAGED_SKILL_BYTES || /\u0000/.test(source) || !new RegExp(`^---\\r?\\nname: ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\r?\\ndescription: [^\\r\\n]+\\r?\\nuser-invocable: false\\r?\\ndisable-model-invocation: true\\r?\\n---(?:\\r?\\n|$)`).test(source)) throw new Error("packaged skill invalid");
     return `### ${name}\n${source}`;
   }));
   return ["Packaged Bearing skills (authoritative workflow instructions for this stage):", ...sources].join("\n\n");

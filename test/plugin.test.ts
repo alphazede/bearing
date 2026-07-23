@@ -20,10 +20,10 @@ describe("Bearing plugin contract", () => {
       author: { name: "William Rumph / AlphaZede" },
       interface: { developerName: "William Rumph / AlphaZede" },
     });
-    expect(codexManifest.version).toBe("0.1.2");
+    expect(codexManifest.version).toBe("0.1.3");
     expect(claudeManifest).toMatchObject({
       name: "bearing",
-      version: "0.1.2",
+      version: "0.1.3",
       skills: "./plugin-skills/",
       hooks: "./hooks/claude-codex-hooks.json",
       author: { name: "William Rumph / AlphaZede" },
@@ -91,7 +91,7 @@ describe("Bearing plugin contract", () => {
     const names = ["set-bearings", "gather-supplies", "map-the-route", "explorer", "navigator", "crewmate", "surveyor"];
     for (const name of names) {
       const skill = await read(`../skills/${name}/SKILL.md`);
-      expect(skill).toMatch(new RegExp(`^---\\nname: ${name}\\ndescription: [^\\n]+\\n---\\n`));
+      expect(skill).toMatch(new RegExp(`^---\\nname: ${name}\\ndescription: [^\\n]+\\nuser-invocable: false\\ndisable-model-invocation: true\\n---\\n`));
     }
   });
 
@@ -139,6 +139,7 @@ describe("Bearing plugin contract", () => {
     expect(readmeProse).toContain("reads the relevant packaged `SKILL.md` files and embeds them");
     expect(readmeProse).toContain("do not need AlphaZede's private skill installation");
     expect(readmeProse).toContain("guarded Explorer, Navigator, and Crewmate wrappers");
+    expect(readmeProse).toContain("Each raw internal skill disables both user and model invocation");
     expect(readmeProse).toContain("The hook is optional");
     expect(readmeProse).toContain("one-use loopback guard process");
     expect(readmeProse).toContain("security boundaries, artifact validation, approval checks, and deterministic `review.html` generation");

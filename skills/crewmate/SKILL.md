@@ -1,6 +1,8 @@
 ---
 name: crewmate
 description: Implement one settled bounded Bearing coding packet inside its exact write set when Explorer or Navigator assigns the work.
+user-invocable: false
+disable-model-invocation: true
 ---
 
 # Crewmate

@@ -1,6 +1,8 @@
 ---
 name: gather-supplies
 description: Resolve only material owner decisions and produce Bearing's validated plan specification when the journey enters Gather Supplies.
+user-invocable: false
+disable-model-invocation: true
 ---
 
 # Gather Supplies

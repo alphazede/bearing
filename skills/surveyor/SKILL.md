@@ -1,6 +1,8 @@
 ---
 name: surveyor
 description: Perform Bearing's single read-only review of integrated work when the selected harness has no native reviewer.
+user-invocable: false
+disable-model-invocation: true
 ---
 
 # Surveyor

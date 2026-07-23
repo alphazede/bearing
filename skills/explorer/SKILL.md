@@ -1,6 +1,8 @@
 ---
 name: explorer
 description: Execute one approved Bearing implementation route with bounded Crewmate work and deterministic validation when the owner selects Explorer.
+user-invocable: false
+disable-model-invocation: true
 ---
 
 # Explorer

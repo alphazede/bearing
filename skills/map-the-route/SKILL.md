@@ -1,6 +1,8 @@
 ---
 name: map-the-route
 description: Build Bearing's complete validated route from an approved plan specification, including design, SEIT, and implementation slices, when the journey enters Map the Route.
+user-invocable: false
+disable-model-invocation: true
 ---
 
 # Map the Route

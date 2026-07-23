@@ -1,6 +1,6 @@
 {
   "name": "@alphazede/bearing",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Local browser control room for evidence-backed agent workflows.",
   "author": "William Rumph / AlphaZede",
   "license": "MIT OR Apache-2.0",

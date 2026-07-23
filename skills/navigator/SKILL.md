@@ -1,6 +1,8 @@
 ---
 name: navigator
 description: Coordinate approved dependent Bearing waves with safely parallel Explorer lanes when the owner selects Expedition.
+user-invocable: false
+disable-model-invocation: true
 ---
 
 # Navigator
