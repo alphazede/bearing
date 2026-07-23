@@ -1,6 +1,6 @@
 {
   "name": "bearing",
-  "version": "0.1.0+codex.20260721115120",
+  "version": "0.1.1",
   "description": "Launch Bearing's local planning-first repository workflow.",
   "author": {
     "name": "William Rumph / AlphaZede",
@@ -9,7 +9,7 @@
   "homepage": "https://github.com/alphazede/bearing",
   "repository": "https://github.com/alphazede/bearing",
   "license": "MIT OR Apache-2.0",
-  "skills": "./skills/",
+  "skills": "./plugin-skills/",
   "interface": {
     "displayName": "Bearing",
     "shortDescription": "Local planning-first repository workflow.",

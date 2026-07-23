@@ -239,22 +239,34 @@ describe("JourneyService", () => {
   });
 
   it("reuses only the matching Codex planning thread", async () => {
-    const thread = "123e4567-e89b-12d3-a456-426614174000";
+    const thread = "019f8d4e-a637-7e71-8c76-af9d7ec91adf";
     const question = completed('BEARING_RESULT {"kind":"questions","questions":["Continue?"]}');
-    const runner = new QueueRunner([{ ...question, providerSessionId: thread }, question, question, question]);
+    const runner = new QueueRunner([{ ...question, providerSessionId: thread }, question, question, question, question]);
     const service = new JourneyService(runner);
     const input = await request({ gatherMode: "questions", priorOwnerQa: [] });
+    expect((await service.execute(input)).status).toBe("question");
     expect((await service.execute(input)).status).toBe("question");
     expect((await service.execute({ ...input, runId: "journey-2" })).status).toBe("question");
     const changedSelection = { provider: "codex", model: "gpt-5.6-terra", reasoning: "medium" } as const;
     expect((await service.execute({ ...input, runId: "journey-3", selection: changedSelection, run: resolved(changedSelection) })).status).toBe("question");
     const otherRoot = await realpath(await mkdtemp(join(tmpdir(), "bearing-journey-other-"))); roots.push(otherRoot);
-    expect((await service.execute({ ...input, runId: "journey-4", repositoryPath: otherRoot })).status).toBe("question");
+    expect((await service.execute({ ...input, repositoryPath: otherRoot })).status).toBe("question");
     expect(runner.calls[0]?.args).not.toContain("resume");
     expect(runner.calls[1]?.args).toEqual(expect.arrayContaining(["exec", "resume", thread]));
     expect(runner.calls[2]?.args).not.toContain("resume");
     expect(runner.calls[3]?.args).not.toContain("resume");
+    expect(runner.calls[4]?.args).not.toContain("resume");
     expect(runner.calls[0]?.args).toContain("read-only");
+  });
+
+  it("resumes a durable provider thread supplied by restored journey state", async () => {
+    const thread = "019f8d4e-a637-7e71-8c76-af9d7ec91adf";
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"questions","questions":["Continue?"]}'));
+    const service = new JourneyService(runner);
+    const input = await request({ gatherMode: "questions", priorOwnerQa: [], providerSessionId: thread });
+    expect((await service.execute(input)).status).toBe("question");
+    expect(runner.calls[0]?.args).toEqual(expect.arrayContaining(["exec", "resume", thread]));
+    expect(service.providerSessionId(input.repositoryPath, input.runId, input.selection)).toBe(thread);
   });
 
   it("accepts three bounded questions, rejects a fourth, and accepts no material questions", async () => {
@@ -310,12 +322,13 @@ describe("JourneyService", () => {
     expect(runner.calls[0].args).not.toContain("--dangerously-skip-permissions");
   });
 
-  it("covers each model-driven stage with its existing skill or command", async () => {
-    const commands = { "gather-supplies": "$grill-with-docs", "map-route": "$design-driven-build", "draft-implementation": "$to-plan", "execute-explorer": "$conductor-orchestrate", "execute-expedition": "$ultimate-loop" } as const;
-    for (const [stage, command] of Object.entries(commands) as [Exclude<JourneyStage, "review">, string][]) {
+  it("embeds each frontend-named packaged skill without private skill discovery", async () => {
+    const skills = { "gather-supplies": ["gather-supplies"], "map-route": ["map-the-route"], "draft-implementation": ["map-the-route"], "execute-explorer": ["explorer", "crewmate", "surveyor"], "execute-expedition": ["navigator", "explorer", "crewmate", "surveyor"] } as const;
+    for (const [stage, names] of Object.entries(skills) as [Exclude<JourneyStage, "review">, readonly string[]][]) {
       const runner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Continue?"}'));
       expect((await new JourneyService(runner).execute(await request({ stage }))).status).toBe("question");
-      expect(runner.calls[0].stdin).toContain(command);
+      for (const name of names) expect(runner.calls[0].stdin).toContain(`### ${name}\n---\nname: ${name}`);
+      expect(runner.calls[0].stdin).not.toMatch(/\$(?:to-plan|grill-with-docs|design-driven-build|conductor-orchestrate|ultimate-loop|implementer|gate-review)\b/);
     }
   });
 
@@ -338,6 +351,16 @@ describe("JourneyService", () => {
     expect(runner.calls[0].stdin).toContain("Focus on authentication boundaries.");
   });
 
+  it("keeps Surveyor independent from the durable journey conversation", async () => {
+    const selection = { provider: "claude", model: "*", reasoning: "medium" };
+    const thread = "123e4567-e89b-42d3-a456-426614174000";
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Should this finding block release?"}'));
+    expect((await new JourneyService(runner).execute(await request({ stage: "review", selection, run: resolved(selection), providerSessionId: thread }))).status).toBe("question");
+    expect(runner.calls[0]?.args).toContain("--no-session-persistence");
+    expect(runner.calls[0]?.args).not.toContain("--resume");
+    expect(runner.calls[0]?.args).not.toContain(thread);
+  });
+
   it("returns a completed action only for contained existing artifacts", async () => {
     const input = await request({ stage: "draft-implementation", planDirectory: "docs/plans/import" });
     await writePlanningPackage(input.repositoryPath);
@@ -345,7 +368,7 @@ describe("JourneyService", () => {
     expect(await new JourneyService(runner).execute(input)).toEqual({ status: "action", summary: "Implementation plan drafted.", artifacts: ["docs/plans/import/implementation.md", "docs/plans/import/review.html"], tokens: 11, planningReview: { phases: 1, slices: 1, assignments: [{ slice: "Slice 1.1 — Import", role: "Backend Engineer", model: "Codex agent default", reasoning: "medium" }] } });
     expect(runner.calls[0].stdin).toContain("docs/plans/import");
     expect(runner.calls[0].stdin).toMatch(/Bearing generates review\.html deterministically.*do not write or summarize it/i);
-    expect(runner.calls[0].stdin).toContain("do not use standard gate or gate-review");
+    expect(runner.calls[0].stdin).toContain("harness-native reviewer when available or the Surveyor fallback");
     expect(runner.calls[0].stdin).toContain("exactly the standalone lowercase value `full` or `off`");
     const baseline = await readFile(join(input.repositoryPath, input.planDirectory!, "review.html"), "utf8");
     expect(baseline.match(/<section id="bearing-final-qa" data-status="pending">/g)).toHaveLength(1);
@@ -577,8 +600,8 @@ describe("JourneyService", () => {
     const runner = new StubRunner(completed('BEARING_RESULT {"kind":"action","summary":"Route and implementation drafted.","artifacts":["docs/plans/import/design.md","docs/plans/import/seit.md","docs/plans/import/implementation.md","docs/plans/import/review.html"]}'));
     expect(await new JourneyService(runner).execute(input)).toMatchObject({ status: "action", planningReview: { phases: 1, slices: 1 } });
     expect(runner.calls).toHaveLength(1);
-    expect(runner.calls[0].stdin).toContain("Explicitly invoke $to-plan");
-    expect(runner.calls[0].stdin).not.toContain("$design-driven-build");
+    expect(runner.calls[0].stdin).toContain("### map-the-route\n---\nname: map-the-route");
+    expect(runner.calls[0].stdin).not.toContain("$to-plan");
   });
 
   it("sequences Map the Route across the design stop boundary while keeping one activity stage", async () => {
@@ -602,9 +625,10 @@ describe("JourneyService", () => {
 
     expect(await service.execute(input)).toMatchObject({ status: "action", summary: "Implementation drafted.", tokens: 18, planningReview: { phases: 1, slices: 1 } });
     expect(calls).toHaveLength(2);
-    expect(calls[0].stdin).toMatch(/Explicitly invoke \$design-driven-build[\s\S]*Do not invoke \$to-plan/);
+    expect(calls[0].stdin).toMatch(/### map-the-route[\s\S]*design-and-SEIT validation checkpoint/);
     expect(calls[0].stdin).not.toContain("draft implementation.md and regenerate");
-    expect(calls[1].stdin).toContain("Explicitly invoke $to-plan");
+    expect(calls[1].stdin).toContain("### map-the-route\n---\nname: map-the-route");
+    expect(calls[1].stdin).not.toContain("$to-plan");
     expect(service.activityTrail(input.runId).map((entry) => entry.kind)).toEqual(["stage.started", "design.ready", "implementation-draft.started"]);
     const reviewPath = join(input.repositoryPath, "docs/plans/import/review.html");
     const firstReview = await readFile(reviewPath, "utf8");
@@ -684,7 +708,7 @@ describe("JourneyService", () => {
 
     expect(await new JourneyService(runner).execute(input)).toEqual({ status: "question", question: "Approve the implementation route?", tokens: 11 });
     expect(runner.calls).toHaveLength(1);
-    expect(runner.calls[0].stdin).toContain("Explicitly invoke $to-plan");
+    expect(runner.calls[0].stdin).toContain("### map-the-route\n---\nname: map-the-route");
     expect(await readFile(join(directory, "review.html"), "utf8")).toContain(escapeFixture(revisedPlan));
   });
 
@@ -740,7 +764,7 @@ describe("JourneyService", () => {
 
     expect(await new JourneyService(runner).execute(input)).toEqual({ status: "question", question: "How should rollback slices be grouped?", tokens: 13 });
     expect(runner.calls).toHaveLength(1);
-    expect(runner.calls[0].stdin).toContain("Explicitly invoke $to-plan");
+    expect(runner.calls[0].stdin).toContain("### map-the-route\n---\nname: map-the-route");
   });
 
   it("rejects an implementation package that omits assignments or the complete embedded sources", async () => {

@@ -6,13 +6,14 @@ Bearing is a local browser control room for evidence-backed agent work. It helps
 
 Bearing is packaged for Codex and Claude Code and was created by William Rumph at AlphaZede.
 
-This is the public `0.1.0` source candidate. The npm package `@alphazede/bearing` has not yet been published. Build and run from source for now.
+The public npm package is `@alphazede/bearing`.
 
 ## Repository layout
 
 - `src/` — application source.
 - `test/` — automated tests.
-- `skills/` — the packaged Bearing skill.
+- `plugin-skills/` — the single host-discoverable Bearing launcher.
+- `skills/` — Bearing's editable internal workflow skills; the plugin does not expose them directly.
 - `examples/fictional-b2b/` — deterministic public-safe examples, showcase, and QA data.
 - `assets/` — interface artwork.
 
@@ -29,7 +30,7 @@ pnpm build
 node dist/cli.js start
 ```
 
-Once the npm package is published, the following commands will also be available:
+Install the published package globally or run it directly:
 
 ```sh
 npm install --global @alphazede/bearing
@@ -83,6 +84,25 @@ In Claude Code, add this repository as a marketplace and install Bearing:
 
 Invoke `/bearing` or ask Claude to use Bearing. The shared skill starts the same
 local planning-first journey described above.
+
+## Workflow skills
+
+Bearing ships its complete internal workflow vocabulary in `skills/`: **Set Bearings**,
+**Gather Supplies**, **Map the Route**, **Explorer**, **Navigator**,
+**Crewmate**, and **Surveyor**. At runtime Bearing reads the relevant packaged
+`SKILL.md` files and embeds them in the selected harness request. Customers do
+not need AlphaZede's private skill installation, and the harness does not need
+to discover these skills globally. Only the launcher in `plugin-skills/` is
+exposed through the Codex and Claude Code plugin manifests, so an internal
+execution role cannot bypass Bearing's approvals and validation.
+
+To customize a source build, edit the corresponding `skills/<name>/SKILL.md`
+file, keep its `name` and `description` frontmatter valid, then rebuild and run
+the tests. TypeScript remains responsible for security boundaries, artifact
+validation, approval checks, and deterministic `review.html` generation; skill
+text cannot weaken those guarantees. Reinstalling or upgrading the npm package
+replaces edits made directly inside an installed package, so durable changes
+belong in a fork or source checkout.
 
 ## First launch
 
@@ -156,6 +176,13 @@ Each example exposes decision stops, expected artifacts, outcome classes, Survey
 ## State, recovery, export, and deletion
 
 Bearing stores a workspace manifest plus per-run hash-linked JSONL ledgers and snapshots beneath the selected repository's `.bearing/` directory. Choosing the same repository on a later launch resumes it. The ledger is authoritative; a missing or stale snapshot can be rebuilt from valid events. Corrupt, truncated, future-schema, sequence-invalid, or hash-invalid state blocks writable resume instead of being silently reset.
+
+For Codex, Claude, and Pi, a persistent journey checkpoint also records a
+bounded provider conversation UUID. Browser reconnection returns to active
+work, and a later Bearing process resumes that same conversation for the exact
+repository, journey, and saved model/reasoning selection. Separate journeys
+cannot inherit one another's conversation. Surveyor review remains a new,
+read-only session so the implementing conversation cannot certify itself.
 
 The real journey presents contained authenticated links for validated planning Markdown and generated HTML artifacts; showcase reports remain self-contained HTML fixtures. Journey History can delete one saved journey or clear all saved journeys for the selected repository; generated artifacts and source files remain untouched, and running journeys are protected. There is not yet an in-app full-state export. To preserve all local state, stop Bearing and copy the repository's `.bearing/` directory to an owner-controlled backup. To retire it recoverably, stop Bearing, make that backup, and rename `.bearing/` to a repository-specific quarantine name; permanent deletion remains an explicit repository-owner action. Provider credentials are never part of `.bearing/`.
 

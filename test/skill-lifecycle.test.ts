@@ -10,13 +10,13 @@ import { BUILTIN_ROUTES } from "../src/adapters/adapters.js";
 const service = new SkillLifecycleService();
 const routes = BUILTIN_ROUTES.map(({ id }) => id);
 const fingerprints = [
-  ["3b3de6336b48901e5e16c5d74546526d5cadd2d1dd8225def75ca44ac049d860", 111],
-  ["2828987ba022e151dedfcf41d97e71968657121136d0681ad4b4ed8dd1289070", 143],
-  ["332fa54e79f29fcfbc5b362ff482e2e10fcdfee7363dbdcd85f84e7d1f436076", 84],
-  ["a430306340804ca96388cd8774f395ca58759fe80dd0f4129995cb5ad1834d6c", 106],
-  ["ad68a5484916747c10169aa0ac4aeec97901c77ca82ce0d0a6d03988a7e9e872", 148],
-  ["9712c1fa88579be67d004c61f5e6e62f4ddc9d3ab25f459d6a2355058f324069", 47],
-  ["d4bcd3358d6f326fad96a2e9cf680638f783800c6ea8c3d3cb71bc8c177a8727", 149],
+  ["28e968fbb532c464f6d146d4f897c95b03c24d6d54cf10b799da538073f4198e", 14],
+  ["9c1be46f8e895fc88eceb178d4f8f019127986d2aac9c723c592dadf37d95774", 16],
+  ["5771ab35c2138fac7d9366e24be1acc70730881863dd367e777ad8799c310da8", 23],
+  ["8a8361798f04711171e8c66c7bbec96fabc0100f17f9284d8b43a5dd601833a1", 18],
+  ["26f5af019252490ddd49676e7e9acecfe8651be620470222ad598f8e77ca7600", 18],
+  ["c1f0064032ca68876e936233be56a1ea8dfc1af9eea01e93c82a451303307b94", 18],
+  ["15d01c6a7bb5b7f1236fb106eb70d7be9d47e67577a22e34009f8f9ff1d4a023", 16],
 ];
 
 function evidence(change: "rename" | "content-optimization" | "alias-removal" | "retirement" = "rename") {

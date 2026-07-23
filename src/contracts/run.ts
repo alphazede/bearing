@@ -73,6 +73,7 @@ export interface RecordJourneyCheckpointPayload {
   readonly selectionProvider?: string;
   readonly selectionModel?: string;
   readonly selectionReasoning?: string;
+  readonly providerSessionId?: string;
 }
 
 // --- Command envelope (discriminated by `type`) ----------------------------
@@ -288,7 +289,7 @@ function isOverrideExecutionModePayload(v: unknown): v is OverrideExecutionModeP
 }
 
 function isRecordJourneyCheckpointPayload(v: unknown): v is RecordJourneyCheckpointPayload {
-  if (!isObject(v) || !["stage", "status", "artifacts"].every((key) => key in v) || Object.keys(v).some((key) => !["stage", "status", "artifacts", "planDirectory", "question", "questionDecisionId", "reviewBaselineRevision", "lastResultJson", "qaJson", "gatherQuestionsDiscovered", "selectionProvider", "selectionModel", "selectionReasoning"].includes(key))) return false;
+  if (!isObject(v) || !["stage", "status", "artifacts"].every((key) => key in v) || Object.keys(v).some((key) => !["stage", "status", "artifacts", "planDirectory", "question", "questionDecisionId", "reviewBaselineRevision", "lastResultJson", "qaJson", "gatherQuestionsDiscovered", "selectionProvider", "selectionModel", "selectionReasoning", "providerSessionId"].includes(key))) return false;
   const stages = ["set-bearings", "gather-supplies", "map-route", "draft-implementation", "execute-explorer", "execute-expedition", "review"];
   const statuses = ["running", "waiting", "stopped", "failed", "complete"];
   const selectionValues = [v.selectionProvider, v.selectionModel, v.selectionReasoning];
@@ -296,7 +297,8 @@ function isRecordJourneyCheckpointPayload(v: unknown): v is RecordJourneyCheckpo
   return stages.includes(v.stage as string) && statuses.includes(v.status as string) && Array.isArray(v.artifacts) && v.artifacts.length <= 256 && v.artifacts.every((path) => isNonEmptyString(path)) &&
     (v.planDirectory === undefined || isNonEmptyString(v.planDirectory)) && (v.question === undefined || isNonEmptyString(v.question)) && (v.questionDecisionId === undefined || (isId(v.questionDecisionId) && v.question !== undefined)) &&
     (v.reviewBaselineRevision === undefined || isNonNegativeInt(v.reviewBaselineRevision)) && (v.lastResultJson === undefined || isNonEmptyString(v.lastResultJson, MAX_JOURNEY_RESULT_JSON)) &&
-    (v.qaJson === undefined || isNonEmptyString(v.qaJson, MAX_QA_JSON_BYTES)) && (v.gatherQuestionsDiscovered === undefined || typeof v.gatherQuestionsDiscovered === "boolean") && selectionValid;
+    (v.qaJson === undefined || isNonEmptyString(v.qaJson, MAX_QA_JSON_BYTES)) && (v.gatherQuestionsDiscovered === undefined || typeof v.gatherQuestionsDiscovered === "boolean") &&
+    (v.providerSessionId === undefined || typeof v.providerSessionId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.providerSessionId)) && selectionValid;
 }
 
 function hasExactKeys(v: unknown, keys: readonly string[]): v is Record<string, unknown> {

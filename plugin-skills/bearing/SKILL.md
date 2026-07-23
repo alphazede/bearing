@@ -1,12 +1,6 @@
 ---
 name: bearing
 description: Launch the local Bearing CLI and begin its planning-first repository journey when the user explicitly invokes or directly requests Bearing.
-type: agent-skill
-title: Bearing
-okf_status: active
-tags:
-  - developer
-  - public
 ---
 
 # Bearing

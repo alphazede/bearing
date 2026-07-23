@@ -274,6 +274,21 @@ describe("boundary parsing", () => {
     expect(r).toEqual({ ok: false, reason: "future_schema" });
   });
 
+  it("accepts only bounded UUID provider sessions in journey checkpoints", () => {
+    const checkpoint = {
+      schemaVersion: 1,
+      commandId: "checkpoint-1",
+      runId: RUN_ID,
+      expectedRevision: 1,
+      type: "recordJourneyCheckpoint",
+      payload: { stage: "gather-supplies", status: "waiting", artifacts: [], providerSessionId: "019f8d4e-a637-7e71-8c76-af9d7ec91adf" },
+      session: SESSION,
+      correlationId: "corr-1",
+    };
+    expect(parseCommandEnvelope(checkpoint).ok).toBe(true);
+    expect(parseCommandEnvelope({ ...checkpoint, payload: { ...checkpoint.payload, providerSessionId: "../../foreign-session" } }).ok).toBe(false);
+  });
+
   it("rejects malformed and future-schema event envelopes", () => {
     expect(parseEventEnvelope(null).ok).toBe(false);
     expect(parseEventEnvelope({ schemaVersion: 7 }).reason).toBe("future_schema");

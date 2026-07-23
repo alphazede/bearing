@@ -858,6 +858,7 @@ interface BrowserJourney {
   pendingQuestions: string[];
   gatherQuestionsDiscovered: boolean;
   recovery?: { fingerprint: string; repeats: number };
+  providerSessionId?: string;
   readonly selection?: Selection;
 }
 
@@ -868,7 +869,7 @@ type RecoveryReport = {
   readonly failureClass: "agent_receipt_or_artifact_validation";
   readonly code: FailureResult["code"];
   readonly retryLevel: "repair" | "simplify";
-  readonly version: "0.1.0";
+  readonly version: "0.1.1";
 };
 
 function recoverableFailure(result: JourneyResult): result is FailureResult {
@@ -935,6 +936,7 @@ async function persistJourneyCheckpoint(store: BearingStore, runId: string, stat
     qaJson: JSON.stringify(state.qa),
     gatherQuestionsDiscovered: state.gatherQuestionsDiscovered,
     ...(state.selection ? { selectionProvider: state.selection.provider, selectionModel: state.selection.model, selectionReasoning: state.selection.reasoning } : {}),
+    ...(state.providerSessionId ? { providerSessionId: state.providerSessionId } : {}),
   };
   const command = { schemaVersion: 1, commandId: id, runId, expectedRevision: durable.revision, session: { sessionId: "local-runtime", actor: "bearing" }, correlationId: id, type: "recordJourneyCheckpoint", payload } as CommandEnvelopeV1;
   const recorded = await store.apply(command);
@@ -976,6 +978,7 @@ function restoreJourney(entry: { goal: string; updatedAt: string; pendingQuestio
     pendingQuestions,
     gatherQuestionsDiscovered: checkpoint.gatherQuestionsDiscovered === true && !(checkpoint.stage === "gather-supplies" && staleQuestion),
     ...(checkpoint.selectionProvider && checkpoint.selectionModel && checkpoint.selectionReasoning ? { selection: { provider: checkpoint.selectionProvider, model: checkpoint.selectionModel, reasoning: checkpoint.selectionReasoning } } : {}),
+    ...(checkpoint.providerSessionId ? { providerSessionId: checkpoint.providerSessionId } : {}),
   };
   if (lastResult && recoverableFailure(lastResult)) restored.recovery = { fingerprint: recoveryFingerprint(checkpoint.stage, lastResult, restored), repeats: 3 };
   return restored;
@@ -1026,7 +1029,7 @@ function handleJourneyPost(req: IncomingMessage, res: ServerResponse, service: L
     if (stageChanged || ownerSteered) clearRecovery(state);
     if ((state.recovery?.repeats ?? 0) >= 3 && state.lastResult && recoverableFailure(state.lastResult)) {
       const links = state.artifacts.flatMap((path, index) => /\.(?:html|md)$/i.test(path) ? [{ path, url: `/api/v1/journey/${encodeURIComponent(value.runId)}/artifacts/${index}` }] : []);
-      writeShowcaseJson(res, { ...state.lastResult, artifacts: state.artifacts, artifactLinks: links, recovery: { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: state.lastResult.code, retryLevel: "simplify", version: "0.1.0" } satisfies RecoveryReport });
+      writeShowcaseJson(res, { ...state.lastResult, artifacts: state.artifacts, artifactLinks: links, recovery: { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: state.lastResult.code, retryLevel: "simplify", version: "0.1.1" } satisfies RecoveryReport });
       return;
     }
     if (value.answer) {
@@ -1067,7 +1070,7 @@ function handleJourneyPost(req: IncomingMessage, res: ServerResponse, service: L
     catch { state.busy = false; state.status = "failed"; writeRejection(res, 503); return; }
     let result: JourneyResult;
     let gatherMode = value.stage === "gather-supplies" ? value.answer || value.reviewChange || state.gatherQuestionsDiscovered ? "apply" as const : "questions" as const : undefined;
-    const execute = (reviewPrompt?: string) => journey.execute({ selection, run, repositoryPath, runId: value.runId, workGoal: state!.goal, stage: value.stage, priorOwnerQa: state!.qa, planDirectory: state!.planDirectory, ...(gatherMode ? { gatherMode } : {}), ...(reviewPrompt ? { reviewPrompt } : {}) });
+    const execute = (reviewPrompt?: string) => journey.execute({ selection, run, repositoryPath, runId: value.runId, workGoal: state!.goal, stage: value.stage, priorOwnerQa: state!.qa, planDirectory: state!.planDirectory, ...(gatherMode ? { gatherMode } : {}), ...(reviewPrompt ? { reviewPrompt } : {}), ...(state!.providerSessionId ? { providerSessionId: state!.providerSessionId } : {}) });
     let recoveryReport: RecoveryReport | undefined;
     try {
       result = await execute();
@@ -1099,14 +1102,15 @@ function handleJourneyPost(req: IncomingMessage, res: ServerResponse, service: L
         result = await execute(recoveryGuidance(lastRetryLevel, result.code));
       }
       if (result.status !== "failure" && firstFailure) {
-        recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure, retryLevel: lastRetryLevel, version: "0.1.0" };
+        recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure, retryLevel: lastRetryLevel, version: "0.1.1" };
         clearRecovery(state);
       } else if (recoverableFailure(result) && state.recovery?.repeats === 3) {
-        recoveryReport = { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: result.code, retryLevel: "simplify", version: "0.1.0" };
+        recoveryReport = { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: result.code, retryLevel: "simplify", version: "0.1.1" };
       } else if (!recoverableFailure(result)) clearRecovery(state);
     } catch {
       result = { status: "failure" as const, code: "adapter_failed" as const, tokens: 0 };
     } finally { state.busy = false; }
+    state.providerSessionId = journey.providerSessionId(repositoryPath, value.runId, selection) ?? state.providerSessionId;
     if (result.status === "question" && result.question) { state.question = result.question; state.questionStage = value.stage; state.questionDecisionId = `journey-${randomToken(12)}`; state.pendingQuestions = result.questions ? [...result.questions.slice(1)] : []; if (value.stage === "gather-supplies" && gatherMode === "questions") state.gatherQuestionsDiscovered = true; }
     if (result.status === "action") {
       for (const artifact of result.artifacts) if (!state.artifacts.includes(artifact)) state.artifacts.push(artifact);

@@ -76,18 +76,18 @@ describe("provider-neutral adapters", () => {
     expect(concreteRunner.calls[0]?.args).toEqual(["exec", "--json", "-m", "gpt-5.6-sol", "-c", 'model_reasoning_effort="high"', "-c", 'approval_policy="never"', "-C", repositoryPath, "-s", "read-only", "--ephemeral", "-"]);
   });
 
-  it("captures and resumes a Codex session while unsupported harnesses stay isolated", async () => {
+  it("captures or assigns resumable sessions for Codex, Claude, and Pi", async () => {
     const selection = { provider: "codex", model: "gpt-5.6-sol", reasoning: "medium" };
     const persistent = role({ selection, session: { persistence: "persistent", resume: "allowed", fork: "allowed" } });
-    const thread = "123e4567-e89b-12d3-a456-426614174000";
+    const thread = "019f8d4e-a637-7e71-8c76-af9d7ec91adf";
     const runner = new SyntheticRunner(undefined, [
       { exitCode: 0, events: [{ type: "turn.completed" }], usage: { tokens: 1 }, providerSessionId: thread },
       { exitCode: 0, events: [{ type: "turn.completed" }], usage: { tokens: 1 } },
     ]);
     const first = createAgentAdapter(selection, runner); if (!first) throw new Error("missing Codex adapter");
-    await first.execute({ runId: "first", repositoryPath, role: persistent, task: { prompt: "first" } });
+    await first.execute({ runId: "first", sessionScope: "journey-1", repositoryPath, role: persistent, task: { prompt: "first" } });
     const second = createAgentAdapter(selection, runner); if (!second) throw new Error("missing Codex adapter");
-    await second.execute({ runId: "second", repositoryPath, role: persistent, task: { prompt: "second" } });
+    await second.execute({ runId: "second", sessionScope: "journey-1", repositoryPath, role: persistent, task: { prompt: "second" } });
     expect(runner.calls[0]?.args).toEqual(expect.arrayContaining(["exec", "--json"]));
     expect(runner.calls[0]?.args).not.toContain("--ephemeral");
     expect(runner.calls[1]?.args).toEqual(expect.arrayContaining(["exec", "resume", thread, "--json", 'sandbox_mode="read-only"']));
@@ -95,9 +95,30 @@ describe("provider-neutral adapters", () => {
     const piSelection = { provider: "pi", model: "zai/glm-5.2", reasoning: "low" };
     const piRunner = new SyntheticRunner();
     const pi = createAgentAdapter(piSelection, piRunner); if (!pi) throw new Error("missing Pi adapter");
-    await pi.execute({ runId: "pi", repositoryPath, role: role({ selection: piSelection, session: { persistence: "persistent", resume: "allowed", fork: "allowed" } }), task: { prompt: "isolated" } });
-    expect(piRunner.calls[0]?.args).toContain("--no-session");
-    expect(piRunner.calls[0]?.providerSessionId).toBeUndefined();
+    const piRole = role({ selection: piSelection, session: { persistence: "persistent", resume: "allowed", fork: "allowed" } });
+    const piFirst = await pi.execute({ runId: "pi", repositoryPath, role: piRole, task: { prompt: "first" } });
+    expect(piFirst.providerSessionId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(piRunner.calls[0]?.args).toEqual(expect.arrayContaining(["--session-id", piFirst.providerSessionId]));
+    expect(piRunner.calls[0]?.args).not.toContain("--no-session");
+    const piResumed = createAgentAdapter(piSelection, piRunner); if (!piResumed) throw new Error("missing Pi adapter");
+    await piResumed.execute({ runId: "pi-resumed", repositoryPath, role: piRole, task: { prompt: "second" }, providerSessionId: piFirst.providerSessionId });
+    expect(piRunner.calls[1]?.args).toEqual(expect.arrayContaining(["--session-id", piFirst.providerSessionId]));
+
+    const claudeSelection = { provider: "claude", model: "*", reasoning: "medium" };
+    const claudeRunner = new SyntheticRunner();
+    const claudeRole = role({ selection: claudeSelection, session: { persistence: "persistent", resume: "allowed", fork: "allowed" } });
+    const claude = createAgentAdapter(claudeSelection, claudeRunner); if (!claude) throw new Error("missing Claude adapter");
+    const claudeFirst = await claude.execute({ runId: "claude", repositoryPath, role: claudeRole, task: { prompt: "first" } });
+    expect(claudeRunner.calls[0]?.args).toEqual(expect.arrayContaining(["--session-id", claudeFirst.providerSessionId]));
+    expect(claudeRunner.calls[0]?.args).not.toContain("--no-session-persistence");
+    const claudeResumed = createAgentAdapter(claudeSelection, claudeRunner); if (!claudeResumed) throw new Error("missing Claude adapter");
+    await claudeResumed.execute({ runId: "claude-resumed", repositoryPath, role: claudeRole, task: { prompt: "second" }, providerSessionId: claudeFirst.providerSessionId });
+    expect(claudeRunner.calls[1]?.args).toEqual(expect.arrayContaining(["--resume", claudeFirst.providerSessionId]));
+    expect(claudeRunner.calls[1]?.args).not.toContain("--no-session-persistence");
+  });
+
+  it("rejects malformed durable provider session identifiers", async () => {
+    expect(await adapter().execute({ runId: "bad-session", repositoryPath, role: role({ session: { persistence: "persistent", resume: "allowed", fork: "allowed" } }), task: { prompt: "x" }, providerSessionId: "../../other-session" })).toMatchObject({ status: "blocked", failure: "unsupported_policy" });
   });
 
   it("truthfully resolves isolation modes", async () => {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readdir, realpath } from "node:fs/promises";
+import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
 import { BUILTIN_ROUTES, createAgentAdapter, type ProcessActivity, type ProcessRunner, type RouteDescriptor } from "../adapters/adapters.js";
 import type { ResolvedRun, Selection } from "../profile/profile.js";
@@ -19,6 +19,7 @@ export interface JourneyRequest {
   readonly gatherMode?: "questions" | "apply";
   readonly planDirectory?: string;
   readonly reviewPrompt?: string;
+  readonly providerSessionId?: string;
 }
 export type JourneyFailureCode = "input_invalid" | "selection_mismatch" | "crewmate_unavailable" | "adapter_failed" | "cancelled" | "interrupted" | "token_budget" | "result_missing" | "result_malformed" | "artifact_invalid";
 export interface PlanningAssignment {
@@ -50,20 +51,20 @@ export type JourneyResult =
   | { readonly status: "action"; readonly summary: string; readonly artifacts: readonly string[]; readonly tokens: number; readonly planningReview?: PlanningReview; readonly nextStageEstimate?: NextStageEstimate }
   | { readonly status: "failure"; readonly code: JourneyFailureCode; readonly tokens: number };
 
-const STAGE_COMMAND: Readonly<Record<JourneyStage, string>> = {
-  "set-bearings": "$to-plan",
-  "gather-supplies": "$grill-with-docs",
-  "map-route": "$design-driven-build",
-  "draft-implementation": "$to-plan",
-  "execute-explorer": "$conductor-orchestrate",
-  "execute-expedition": "$ultimate-loop",
-  review: "native harness review (`/review` or `codex exec review`); use the Surveyor fallback only when no native reviewer is available",
+const STAGE_SKILLS: Readonly<Record<JourneyStage, readonly string[]>> = {
+  "set-bearings": ["set-bearings"],
+  "gather-supplies": ["gather-supplies"],
+  "map-route": ["map-the-route"],
+  "draft-implementation": ["map-the-route"],
+  "execute-explorer": ["explorer", "crewmate", "surveyor"],
+  "execute-expedition": ["navigator", "explorer", "crewmate", "surveyor"],
+  review: ["surveyor"],
 };
 const STAGE_BOUNDARY: Readonly<Record<JourneyStage, string>> = {
   "set-bearings": "Create or resume only the plan directory and plan-spec.md stub. Bearing may retain a bounded repository inventory as internal runtime evidence, but plan-local prompt persistence is not required. Do not grill, design, draft implementation.md, or implement the work.",
   "gather-supplies": "Use the complete owner Q&A and update only the validated plan specification. Do not run design, draft implementation.md, or implement the work. Return an action receipt whose artifacts include the validated plan-spec.md path.",
-  "map-route": "Invoke $design-driven-build. Before writing any design artifact, stop at its normal owner lens-approval question when lens approval is not already recorded in the prior owner Q&A. After approval, produce valid complete or amended design.md and seit.md, including stable DES/CONTRACT IDs, Use Cases and Communication Flows, Interface Option Check, OOPDSA Implementation Design, and the prospective SEIT Traceability Matrix. Bearing generates review.html deterministically from the current Markdown sources; do not write or summarize review.html. Stop at the design-driven-build handoff. Do not invoke $to-plan, write implementation.md, or execute implementation. A successful action receipt must include design.md and seit.md in the validated plan directory.",
-  "draft-implementation": "Draft implementation.md without executing any slice. Keep each slice reference-only with Goal, Requirement IDs, Design IDs, SEIT proof rows, Type, Design lenses, Implementation role, Agent model route, Agent reasoning level, Ponytail mode, and Review path. Requirement, design, and SEIT IDs must exist in their owning documents and each slice's referenced SEIT rows must map its requirement and design IDs. Ponytail mode must be exactly the standalone lowercase value `full` or `off`. Follow every slice with a matching `### <slice-id> execution manifest` containing Write set, Command IDs, Stop condition, and Human decision. Close each write set with `only` and exact backticked paths, or explicitly declare no writes. Command IDs must be defined in seit.md and mapped by the slice's SEIT proof rows. Declare contiguous Wave 1 through Wave N dependencies when there is more than one slice. Do not restate acceptance, design contracts, test cases, commands, evidence, or execution packet prose. Preserve per-slice assignments for execution; do not replace them with onboarding settings. The Review path must use the harness-native reviewer when available or the Surveyor fallback when unavailable; do not use standard gate or gate-review. Bearing generates review.html deterministically from the four current Markdown sources; do not write or summarize it. A successful action receipt must include implementation.md.",
+  "map-route": "Use the design substep of Map the Route. Before writing any design artifact, stop at its normal owner lens-approval question when lens approval is not already recorded in the prior owner Q&A. After approval, produce valid complete or amended design.md and seit.md, including stable DES/CONTRACT IDs, Use Cases and Communication Flows, Interface Option Check, OOPDSA Implementation Design, and the prospective SEIT Traceability Matrix. Bearing generates review.html deterministically from the current Markdown sources; do not write or summarize review.html. Stop at the design-and-SEIT validation checkpoint. Do not write implementation.md or execute implementation in this substep. A successful action receipt must include design.md and seit.md in the validated plan directory.",
+  "draft-implementation": "Continue the implementation-drafting substep of Map the Route after the validated design and SEIT checkpoint. Draft implementation.md without executing any slice. Keep each slice reference-only with Goal, Requirement IDs, Design IDs, SEIT proof rows, Type, Design lenses, Implementation role, Agent model route, Agent reasoning level, Ponytail mode, and Review path. Requirement, design, and SEIT IDs must exist in their owning documents and each slice's referenced SEIT rows must map its requirement and design IDs. Ponytail mode must be exactly the standalone lowercase value `full` or `off`. Follow every slice with a matching `### <slice-id> execution manifest` containing Write set, Command IDs, Stop condition, and Human decision. Close each write set with `only` and exact backticked paths, or explicitly declare no writes. Command IDs must be defined in seit.md and mapped by the slice's SEIT proof rows. Declare contiguous Wave 1 through Wave N dependencies when there is more than one slice. Do not restate acceptance, design contracts, test cases, commands, evidence, or execution packet prose. Preserve per-slice assignments for execution; do not replace them with onboarding settings. The Review path must use the harness-native reviewer when available or the Surveyor fallback when unavailable. Bearing generates review.html deterministically from plan-spec.md, design.md, seit.md, and implementation.md; do not write or summarize it. A successful action receipt must include implementation.md.",
   "execute-explorer": "Execute the approved implementation plan with Explorer and honor each recorded slice model route, reasoning level, Ponytail mode, and review cadence. Do not overwrite slice assignments with onboarding settings. After implementation and validation, replace the one Bearing-owned `<section id=\"bearing-final-qa\" data-status=\"pending\">` baseline with exactly one `<section id=\"bearing-final-qa\" data-status=\"complete\">` containing non-empty `Planned versus actual: <evidence>` and `Validation evidence: <evidence>` text. Put each labeled value in its own attribute-free `<p>` and use plain text only: no nested HTML, markup, `<`, or `>` in either evidence value. Preserve every current embedded planning source and canonical source link. The action receipt must include review.html and every actual changed artifact. Return only paths that actually exist.",
   "execute-expedition": "Execute the approved implementation plan with Expedition and honor each recorded slice model route, reasoning level, Ponytail mode, and review cadence. Do not overwrite slice assignments with onboarding settings. After implementation and validation, replace the one Bearing-owned `<section id=\"bearing-final-qa\" data-status=\"pending\">` baseline with exactly one `<section id=\"bearing-final-qa\" data-status=\"complete\">` containing non-empty `Planned versus actual: <evidence>` and `Validation evidence: <evidence>` text. Put each labeled value in its own attribute-free `<p>` and use plain text only: no nested HTML, markup, `<`, or `>` in either evidence value. Preserve every current embedded planning source and canonical source link. The action receipt must include review.html and every actual changed artifact. Return only paths that actually exist.",
   review: "Perform a read-only review of the integrated uncommitted work. Do not modify files. Return existing evidence paths relevant to the review.",
@@ -105,12 +106,23 @@ async function containedPath(root: string, value: string, directoryOnly = false)
 
 function validRequest(request: JourneyRequest): boolean {
   if (!isAbsolute(request.repositoryPath) || !/^[A-Za-z0-9_-]{1,128}$/.test(request.runId) || !text(request.workGoal)) return false;
-  if (!(request.stage in STAGE_COMMAND) || !Array.isArray(request.priorOwnerQa) || request.priorOwnerQa.length > MAX_QA) return false;
+  if (!(request.stage in STAGE_SKILLS) || !Array.isArray(request.priorOwnerQa) || request.priorOwnerQa.length > MAX_QA) return false;
   return (request.gatherMode === undefined || request.stage === "gather-supplies") &&
+    (request.providerSessionId === undefined || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.providerSessionId)) &&
     (request.reviewPrompt === undefined || text(request.reviewPrompt)) && request.priorOwnerQa.every((entry) => typeof entry === "object" && entry !== null && text(entry.question) && text(entry.answer));
 }
 
-function prompt(request: JourneyRequest, planDirectory: string | undefined): string {
+const MAX_PACKAGED_SKILL_BYTES = 64 * 1024;
+async function packagedSkills(stage: JourneyStage): Promise<string> {
+  const sources = await Promise.all(STAGE_SKILLS[stage].map(async (name) => {
+    const source = await readFile(new URL(`../../skills/${name}/SKILL.md`, import.meta.url), "utf8");
+    if (Buffer.byteLength(source) > MAX_PACKAGED_SKILL_BYTES || /\u0000/.test(source) || !new RegExp(`^---\\r?\\nname: ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\r?\\ndescription: [^\\r\\n]+\\r?\\n---(?:\\r?\\n|$)`).test(source)) throw new Error("packaged skill invalid");
+    return `### ${name}\n${source}`;
+  }));
+  return ["Packaged Bearing skills (authoritative workflow instructions for this stage):", ...sources].join("\n\n");
+}
+
+function prompt(request: JourneyRequest, planDirectory: string | undefined, skillInstructions: string): string {
   const gatheringQuestions = request.stage === "gather-supplies" && request.gatherMode === "questions";
   const availableQuestions = Math.min(MAX_GATHER_QUESTIONS, Math.max(0, MAX_QA - request.priorOwnerQa.length));
   const grilling = gatheringQuestions
@@ -139,7 +151,8 @@ function prompt(request: JourneyRequest, planDirectory: string | undefined): str
       : "Estimate the complete next phase, including required artifacts, validation, and agent round trips—not only repository inspection.";
   return [
     "You are a bounded Bearing journey agent. Work only inside the supplied repository and existing authority.",
-    `Stage: ${request.stage}. Explicitly invoke ${STAGE_COMMAND[request.stage]} for this stage.${grilling}`,
+    `Stage: ${request.stage}. Apply the embedded Bearing skill instructions for this stage.${grilling}`,
+    skillInstructions,
     `Stage boundary: ${boundary}`,
     `Work goal: ${JSON.stringify(request.workGoal)}`,
     `The onboarding selection ${JSON.stringify(request.selection)} governs this top-level planning agent and the Explorer/Navigator session. Keep it for planning, design, and review. Implementation.md may record task-appropriate supported model routes and reasoning levels per coding slice; execution must honor those recorded assignments instead of overwriting them.`,
@@ -164,7 +177,7 @@ type Envelope = { readonly kind: "question"; readonly question: string; readonly
 function estimate(value: unknown): value is NextStageEstimate {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
-  return Object.keys(item).length === 4 && typeof item.stage === "string" && (item.stage === "execute" || item.stage in STAGE_COMMAND) &&
+  return Object.keys(item).length === 4 && typeof item.stage === "string" && (item.stage === "execute" || item.stage in STAGE_SKILLS) &&
     typeof item.minMinutes === "number" && Number.isSafeInteger(item.minMinutes) && item.minMinutes >= 1 && item.minMinutes <= 1_440 &&
     typeof item.maxMinutes === "number" && Number.isSafeInteger(item.maxMinutes) && item.maxMinutes >= item.minMinutes && item.maxMinutes <= 1_440 && text(item.basis, MAX_ESTIMATE_BASIS);
 }
@@ -490,12 +503,19 @@ export class JourneyService {
   private readonly active = new Map<string, string>();
   private readonly cancelled = new Set<string>();
   private readonly activity = new Map<string, { stage: JourneyStage; nextSequence: number; trail: JourneyActivity[] }>();
+  private readonly providerSessions = new Map<string, string>();
   constructor(private readonly runner: ProcessRunner) {}
 
   cancel(runId: string): void { this.cancelled.add(runId); const processRunId = this.active.get(runId); if (processRunId) void this.runner.cancel?.(processRunId); }
 
   activityTrail(runId: string): readonly JourneyActivity[] {
     return (this.activity.get(runId)?.trail ?? []).map((entry) => ({ ...entry }));
+  }
+
+  providerSessionId(repositoryPath: string, runId: string, selection: Selection): string | undefined { return this.providerSessions.get(this.providerSessionKey(repositoryPath, runId, selection)); }
+
+  private providerSessionKey(repositoryPath: string, runId: string, selection: Selection): string {
+    return JSON.stringify([repositoryPath, runId, selection.provider, selection.model, selection.reasoning]);
   }
 
   private beginStage(runId: string, stage: JourneyStage): void {
@@ -540,7 +560,9 @@ export class JourneyService {
         return { status: "action", summary: workspace.resumed ? "Bearings resumed locally." : "Bearings set locally.", artifacts: workspace.artifacts, tokens: 0 };
       } catch { return { status: "failure", code: "artifact_invalid", tokens: 0 }; }
     }
-    const taskPrompt = prompt(request, planDirectory);
+    let taskPrompt: string;
+    try { taskPrompt = prompt(request, planDirectory, await packagedSkills(request.stage)); }
+    catch { return { status: "failure", code: "adapter_failed", tokens: 0 }; }
     let tokens = 0;
     let events: unknown;
     if (this.cancelled.has(request.runId)) return { status: "failure", code: "cancelled", tokens: 0 };
@@ -564,10 +586,13 @@ export class JourneyService {
       if (!adapter) return { status: "failure", code: "crewmate_unavailable", tokens: 0 };
       let receipt;
       const questionDiscovery = request.stage === "gather-supplies" && request.gatherMode === "questions";
-      const planningSession = request.stage === "gather-supplies" || request.stage === "map-route" || request.stage === "draft-implementation";
-      try { receipt = await adapter.execute({ runId: processRunId, repositoryPath, role: { ...projected, sessionId: planningSession ? projected.sessionId : null, authority: { ...projected.authority, write: questionDiscovery ? false : projected.authority.write, network: request.selection.provider === "agy", externalAction: false }, toolAllow: questionDiscovery ? projected.toolAllow.filter((tool) => !/write|edit/i.test(tool)) : projected.toolAllow }, task: { prompt: taskPrompt }, onActivity: (activity) => this.recordActivity(request.runId, activityStage, activity), ...(request.stage === "execute-expedition" ? { allowSubagents: true } : {}) }); }
+      const journeySession = request.stage !== "review";
+      const providerSessionKey = this.providerSessionKey(repositoryPath, request.runId, request.selection);
+      const continuation = journeySession ? request.providerSessionId ?? this.providerSessions.get(providerSessionKey) : undefined;
+      try { receipt = await adapter.execute({ runId: processRunId, sessionScope: request.runId, repositoryPath, role: { ...projected, sessionId: journeySession ? projected.sessionId : null, authority: { ...projected.authority, write: questionDiscovery ? false : projected.authority.write, network: request.selection.provider === "agy", externalAction: false }, toolAllow: questionDiscovery ? projected.toolAllow.filter((tool) => !/write|edit/i.test(tool)) : projected.toolAllow }, task: { prompt: taskPrompt }, onActivity: (activity) => this.recordActivity(request.runId, activityStage, activity), ...(continuation ? { providerSessionId: continuation } : {}), ...(request.stage === "execute-expedition" ? { allowSubagents: true } : {}) }); }
       catch { return { status: "failure", code: "adapter_failed", tokens: 0 }; }
       if (receipt.status !== "completed") return { status: "failure", code: this.cancelled.has(request.runId) && (receipt.status === "blocked_reconcile" || receipt.failure === "unknown_side_effect") ? "interrupted" : receipt.failure === "token_budget" ? "token_budget" : receipt.failure === "cancelled" ? "cancelled" : "adapter_failed", tokens: receipt.usage.tokens };
+      if (journeySession && receipt.providerSessionId) this.providerSessions.set(providerSessionKey, receipt.providerSessionId);
       tokens = receipt.usage.tokens;
       events = receipt.events;
     }

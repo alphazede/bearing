@@ -11,15 +11,15 @@ describe("Bearing plugin contract", () => {
     const marketplace = JSON.parse(await read("../.claude-plugin/marketplace.json"));
     expect(codexManifest).toMatchObject({
       name: "bearing",
-      skills: "./skills/",
+      skills: "./plugin-skills/",
       author: { name: "William Rumph / AlphaZede" },
       interface: { developerName: "William Rumph / AlphaZede" },
     });
-    expect(codexManifest.version).toMatch(/^0\.1\.0(?:\+codex\.\d{14})?$/);
+    expect(codexManifest.version).toBe("0.1.1");
     expect(claudeManifest).toMatchObject({
       name: "bearing",
-      version: "0.1.0",
-      skills: "./skills/",
+      version: "0.1.1",
+      skills: "./plugin-skills/",
       author: { name: "William Rumph / AlphaZede" },
     });
     expect(marketplace).toMatchObject({
@@ -30,7 +30,7 @@ describe("Bearing plugin contract", () => {
     expect(packageJson.author).toBe("William Rumph / AlphaZede");
     expect(packageJson.license).toBe("MIT OR Apache-2.0");
     expect(packageJson.files).toEqual(expect.arrayContaining([
-      ".claude-plugin/", ".codex-plugin/", "skills/", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE",
+      ".claude-plugin/", ".codex-plugin/", "plugin-skills/", "skills/", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE",
     ]));
     expect(codexManifest.license).toBe(packageJson.license);
     expect(claudeManifest.license).toBe(packageJson.license);
@@ -48,11 +48,9 @@ describe("Bearing plugin contract", () => {
   });
 
   it("limits the skill to explicit planning-first launches", async () => {
-    const skill = await read("../skills/bearing/SKILL.md");
+    const skill = await read("../plugin-skills/bearing/SKILL.md");
     const skillProse = prose(skill);
     expect(skill).toContain("name: bearing");
-    expect(skill).toContain("- developer");
-    expect(skill).toContain("- public");
     expect(skillProse).toContain("explicitly invokes `$bearing`, `/bearing`, or directly asks to use Bearing");
     expect(skillProse).toContain("keep PATH first");
     expect(skillProse).toContain("`../../dist/cli.js` relative to this `SKILL.md` directory");
@@ -70,7 +68,27 @@ describe("Bearing plugin contract", () => {
     expect(skillProse).toContain("Do not use");
   });
 
-  it("documents both plugin entry points without implying npm availability", async () => {
+  it("ships Map the Route as one frontend-aligned planning owner", async () => {
+    const skill = await read("../skills/map-the-route/SKILL.md");
+    const skillProse = prose(skill);
+    expect(skill).toContain("name: map-the-route");
+    expect(skillProse).toContain("design-and-SEIT validation checkpoint");
+    expect(skillProse).toContain("Write `implementation.md`");
+    expect(skillProse).toContain("Bearing owns deterministic `review.html` generation");
+    expect(skillProse).toContain("complete current `plan-spec.md`, `design.md`, `seit.md`, and `implementation.md`");
+    expect(skillProse).not.toContain("$to-plan");
+    expect(skillProse).not.toContain("$map-the-route");
+  });
+
+  it("ships every frontend workflow skill in the npm package", async () => {
+    const names = ["set-bearings", "gather-supplies", "map-the-route", "explorer", "navigator", "crewmate", "surveyor"];
+    for (const name of names) {
+      const skill = await read(`../skills/${name}/SKILL.md`);
+      expect(skill).toMatch(new RegExp(`^---\\nname: ${name}\\ndescription: [^\\n]+\\n---\\n`));
+    }
+  });
+
+  it("documents both plugin entry points and packaged skill customization", async () => {
     const readme = await read("../README.md");
     const readmeProse = prose(readme);
     expect(readmeProse).toContain("packaged for Codex and Claude Code");
@@ -78,7 +96,11 @@ describe("Bearing plugin contract", () => {
     expect(readme).toContain("/plugin marketplace add alphazede/bearing");
     expect(readme).toContain("/plugin install bearing@bearing");
     expect(readmeProse).toContain("Invoke `/bearing` or ask Claude to use Bearing");
-    expect(readmeProse).toContain("has not yet been published");
+    expect(readmeProse).toContain("public npm package is `@alphazede/bearing`");
+    expect(readmeProse).toContain("reads the relevant packaged `SKILL.md` files and embeds them");
+    expect(readmeProse).toContain("do not need AlphaZede's private skill installation");
+    expect(readmeProse).toContain("Only the launcher in `plugin-skills/` is exposed");
+    expect(readmeProse).toContain("security boundaries, artifact validation, approval checks, and deterministic `review.html` generation");
     expect(readmeProse).toContain("not launch on SessionStart");
     expect(readmeProse).toContain("After an explicit invocation");
     expect(readmeProse).toContain("best-effort opens the browser automatically");

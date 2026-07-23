@@ -1,6 +1,6 @@
 {
   "name": "@alphazede/bearing",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local browser control room for evidence-backed agent workflows.",
   "author": "William Rumph / AlphaZede",
   "license": "MIT OR Apache-2.0",
@@ -23,6 +23,7 @@
     "assets/",
     ".claude-plugin/",
     ".codex-plugin/",
+    "plugin-skills/",
     "examples/fictional-b2b/",
     "skills/",
     "README.md",
