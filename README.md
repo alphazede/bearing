@@ -15,6 +15,16 @@ Bearing is a Codex plugin and skill created by William Rumph at AlphaZede.
 
 This is the initial public `0.1.0` release. It is a working local tool, not a hosted service or a claim that every provider route is ready on your machine.
 
+## Repository layout
+
+- `src/` — application source.
+- `test/` — automated tests.
+- `skills/` — the packaged Bearing skill.
+- `fixtures/fictional-b2b/` — deterministic public-safe tutorial, showcase, and QA data.
+- `assets/` — interface artwork.
+
+Bearing writes generated planning artifacts into the repository selected by the user at runtime. Generated customer plans are not maintained in Bearing's public source tree.
+
 ## Install and start
 
 Bearing requires Node.js 22 or newer. After the npm release is available, either install the CLI globally or run it without a permanent installation:
