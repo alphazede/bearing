@@ -193,7 +193,12 @@ export class NodeProcessRunner implements ProcessRunner {
         });
         if (options.length) return options.slice(0, 64);
       }
-      if (route.provider === "claude") return uniqueModels([current.model, "sonnet", "opus", "haiku", "fable"], route.reasoningLevels, current.reasoning);
+      if (route.provider === "claude") {
+        const help = this.inspectRoute(route, ["--help"], repositoryPath).join(" ");
+        const levels = (/(?:^|\s)--effort <level>[^(]*\(([^)]*)\)/.exec(help)?.[1] ?? "").split(",").map((level) => level.trim().toLowerCase()).filter((level) => route.reasoningLevels.includes(level));
+        const documented = [...(/(?:^|\s)--model <model>(.*?)(?:\s-n, --name|$)/.exec(help)?.[1] ?? "").matchAll(/'([A-Za-z0-9._[\]-]{1,64})'/g)].map((match) => match[1]!);
+        return uniqueModels([current.model, ...documented, "sonnet", "opus", "haiku", "fable", ...claudeEntitledModels()], levels.length ? levels : route.reasoningLevels, current.reasoning);
+      }
       if (route.provider === "agy") return this.inspectRoute(route, ["models"], repositoryPath).flatMap((line): RouteModelOption[] => {
         const match = /^(.*?) \((Low|Medium|High|Thinking)\)$/.exec(line);
         if (!match) return [];
@@ -327,6 +332,14 @@ function inspectLines(executable: string, args: readonly string[], cwd: string):
 
 function uniqueModels(models: readonly string[], reasoningLevels: readonly string[], preferred: string): RouteModelOption[] {
   return [...new Set(models.filter((model) => model && model.length <= 256))].map((model) => ({ model, label: model === "*" || model === "default" ? "Agent default" : model, reasoningLevels, defaultReasoning: reasoningLevels.includes(preferred) ? preferred : reasoningLevels[0] }));
+}
+
+/** Extra model choices the installed Claude CLI cached for this account. */
+function claudeEntitledModels(): readonly string[] {
+  try {
+    const cached = jsonObject(join(homedir(), ".claude.json")).additionalModelOptionsCache;
+    return Array.isArray(cached) ? cached.flatMap((entry) => { const value = text(object(entry)?.value); return value ? [value] : []; }) : [];
+  } catch { return []; }
 }
 
 function opencodeReasoning(provider: string): readonly string[] {

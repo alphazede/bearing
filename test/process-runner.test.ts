@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
@@ -163,6 +163,46 @@ describe("production process runner", () => {
     const route = { id: "agy", provider: "agy", model: "*", executable: "agy", capabilities: [], compatibleFallbacks: [], reasoningLevels: ["medium"] };
     expect(runner.modelOptions(route, repositoryPath)).toEqual([{ model: "Gemini 3.5 Flash (Medium)", label: "Gemini 3.5 Flash (Medium)", reasoningLevels: ["medium"], defaultReasoning: "medium" }]);
     expect(inspected).toEqual([{ executable: "/usr/local/bin/agy", args: ["models"], cwd: repositoryPath }]);
+  });
+
+  it("discovers Claude models and effort levels from the installed CLI contract", async () => {
+    const home = await mkdtemp(join(tmpdir(), "bearing-claude-home-"));
+    const previous = process.env.HOME;
+    const help = [
+      "  --effort <level>                      Effort level for the current session",
+      "                                        (low, medium, high, xhigh, max)",
+      "  --fallback-model <model>              Enable automatic fallback to specified",
+      "                                        model(s) when the default model is",
+      "                                        overloaded or not available.",
+      "  --model <model>                       Model for the current session. Provide",
+      "                                        an alias for the latest model (e.g.",
+      "                                        'fable', 'opus', or 'sonnet') or a",
+      "                                        model's full name (e.g.",
+      "                                        'claude-fable-5').",
+      "  -n, --name <name>                     Set a display name for this session",
+      "",
+    ].join("\n");
+    const inspected: Array<{ executable: string; args: readonly string[] }> = [];
+    try {
+      await mkdir(join(home, ".claude"));
+      await writeFile(join(home, ".claude", "settings.json"), JSON.stringify({ model: "opus", effortLevel: "xhigh" }));
+      await writeFile(join(home, ".claude.json"), JSON.stringify({ additionalModelOptionsCache: [{ value: "claude-fable-5[1m]", label: "Fable" }, { notAModel: true }] }));
+      process.env.HOME = home;
+      const runner = new NodeProcessRunner(undefined, () => true, (executable, cwd) => ({ executable, cwd }), (executable, args) => { inspected.push({ executable, args }); return help; });
+      const route = { id: "claude", provider: "claude", model: "*", executable: "claude", capabilities: [], compatibleFallbacks: [], reasoningLevels: ["low", "medium", "high", "xhigh", "max"] };
+      const levels = ["low", "medium", "high", "xhigh", "max"];
+      expect(runner.currentSelection(route)).toEqual({ model: "opus", reasoning: "xhigh" });
+      expect(runner.modelOptions(route, repositoryPath)).toEqual(["opus", "fable", "sonnet", "claude-fable-5", "haiku", "claude-fable-5[1m]"].map((model) => ({ model, label: model, reasoningLevels: levels, defaultReasoning: "xhigh" })));
+      expect(inspected).toEqual([{ executable: "claude", args: ["--help"] }]);
+    } finally {
+      if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the selected Claude model and effort level through unchanged", async () => {
+    const claude = await execute({ provider: "claude", model: "claude-fable-5[1m]", reasoning: "max" });
+    expect(claude.calls[0].args).toEqual(["--print", "--output-format", "stream-json", "--verbose", "--model", "claude-fable-5[1m]", "--effort", "max", "--permission-mode", "dontAsk", "--allowedTools", "Read,Edit,Write", "--no-session-persistence"]);
   });
 
   it("reads Pi's selected model from its configured agent directory", async () => {
