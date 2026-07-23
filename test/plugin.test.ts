@@ -15,9 +15,11 @@ describe("Bearing Codex plugin contract", () => {
     expect(manifest.version).toMatch(/^0\.1\.0(?:\+codex\.\d{14})?$/);
     const packageJson = JSON.parse(await read("../package.json"));
     expect(packageJson.author).toBe("William Rumph / AlphaZede");
+    expect(packageJson.license).toBe("MIT OR Apache-2.0");
     expect(packageJson.files).toEqual(expect.arrayContaining([
-      ".codex-plugin/", "skills/",
+      ".codex-plugin/", "skills/", "LICENSE-MIT", "LICENSE-APACHE",
     ]));
+    expect(manifest.license).toBe(packageJson.license);
     expect(packageJson.files).not.toContain("commands/");
     await expect(read("../commands/bearing.toml")).rejects.toMatchObject({ code: "ENOENT" });
   });

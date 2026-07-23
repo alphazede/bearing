@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Local browser control room for evidence-backed agent workflows.",
   "author": "William Rumph / AlphaZede",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alphazede/bearing.git"
@@ -25,7 +25,8 @@
     "fixtures/fictional-b2b/",
     "skills/",
     "README.md",
-    "LICENSE"
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
   ],
   "packageManager": "pnpm@10.33.0",
   "type": "module",

@@ -192,4 +192,5 @@ AlphaZede's underlying workflow skills, planning conventions, and bounded-agent 
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Licensed, at your option, under either the [Apache License 2.0](LICENSE-APACHE)
+or the [MIT license](LICENSE-MIT).

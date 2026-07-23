@@ -8,7 +8,7 @@
   },
   "homepage": "https://github.com/alphazede/bearing",
   "repository": "https://github.com/alphazede/bearing",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "skills": "./skills/",
   "interface": {
     "displayName": "Bearing",
