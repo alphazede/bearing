@@ -1,4 +1,5 @@
-import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { planDirectoryValid } from "./plan-directory.js";
 import { containedDirectory } from "./repository-map.js";
@@ -6,6 +7,30 @@ const MAX_DEPTH = 4;
 const MAX_PATHS = 200;
 function missing(error) {
     return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+async function readVerifiedFile(path) {
+    let handle;
+    try {
+        handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+        const opened = await handle.stat();
+        const linked = await lstat(path);
+        if (!opened.isFile()
+            || !linked.isFile()
+            || linked.isSymbolicLink()
+            || opened.dev !== linked.dev || opened.ino !== linked.ino)
+            return { status: "invalid" };
+        return { status: "file", content: await handle.readFile() };
+    }
+    catch (error) {
+        if (missing(error))
+            return { status: "missing", error };
+        if (error instanceof Error && "code" in error && error.code === "ELOOP")
+            return { status: "invalid" };
+        throw error;
+    }
+    finally {
+        await handle?.close();
+    }
 }
 function repositoryPath(repository, path) {
     return relative(repository, path).replaceAll("\\", "/");
@@ -143,10 +168,12 @@ export async function planConsolidation(repository, canonical, sources) {
         const paths = inventory.paths.filter((path) => !path.endsWith("/"));
         for (const path of paths) {
             const sourcePath = resolve(sourceDirectory, path);
-            const sourceInfo = await lstat(sourcePath);
-            if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink())
+            const sourceFile = await readVerifiedFile(sourcePath);
+            if (sourceFile.status === "missing")
+                throw sourceFile.error;
+            if (sourceFile.status === "invalid")
                 continue;
-            const content = await readFile(sourcePath);
+            const content = sourceFile.content;
             const destinationPath = resolve(canonicalDirectory, path);
             const destination = repositoryPath(repository, destinationPath);
             let action;
@@ -165,23 +192,19 @@ export async function planConsolidation(repository, canonical, sources) {
                     action = "copy";
                 }
                 else {
-                    try {
-                        const info = await lstat(destinationPath);
-                        if (!info.isFile() || info.isSymbolicLink()) {
-                            expected.set(destination, undefined);
-                            action = "conflict";
-                        }
-                        else {
-                            const existing = await readFile(destinationPath);
-                            expected.set(destination, existing);
-                            action = existing.equals(content) ? "skip" : "conflict";
-                        }
-                    }
-                    catch (error) {
-                        if (!missing(error))
-                            throw error;
+                    const destinationFile = await readVerifiedFile(destinationPath);
+                    if (destinationFile.status === "missing") {
                         expected.set(destination, content);
                         action = "copy";
+                    }
+                    else if (destinationFile.status === "invalid") {
+                        expected.set(destination, undefined);
+                        action = "conflict";
+                    }
+                    else {
+                        const existing = destinationFile.content;
+                        expected.set(destination, existing);
+                        action = existing.equals(content) ? "skip" : "conflict";
                     }
                 }
             }
@@ -230,11 +253,15 @@ export async function applyConsolidation(repository, plan) {
             throw new Error("plan_directory_invalid");
         const source = resolve(repository, entry.source);
         const sourceParent = await containedDirectory(repository, dirname(source));
-        const sourceInfo = await lstat(source);
-        if (!sourceParent || !sourceInfo.isFile() || sourceInfo.isSymbolicLink())
+        if (!sourceParent)
+            throw new Error("plan_directory_invalid");
+        const sourceFile = await readVerifiedFile(source);
+        if (sourceFile.status === "missing")
+            throw sourceFile.error;
+        if (sourceFile.status === "invalid")
             throw new Error("plan_directory_invalid");
         const parent = await ensureParent(repository, canonical, relation);
-        await writeFile(resolve(parent, basename(relation)), await readFile(source), { flag: "wx" });
+        await writeFile(resolve(parent, basename(relation)), sourceFile.content, { flag: "wx" });
         copied.push(entry.destination);
     }
     return { ok: true, copied, skipped, sources: plan.sources };

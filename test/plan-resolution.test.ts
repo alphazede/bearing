@@ -435,4 +435,15 @@ describe("plan consolidation", () => {
     const source = await readFile(new URL("../src/journey/plan-resolution.ts", import.meta.url), "utf8");
     expect(source).not.toMatch(/\b(?:unlink|rm|truncate|rename)\s*\(/);
   });
+
+  it("reads consolidation files only through their verified open handles", async () => {
+    const source = await readFile(new URL("../src/journey/plan-resolution.ts", import.meta.url), "utf8");
+    expect(source).toContain("open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))");
+    expect(source).toContain("const opened = await handle.stat()");
+    expect(source).toContain("opened.dev !== linked.dev || opened.ino !== linked.ino");
+    expect(source).toContain("await handle.readFile()");
+    expect(source).not.toMatch(/import\s*\{[^}]*\breadFile\b[^}]*\}\s*from\s*"node:fs\/promises"/);
+    expect(source).not.toMatch(/(?<!\.)\breadFile\s*\(/);
+    expect(source.match(/\breadVerifiedFile\s*\(/g)).toHaveLength(4);
+  });
 });

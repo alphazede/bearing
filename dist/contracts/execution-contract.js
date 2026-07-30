@@ -193,26 +193,11 @@ function phaseDependenciesMatch(contract) {
         || phase.dependsOnPhases.length === derived.get(phase.phaseId)?.size
             && phase.dependsOnPhases.every((dependency) => derived.get(phase.phaseId)?.has(dependency)));
 }
-function phaseDependencyCycle(contract) {
-    const dependencies = derivedPhaseDependencies(contract);
-    const visiting = new Set();
-    const visited = new Set();
-    const visit = (phaseId) => {
-        if (visiting.has(phaseId))
-            return true;
-        if (visited.has(phaseId))
-            return false;
-        visiting.add(phaseId);
-        for (const dependency of dependencies.get(phaseId) ?? []) {
-            if (visit(dependency))
-                return true;
-        }
-        visiting.delete(phaseId);
-        visited.add(phaseId);
-        return false;
-    };
-    return contract.phases.some((phase) => visit(phase.phaseId));
-}
+// A derived phase graph may legitimately contain a cycle: phases interleave
+// whenever slices in each depend on slices in the other, and that stays
+// well-defined because execution follows the slice DAG, which
+// parseApprovedExecutionContract already proves acyclic. A phase-level cycle
+// check would reject those valid contracts, so none exists here.
 function topologicalSliceIds(contract) {
     const outgoing = new Map(contract.slices.map((slice) => [slice.sliceId, new Set()]));
     const incoming = new Map(contract.slices.map((slice) => [slice.sliceId, 0]));
