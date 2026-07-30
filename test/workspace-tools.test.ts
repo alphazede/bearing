@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -22,7 +22,11 @@ import {
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...original, readFile: vi.fn(original.readFile) };
+  return {
+    ...original,
+    lstat: vi.fn(original.lstat),
+    readFile: vi.fn(original.readFile),
+  };
 });
 
 const roots: string[] = [];
@@ -142,6 +146,31 @@ async function withReadFileError<T>(
   ) as unknown as T;
 }
 
+async function withLstatPathSwap<T>(
+  targetPath: string,
+  replacementPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const original = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  let swapped = false;
+  const injectedLstat = async (...args: Parameters<typeof lstat>) => {
+    const metadata = await Reflect.apply(original.lstat, undefined, args);
+    if (String(args[0]) === targetPath && !swapped) {
+      swapped = true;
+      await original.rm(targetPath);
+      await original.symlink(replacementPath, targetPath);
+    }
+    return metadata;
+  };
+  const mockedLstat = vi.mocked(lstat);
+  mockedLstat.mockImplementation(injectedLstat as typeof lstat);
+  try {
+    return await operation();
+  } finally {
+    mockedLstat.mockImplementation(original.lstat);
+  }
+}
+
 function cleanGit(root: string): NonNullable<WorkspaceToolsDeps["git"]> {
   const head = "a".repeat(40);
   return async (_cwd, args) => {
@@ -159,6 +188,27 @@ function cleanGit(root: string): NonNullable<WorkspaceToolsDeps["git"]> {
 }
 
 describe("workspace footprint", () => {
+  it("reads the verified .gitignore file even if its path is replaced after metadata lookup", async () => {
+    const { base, root } = await repository();
+    const ignorePath = join(root, ".gitignore");
+    const replacementPath = join(base, "replacement.gitignore");
+    await writeFile(replacementPath, "*.log\n");
+
+    const lines = await withLstatPathSwap(ignorePath, replacementPath, () =>
+      workspaceStatus(root, { cwd: root, pathEnv: "" }));
+
+    expect(lines).toContain("Gitignore: ignored");
+  });
+
+  it("reports a missing .gitignore as not ignored", async () => {
+    const { root } = await repository();
+    await rm(join(root, ".gitignore"));
+
+    const lines = await workspaceStatus(root, { cwd: root, pathEnv: "" });
+
+    expect(lines).toContain("Gitignore: not ignored");
+  });
+
   it("reports every run with an exclusive settled, unsettled, and compacted breakdown", async () => {
     const { root } = await repository();
     await seedRun(root, "settled", "complete");

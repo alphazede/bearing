@@ -3218,7 +3218,7 @@ async function handleVerificationReportPost(req, res, service, selected, runId, 
         return;
     }
     let verification;
-    let reportIdentity = body;
+    let reportIdentity;
     // Implementer sessions are read from the ledger, so self_certification is enforced against
     // recorded fact rather than anything the caller asserts.
     //
