@@ -15,13 +15,13 @@ describe("deterministic workflow showcase projections", () => {
     expect(Object.isFrozen(catalog)).toBe(true);
     expect(Object.isFrozen(catalog[0].expectedArtifacts)).toBe(true);
     expect(Object.isFrozen(catalog[0].expectedArtifacts[0])).toBe(true);
-    expect(() => { (catalog[0].expectedArtifacts as { path: string }[])[0].path = "altered.json"; }).toThrow(TypeError);
+    expect(() => { (catalog[0].expectedArtifacts as unknown as { path: string }[])[0].path = "altered.json"; }).toThrow(TypeError);
     expect(listWorkflowShowcases()[0].expectedArtifacts[0].path).toBe("artifacts/engineering/change-plan.json");
 
     const projection = projectWorkflowShowcase("workflow.engineering-import.v1")!;
     expect(Object.isFrozen(projection)).toBe(true);
     expect(Object.isFrozen(projection.decisionStops[0])).toBe(true);
-    expect(() => { (projection.decisionStops as { decision: string }[])[0].decision = "altered"; }).toThrow(TypeError);
+    expect(() => { (projection.decisionStops as unknown as { decision: string }[])[0].decision = "altered"; }).toThrow(TypeError);
     expect(projectWorkflowShowcase("workflow.engineering-import.v1")!.decisionStops[0].decision).toBe("authorize import-operator role");
     expect(renderWorkflowReport("workflow.engineering-import.v1")).toContain("Engineering Import evidence report");
   });

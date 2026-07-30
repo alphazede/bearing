@@ -26,9 +26,15 @@ afterEach(async () => {
   }
 });
 
-async function tempRepo(): Promise<string> {
+async function tempDir(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "bearing-bootstrap-"));
   roots.push(root);
+  return root;
+}
+
+async function tempRepo(): Promise<string> {
+  const root = await tempDir();
+  await mkdir(join(root, ".git"));
   return root;
 }
 
@@ -40,11 +46,18 @@ async function writeManifest(root: string, body: unknown): Promise<void> {
 describe("RepositoryBootstrap", () => {
   it("atomically initializes and resumes a repository manifest", async () => {
     const root = await tempRepo();
+    await writeFile(join(root, ".gitignore"), ".bearing/\n");
     const repositoryPath = await realpath(root);
     const bootstrap = new RepositoryBootstrap();
 
     const initialized = await bootstrap.choose(root);
-    expect(initialized).toEqual({ ok: true, status: "initialized", repositoryPath });
+    expect(initialized).toEqual({
+      ok: true,
+      status: "initialized",
+      repositoryPath,
+      gitignoreMissing: false,
+      gitignoreAbsent: false,
+    });
     expect(JSON.parse(await readFile(join(root, ".bearing", "workspace.json"), "utf8"))).toEqual({
       schemaVersion: 1,
       repositoryPath,
@@ -53,6 +66,124 @@ describe("RepositoryBootstrap", () => {
 
     const resumed = await bootstrap.choose(root);
     expect(resumed).toEqual({ ok: true, status: "resumed", repositoryPath });
+  });
+
+  it("blocks non-git initialization until the owner confirms it", async () => {
+    const blockedRoot = await tempDir();
+    expect(await new RepositoryBootstrap().choose(blockedRoot, {
+      agentExecutableRealpaths: [],
+    })).toEqual({ ok: false, reason: "repository_not_git" });
+    expect(await lstat(join(blockedRoot, ".bearing")).catch((err: unknown) => err)).toMatchObject({
+      code: "ENOENT",
+    });
+
+    const confirmedRoot = await tempDir();
+    expect(await new RepositoryBootstrap().choose(confirmedRoot, {
+      ownerConfirmedNonGit: true,
+      agentExecutableRealpaths: [],
+    })).toMatchObject({
+      ok: true,
+      status: "initialized",
+      gitignoreMissing: false,
+    });
+  });
+
+  it("always blocks a repository that contains an agent executable", async () => {
+    const root = await tempDir();
+    const repositoryPath = await realpath(root);
+    await writeManifest(root, { schemaVersion: 1, repositoryPath });
+
+    expect(await new RepositoryBootstrap().choose(root, {
+      ownerConfirmedNonGit: true,
+      agentExecutableRealpaths: [join(root, "bin", "codex")],
+    })).toEqual({ ok: false, reason: "repository_contains_agent" });
+  });
+
+  it("accepts a git worktree marker file and resumes it normally", async () => {
+    const root = await tempDir();
+    const repositoryPath = await realpath(root);
+    await writeFile(join(root, ".git"), "gitdir: /tmp/worktree\n");
+    await writeFile(join(root, ".gitignore"), ".bearing/\n");
+    const bootstrap = new RepositoryBootstrap();
+
+    expect(await bootstrap.choose(root, { agentExecutableRealpaths: [] })).toEqual({
+      ok: true,
+      status: "initialized",
+      repositoryPath,
+      gitignoreMissing: false,
+      gitignoreAbsent: false,
+    });
+    expect(await bootstrap.choose(root, { agentExecutableRealpaths: [] })).toEqual({
+      ok: true,
+      status: "resumed",
+      repositoryPath,
+    });
+  });
+
+  it("resumes a valid existing non-git workspace without confirmation", async () => {
+    const root = await tempDir();
+    const repositoryPath = await realpath(root);
+    await writeManifest(root, { schemaVersion: 1, repositoryPath });
+
+    expect(await new RepositoryBootstrap().choose(root, {
+      agentExecutableRealpaths: [],
+    })).toEqual({ ok: true, status: "resumed", repositoryPath });
+  });
+
+  it("reports whether an existing gitignore lacks the .bearing rule on first init", async () => {
+    const missingRuleRoot = await tempRepo();
+    await writeFile(join(missingRuleRoot, ".gitignore"), "dist/\n");
+    expect(await new RepositoryBootstrap().choose(missingRuleRoot, {
+      agentExecutableRealpaths: [],
+    })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: true });
+
+    const ignoredRoot = await tempRepo();
+    await writeFile(join(ignoredRoot, ".gitignore"), ".bearing/\n");
+    expect(await new RepositoryBootstrap().choose(ignoredRoot, {
+      agentExecutableRealpaths: [],
+    })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: false });
+  });
+
+  it("reports an absent gitignore as absent, never as an addable missing rule", async () => {
+    const root = await tempRepo();
+
+    // `gitignoreMissing` drives the browser's "add .bearing/ to .gitignore" consent
+    // action, and that endpoint only appends to an existing regular file — it never
+    // creates one. Reporting an absent file as missing would offer an action that
+    // always fails, so absence must be reported through its own flag.
+    expect(await new RepositoryBootstrap().choose(root, {
+      agentExecutableRealpaths: [],
+    })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: false, gitignoreAbsent: true });
+    expect(await lstat(join(root, ".gitignore")).catch((err: unknown) => err)).toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("reports an existing gitignore that lacks the rule as missing and not absent", async () => {
+    const root = await tempRepo();
+    await writeFile(join(root, ".gitignore"), "node_modules/\n");
+
+    expect(await new RepositoryBootstrap().choose(root, {
+      agentExecutableRealpaths: [],
+    })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: true, gitignoreAbsent: false });
+  });
+
+  it("accepts every literal .bearing ignore spelling and rejects unrelated lines", async () => {
+    for (const line of [".bearing", ".bearing/", "/.bearing", "/.bearing/"]) {
+      const root = await tempRepo();
+      await writeFile(join(root, ".gitignore"), `dist/\n${line}\n`);
+      expect(await new RepositoryBootstrap().choose(root, {
+        agentExecutableRealpaths: [],
+      })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: false });
+    }
+
+    for (const line of [".bearings", "bearing/", "#.bearing", ".bearing/runs"]) {
+      const root = await tempRepo();
+      await writeFile(join(root, ".gitignore"), `dist/\n${line}\n`);
+      expect(await new RepositoryBootstrap().choose(root, {
+        agentExecutableRealpaths: [],
+      })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: true });
+    }
   });
 
   it("remembers a validated owner name without changing the workspace manifest", async () => {
@@ -91,7 +222,7 @@ describe("RepositoryBootstrap", () => {
       ok: false,
       reason: "repository_not_directory",
     });
-    expect(await readdir(root)).toEqual(["not-a-directory"]);
+    expect(await readdir(root)).toEqual([".git", "not-a-directory"]);
   });
 
   it("rejects an unwritable repository without creating .bearing", async () => {

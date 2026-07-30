@@ -6,9 +6,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { LocalSessionService, SESSION_COOKIE_NAME, createRequestHandler } from "../src/server/local-session.js";
 import { SyntheticRunner, type ProcessRunner } from "../src/adapters/adapters.js";
+import { BearingStore } from "../src/store/bearing-store.js";
 
 const servers: Server[] = [];
 const roots: string[] = [];
+
+function currentChoice(path: string): { readonly path: string; readonly source: "cwd"; readonly isGitRoot: boolean } {
+  return Object.defineProperty({ path, source: "cwd" as const }, "isGitRoot", { value: false }) as {
+    readonly path: string;
+    readonly source: "cwd";
+    readonly isGitRoot: boolean;
+  };
+}
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -67,6 +76,34 @@ async function postOwnerCommand(port: string, cookie: string, runId: string, typ
   expect(response.status).toBe(200);
 }
 
+async function recordFitDecision(_port: string, _cookie: string, runId: string, repository: string, planDirectory: string): Promise<void> {
+  const store = new BearingStore(repository);
+  const state = await store.load(runId);
+  const id = `test-${state.revision}-record-fit`;
+  const result = await store.apply({
+    schemaVersion: 1,
+    commandId: id,
+    runId,
+    expectedRevision: state.revision,
+    session: { sessionId: "test", actor: "bearing" },
+    correlationId: id,
+    type: "recordJourneyCheckpoint",
+    payload: {
+      stage: "repository-fit",
+      status: "waiting",
+      artifacts: [],
+      repositoryFitDecision: {
+        outcome: "confirmed",
+        planDirectory,
+        repository,
+        decidedAt: "2026-07-25T00:00:00.000Z",
+      },
+      resolvedPlanDirectory: planDirectory,
+    },
+  });
+  if (!result.ok) throw new Error(result.reason);
+}
+
 async function recordPlanningApproval(port: string, cookie: string, runId: string): Promise<void> {
   const decisionId = "planning-package-review";
   await postOwnerCommand(port, cookie, runId, "requireDecision", { decisionId, question: "Approve the complete planning package before implementation?", consequential: true });
@@ -104,6 +141,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("deletes selected or all repository history without deleting generated files", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-history-delete-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     const artifact = join(root, "docs", "plans", "keep.md");
     await mkdir(join(root, "docs", "plans"), { recursive: true });
     await writeFile(artifact, "keep\n");
@@ -128,7 +166,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("serves authenticated repository options and rejects cross-origin reads", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-options-")); roots.push(root);
-    const choice = { options: async () => ({ platform: "linux" as const, linuxDistro: "Test Linux", current: { path: root, source: "cwd" as const }, browse: { available: false } }), resolve: async () => ({ result: "selected" as const, candidate: root, source: "cwd" as const }) };
+    const choice = { options: async () => ({ platform: "linux" as const, linuxDistro: "Test Linux", current: currentChoice(root), browse: { available: false } }), resolve: async () => ({ result: "selected" as const, candidate: root, source: "cwd" as const }) };
     const { port, session } = await launchChoice(choice); const cookie = await authenticate(port, session);
     expect((await call(port, "GET", "/api/v1/repository-options")).status).toBe(401);
     expect((await call(port, "GET", "/api/v1/repository-options", undefined, cookie, { origin: "https://evil.example" })).status).toBe(403);
@@ -139,7 +177,8 @@ describe("repository-first onboarding HTTP", () => {
 
   it("accepts repository reselection without restarting onboarding", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-current-")); roots.push(root); let resolutions = 0;
-    const choice = { options: async () => ({ platform: "linux" as const, current: { path: root, source: "cwd" as const }, browse: { available: false } }), resolve: async () => { resolutions += 1; return { result: "selected" as const, candidate: root, source: "cwd" as const }; } };
+    await mkdir(join(root, ".git"));
+    const choice = { options: async () => ({ platform: "linux" as const, current: currentChoice(root), browse: { available: false } }), resolve: async () => { resolutions += 1; return { result: "selected" as const, candidate: root, source: "cwd" as const }; } };
     const { port, session } = await launchChoice(choice); const cookie = await authenticate(port, session);
     expect((await call(port, "POST", "/api/v1/repository", { choice: "current" }, cookie)).status).toBe(200);
     const repeated = await call(port, "POST", "/api/v1/repository", { choice: "browse" }, cookie);
@@ -149,20 +188,26 @@ describe("repository-first onboarding HTTP", () => {
   });
 
   it("returns stable recoverable picker outcomes without repository mutation", async () => {
+    const pickerRemedies = {
+      cancelled: "Browse cancelled. Current repository is still available.",
+      unavailable: "System picker unavailable. Use the current repository.",
+      timeout: "System picker timed out. Try again or use current.",
+      invalid: "Picker returned an invalid repository. Nothing changed.",
+    } as const;
     for (const result of ["cancelled", "unavailable", "timeout", "invalid"] as const) {
       const root = await mkdtemp(join(tmpdir(), `bearing-${result}-`)); roots.push(root);
-      const choice = { options: async () => ({ platform: "linux" as const, current: { path: root, source: "cwd" as const }, browse: { available: true, picker: "zenity" as const } }), resolve: async () => ({ result, picker: "zenity" as const }) };
+      const choice = { options: async () => ({ platform: "linux" as const, current: currentChoice(root), browse: { available: true, picker: "zenity" as const } }), resolve: async () => ({ result, picker: "zenity" as const }) };
       const { port, session } = await launchChoice(choice); const cookie = await authenticate(port, session);
       const response = await call(port, "POST", "/api/v1/repository", { choice: "browse" }, cookie);
       expect(response.status).toBe(409);
-      expect(JSON.parse(response.body)).toEqual({ status: "blocked", code: `repository_picker_${result}` });
+      expect(JSON.parse(response.body)).toEqual({ status: "blocked", code: `repository_picker_${result}`, remedy: pickerRemedies[result] });
       await expect(access(join(root, ".bearing"))).rejects.toBeDefined();
     }
   });
 
   it("validates picker output through RepositoryBootstrap and rejects malformed choice bodies", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-hostile-picker-")); roots.push(root); const file = join(root, "not-a-directory"); await writeFile(file, "x");
-    const choice = { options: async () => ({ platform: "linux" as const, current: { path: root, source: "cwd" as const }, browse: { available: true, picker: "zenity" as const } }), resolve: async () => ({ result: "selected" as const, candidate: file, source: "picker" as const, picker: "zenity" as const }) };
+    const choice = { options: async () => ({ platform: "linux" as const, current: currentChoice(root), browse: { available: true, picker: "zenity" as const } }), resolve: async () => ({ result: "selected" as const, candidate: file, source: "picker" as const, picker: "zenity" as const }) };
     const { port, session } = await launchChoice(choice); const cookie = await authenticate(port, session);
     expect((await call(port, "POST", "/api/v1/repository", { choice: "browse" }, cookie)).status).toBe(400);
     await expect(access(join(root, ".bearing"))).rejects.toBeDefined();
@@ -184,6 +229,7 @@ describe("repository-first onboarding HTTP", () => {
     expect(counts()).toEqual({ inspections: 0, verifications: 0 });
 
     const root = await mkdtemp(join(tmpdir(), "bearing-onboarding-"));
+    await mkdir(join(root, ".git"));
     roots.push(root);
     expect((await call(port, "POST", "/api/v1/repository", { path: root }, cookie)).status).toBe(200);
     expect((await call(port, "GET", "/api/v1/routes")).status).toBe(401);
@@ -202,6 +248,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("discovers one selected route on demand and reuses its cached choices", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-route-models-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     const server = createServer(); await new Promise<void>((resolve) => server.listen({ host: "127.0.0.1", port: 0 }, resolve)); servers.push(server);
     const address = server.address(); if (!address || typeof address === "string") throw new Error("missing address");
     const port = String(address.port), session = new LocalSessionService(`127.0.0.1:${port}`), cookie = await authenticate(port, session);
@@ -228,10 +275,38 @@ describe("repository-first onboarding HTTP", () => {
     expect(modelOptions).toBe(1);
   });
 
+  it("normalizes provider-native route and model defaults before browser selection", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bearing-native-reasoning-")); roots.push(root);
+    await mkdir(join(root, ".git"));
+    const server = createServer(); await new Promise<void>((resolve) => server.listen({ host: "127.0.0.1", port: 0 }, resolve)); servers.push(server);
+    const address = server.address(); if (!address || typeof address === "string") throw new Error("missing address");
+    const port = String(address.port), session = new LocalSessionService(`127.0.0.1:${port}`), cookie = await authenticate(port, session);
+    const native: Readonly<Record<string, string>> = { codex: "xhigh", agy: "thinking", opencode: "none", pi: "off" };
+    server.on("request", createRequestHandler(session, undefined, { routeInspection: {
+      executableAvailable: () => true,
+      currentSelection: (route) => ({ model: `${route.provider}/model`, reasoning: native[route.provider] ?? "high" }),
+      modelOptions: (route) => [{ model: `${route.provider}/model`, label: "Native model", reasoningLevels: [native[route.provider] ?? "high"], defaultReasoning: native[route.provider] ?? "high" }],
+    } }));
+    await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
+
+    const routes = JSON.parse((await call(port, "GET", "/api/v1/routes", undefined, cookie)).body).routes as { provider: string; reasoning: string }[];
+    expect(Object.fromEntries(routes.filter((route) => native[route.provider]).map((route) => [route.provider, route.reasoning]))).toEqual({
+      codex: "very-high",
+      agy: "very-high",
+      opencode: "minimal",
+      pi: "minimal",
+    });
+    for (const [routeId, expected] of [["codex", "very-high"], ["agy", "very-high"], ["opencode", "minimal"], ["pi", "minimal"]] as const) {
+      const models = JSON.parse((await call(port, "GET", `/api/v1/routes/${routeId}/models`, undefined, cookie)).body).models;
+      expect(models[0].defaultReasoning).toBe(expected);
+    }
+  });
+
   it("rejects malformed selection and returns the stable unavailable repair", async () => {
     const { port, session } = await launch(false);
     const cookie = await authenticate(port, session);
     const root = await mkdtemp(join(tmpdir(), "bearing-onboarding-"));
+    await mkdir(join(root, ".git"));
     roots.push(root);
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     const missing = await call(port, "POST", "/api/v1/readiness", {}, cookie);
@@ -254,6 +329,7 @@ describe("repository-first onboarding HTTP", () => {
     server.on("request", createRequestHandler(session, undefined, { processRunner: runner }));
     const cookie = await authenticate(port, session);
     const root = await mkdtemp(join(tmpdir(), "bearing-onboarding-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     const chosen = await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     const canonical = JSON.parse(chosen.body).repositoryPath as string;
     const readiness = await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
@@ -275,13 +351,18 @@ describe("repository-first onboarding HTTP", () => {
     const escaped = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
     const complete = (content?: string) => ({ exitCode: 0, events: [{ type: "complete", ...(content ? { data: { content } } : {}) }], usage: { tokens: 7 } });
     const action = (summary: string, artifacts: string[]) => `BEARING_RESULT ${JSON.stringify({ kind: "action", summary, artifacts })}`;
+    const skipRecon = () => 'BEARING_RESULT {"kind":"recon","summary":"No material assumption requires Recon.","artifacts":[]}';
     const runner = new SyntheticRunner(undefined, [
       complete("agent output without a Bearing envelope"),
       complete('BEARING_RESULT {"kind":"questions","questions":["Which acceptance risk matters most?"]}'),
       complete(action("Supplies gathered", [`${planDirectory}/plan-spec.md`])),
-      complete(action("Route and implementation drafted", [`${planDirectory}/design.md`, `${planDirectory}/seit.md`, `${planDirectory}/implementation.md`, `${planDirectory}/review.html`])),
+      complete(action("Route drafted", [`${planDirectory}/design.md`, `${planDirectory}/seit.md`])),
+      complete(skipRecon()),
+      complete(action("Implementation drafted", [`${planDirectory}/implementation.md`])),
       complete(action("Review changes gathered", [`${planDirectory}/plan-spec.md`])),
-      complete(action("Route and implementation redrafted", [`${planDirectory}/design.md`, `${planDirectory}/seit.md`, `${planDirectory}/implementation.md`, `${planDirectory}/review.html`])),
+      complete(action("Route redrafted", [`${planDirectory}/design.md`, `${planDirectory}/seit.md`])),
+      complete(skipRecon()),
+      complete(action("Implementation redrafted", [`${planDirectory}/implementation.md`])),
       complete('BEARING_RESULT {"kind":"question","question":"May I replace the generated client?"}'),
       complete(`BEARING_RESULT ${JSON.stringify({ kind: "action", summary: "Explorer completed bounded work", artifacts: ["README.md", `${planDirectory}/review.html`], evidence: [{ commandId: "CMD-UNIT", status: "passed", summary: "focused browser journey passed" }] })}`),
       complete("No findings."),
@@ -317,19 +398,31 @@ describe("repository-first onboarding HTTP", () => {
     const runId = "browser-test"; const goal = "Ship bounded evidence\nwithout losing owner control";
     const journey = (stage: string, extra: Record<string, unknown> = {}) => call(port, "POST", "/api/v1/journey", { runId, stage, workGoal: goal, ...extra }, cookie);
     await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+    await recordFitDecision(port, cookie, runId, root, planDirectory);
     expect(JSON.parse((await journey("set-bearings")).body)).toMatchObject({ status: "action", summary: "Bearings set locally.", tokens: 0 });
-    for (const [name, content] of Object.entries(planning)) await writeFile(join(root, planDirectory, name), content);
+    const validPlanningSource = (name: string, content: string) => name === "implementation.md"
+      ? content.replace("status: draft", "status: complete")
+      : name === "seit.md"
+        ? content.replace("| SEIT-1 | AC-1 |", "| SEIT-1 | AC-1, RISK-1 |")
+        : content;
+    for (const [name, content] of Object.entries(planning)) {
+      await writeFile(join(root, planDirectory, name), validPlanningSource(name, content));
+    }
     await writeFile(join(root, planDirectory, "review.html"), `<!doctype html><title>Evidence</title><nav><a class="source-link" data-kind="planning" href="./prompts/repository-map.md">repository-map.md</a>${Object.keys(planning).map((name) => `<a class="source-link" data-kind="planning" href="./${name}">${name}</a>`).join("")}<a href="../outside.md">Outside</a><a href="./missing.md">Missing</a><a href="./README.md">README</a><a href="/plan-spec.md">Absolute</a><a href="./plan-spec.md#source">Fragment</a><a href="./plan-spec.md?raw=1">Query</a><a href=./plan-spec.md>Unquoted</a><span href="./design.md">Not an anchor</span><!-- <a href="./plan-spec.md">Comment</a> --></nav>${Object.entries(planning).map(([name, content]) => `<h2>${name}</h2><pre>${escaped(content)}</pre>`).join("")}`);
     await writeFile(join(root, planDirectory, "prompts", "context.md"), "# Context");
-    expect(JSON.parse((await journey("gather-supplies")).body)).toMatchObject({ status: "question", question: "Which acceptance risk matters most?", recovery: { status: "repaired", stage: "gather-supplies", failureClass: "agent_receipt_or_artifact_validation", code: "result_missing", retryLevel: "repair", version: "0.1.3" } });
+    expect(JSON.parse((await journey("gather-supplies")).body)).toMatchObject({ status: "question", question: "Which acceptance risk matters most?", recovery: { status: "repaired", stage: "gather-supplies", failureClass: "agent_receipt_or_artifact_validation", code: "result_missing", retryLevel: "repair", version: "0.1.5" } });
     expect((await journey("map-route", { answer: "Data loss" })).status).toBe(409);
     const planningQuestion = JSON.parse((await call(port, "GET", `/api/v1/runs/${runId}`, undefined, cookie)).body).pendingDecision;
     expect(planningQuestion).toMatchObject({ question: "Which acceptance risk matters most?" });
     await postOwnerCommand(port, cookie, runId, "recordOwnerAnswer", { decisionId: planningQuestion.decisionId, answer: "Data loss" });
     expect(JSON.parse((await journey("gather-supplies", { answer: "Data loss" })).body)).toMatchObject({ status: "action" });
-    expect(JSON.parse((await journey("map-route")).body)).toMatchObject({ status: "action", planningReview: { phases: 1, slices: 1, assignments: [{ slice: "Slice 1.1 — Deliver", role: "Backend Engineer", model: "Codex agent default", reasoning: "low" }] } });
+    expect(JSON.parse((await journey("map-route")).body)).toMatchObject({ status: "action", summary: "Route drafted" });
+    expect(JSON.parse((await journey("recon")).body)).toMatchObject({ status: "action", recon: { state: "SKIPPED" } });
+    expect(JSON.parse((await journey("draft-implementation")).body)).toMatchObject({ status: "action", planningReview: { phases: 1, slices: 1, assignments: [{ slice: "Slice 1.1 — Deliver", role: "Backend Engineer", model: "Codex agent default", reasoning: "low" }] } });
     expect(JSON.parse((await journey("gather-supplies", { reviewChange: "Add a rollback acceptance check" })).body)).toMatchObject({ status: "action", summary: "Review changes gathered" });
-    expect(JSON.parse((await journey("map-route")).body)).toMatchObject({ status: "action", summary: "Route and implementation redrafted" });
+    expect(JSON.parse((await journey("map-route")).body)).toMatchObject({ status: "action", summary: "Route redrafted" });
+    expect(JSON.parse((await journey("recon")).body)).toMatchObject({ status: "action", recon: { state: "SKIPPED" } });
+    expect(JSON.parse((await journey("draft-implementation")).body)).toMatchObject({ status: "action", summary: "Implementation redrafted" });
     expect((await journey("execute-explorer", { executionMode: "explorer", reviewCadence: "phase" })).status).toBe(409);
     await recordPlanningApproval(port, cookie, runId);
     const firstExecution = JSON.parse((await journey("execute-explorer", { executionMode: "explorer", reviewCadence: "phase", cleanupMergedWorktrees: true })).body);
@@ -370,7 +463,7 @@ describe("repository-first onboarding HTTP", () => {
       const markdown = await call(port, "GET", markdownLink, undefined, cookie);
       expect(markdown.status).toBe(200);
       expect(markdown.headers["content-type"]).toBe("text/plain; charset=utf-8");
-      expect(markdown.body).toBe(expected);
+      expect(markdown.body).toBe(validPlanningSource(name, expected));
     }
     expect(runner.calls.map((invocation) => invocation.stdin).join("\n")).toContain("Review cadence");
     expect(runner.calls.map((invocation) => invocation.stdin).join("\n")).toContain('"question":"Cleanup merged worktrees","answer":"on"');
@@ -392,6 +485,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("applies Gather Supplies immediately when discovery finds no material owner questions", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-no-questions-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     const planDirectory = `docs/plans/${new Date().toISOString().slice(0, 10)}-no-material-decisions`;
     const result = (content: string) => ({ exitCode: 0, events: [{ type: "complete", data: { content } }], usage: { tokens: 1 } });
     const runner = new SyntheticRunner(undefined, [
@@ -405,6 +499,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+    await recordFitDecision(port, cookie, runId, root, planDirectory);
     await call(port, "POST", "/api/v1/journey", { runId, stage: "set-bearings", workGoal: goal }, cookie);
     const response = JSON.parse((await call(port, "POST", "/api/v1/journey", { runId, stage: "gather-supplies", workGoal: goal }, cookie)).body);
     expect(response).toMatchObject({ status: "action", summary: "Supplies gathered without owner questions" });
@@ -414,6 +509,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("stops after one focused and one simplified repair of the same deterministic failure", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-repair-loop-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     const failed = { exitCode: 0, events: [{ type: "complete", data: { content: "missing receipt" } }], usage: { tokens: 1 } };
     const runner = new SyntheticRunner(undefined, [failed, failed, failed]);
     const server = createServer(); await new Promise<void>((resolve) => server.listen({ host: "127.0.0.1", port: 0 }, resolve)); servers.push(server);
@@ -423,6 +519,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+    await recordFitDecision(port, cookie, runId, root, `docs/plans/${runId}`);
     await call(port, "POST", "/api/v1/journey", { runId, stage: "set-bearings", workGoal: goal }, cookie);
     const response = JSON.parse((await call(port, "POST", "/api/v1/journey", { runId, stage: "gather-supplies", workGoal: goal }, cookie)).body);
     expect(response).toMatchObject({ status: "failure", code: "result_missing", recovery: { status: "stopped", retryLevel: "simplify" } });
@@ -446,6 +543,7 @@ describe("repository-first onboarding HTTP", () => {
       ["token_budget", { exitCode: 0, events: [], usage: { tokens: Number.MAX_SAFE_INTEGER + 1 } }],
     ] as const) {
       const root = await mkdtemp(join(tmpdir(), `bearing-no-retry-${code}-`)); roots.push(root);
+      await mkdir(join(root, ".git"));
       const runner = new SyntheticRunner(undefined, [failed]);
       const server = createServer(); await new Promise<void>((resolve) => server.listen({ host: "127.0.0.1", port: 0 }, resolve)); servers.push(server);
       const address = server.address(); if (!address || typeof address === "string") throw new Error("missing address");
@@ -454,6 +552,7 @@ describe("repository-first onboarding HTTP", () => {
       await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
       await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
       await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+      await recordFitDecision(port, cookie, runId, root, `docs/plans/${runId}`);
       await call(port, "POST", "/api/v1/journey", { runId, stage: "set-bearings", workGoal: goal }, cookie);
       const response = JSON.parse((await call(port, "POST", "/api/v1/journey", { runId, stage: "gather-supplies", workGoal: goal }, cookie)).body);
       expect(response).toMatchObject({ status: "failure", code });
@@ -464,6 +563,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("collects a batch of grilling answers without restarting the agent between questions", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-batched-grill-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     const planDirectory = `docs/plans/${new Date().toISOString().slice(0, 10)}-plan-without-per-answer-lag`;
     const result = (content: string) => ({ exitCode: 0, events: [{ type: "complete", data: { content } }], usage: { tokens: 1 } });
     const questions = Array.from({ length: 3 }, (_, index) => `${index}: Planning question ${index + 1}`.padEnd(4095, "q") + "?");
@@ -479,6 +579,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+    await recordFitDecision(port, cookie, runId, root, planDirectory);
     const journey = (extra: Record<string, unknown> = {}) => call(port, "POST", "/api/v1/journey", { runId, stage: "gather-supplies", workGoal: goal, ...extra }, cookie);
     expect(JSON.parse((await call(port, "POST", "/api/v1/journey", { runId, stage: "set-bearings", workGoal: goal }, cookie)).body)).toMatchObject({ status: "action", tokens: 0 });
 
@@ -501,6 +602,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("ends grilling early and writes from the answers collected so far", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-end-grill-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     const planDirectory = `docs/plans/${new Date().toISOString().slice(0, 10)}-stop-repetitive-planning-questions`;
     const result = (content: string) => ({ exitCode: 0, events: [{ type: "complete", data: { content } }], usage: { tokens: 1 } });
     const runner = new SyntheticRunner(undefined, [
@@ -515,6 +617,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+    await recordFitDecision(port, cookie, runId, root, planDirectory);
     const journey = (extra: Record<string, unknown> = {}) => call(port, "POST", "/api/v1/journey", { runId, stage: "gather-supplies", workGoal: goal, ...extra }, cookie);
     expect(JSON.parse((await call(port, "POST", "/api/v1/journey", { runId, stage: "set-bearings", workGoal: goal }, cookie)).body)).toMatchObject({ status: "action" });
 
@@ -538,6 +641,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("refuses repository changes while a real journey call is in flight", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-busy-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     await mkdir(join(root, "plans", "busy"), { recursive: true });
     await writeFile(join(root, "plans", "busy", "plan-spec.md"), "# Plan");
     let release!: (result: { cancelled: true }) => void, entered!: () => void;
@@ -553,6 +657,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, "browser-busy", "createWorkRequest", { title: "Hold the route", goal: "Hold the route" });
+    await recordFitDecision(port, cookie, "browser-busy", root, "docs/plans/browser-busy");
     await call(port, "POST", "/api/v1/journey", { runId: "browser-busy", stage: "set-bearings", workGoal: "Hold the route" }, cookie);
     const running = call(port, "POST", "/api/v1/journey", { runId: "browser-busy", stage: "gather-supplies", workGoal: "Hold the route" }, cookie);
     await started;
@@ -562,7 +667,7 @@ describe("repository-first onboarding HTTP", () => {
     expect((await call(port, "DELETE", "/api/v1/history", undefined, cookie, { origin: `http://127.0.0.1:${port}` })).status).toBe(409);
     const blocked = await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     expect(blocked.status).toBe(409);
-    expect(JSON.parse(blocked.body)).toEqual({ status: "blocked", code: "journey_in_progress" });
+    expect(JSON.parse(blocked.body)).toEqual({ status: "blocked", code: "journey_in_progress", remedy: "The active journey is still running. Return to it before changing repositories." });
     expect((await call(port, "POST", "/api/v1/journey/control", { runId: "browser-busy", action: "stop" }, cookie)).status).toBe(200);
     expect(JSON.parse((await running).body)).toMatchObject({ status: "failure", code: "cancelled" });
     expect(calls).toBe(1);
@@ -570,6 +675,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("preserves an ambiguous stop result instead of advertising a safe retry", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-stop-ambiguous-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     let release!: (result: { unknownSideEffect: true }) => void, entered!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
     let calls = 0;
@@ -582,6 +688,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, "browser-stop-ambiguous", "createWorkRequest", { title: "Do not hide partial writes", goal: "Do not hide partial writes" });
+    await recordFitDecision(port, cookie, "browser-stop-ambiguous", root, "docs/plans/browser-stop-ambiguous");
     await call(port, "POST", "/api/v1/journey", { runId: "browser-stop-ambiguous", stage: "set-bearings", workGoal: "Do not hide partial writes" }, cookie);
     const running = call(port, "POST", "/api/v1/journey", { runId: "browser-stop-ambiguous", stage: "gather-supplies", workGoal: "Do not hide partial writes" }, cookie);
     await started;
@@ -592,6 +699,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("restores a durable journey checkpoint after repository reselection", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-resume-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     const planDirectory = `docs/plans/${new Date().toISOString().slice(0, 10)}-resume-this-route`;
     const runner = new SyntheticRunner(undefined, [
       { exitCode: 0, events: [{ type: "complete", data: { content: 'BEARING_RESULT {"kind":"questions","questions":[]}' } }], usage: { tokens: 1 } },
@@ -605,6 +713,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+    await recordFitDecision(port, cookie, runId, root, planDirectory);
     expect(JSON.parse((await call(port, "POST", "/api/v1/journey", { runId, stage: "set-bearings", workGoal: goal }, cookie)).body)).toMatchObject({ status: "action", summary: "Bearings set locally.", tokens: 0 });
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     const history = JSON.parse((await call(port, "GET", "/api/v1/history", undefined, cookie)).body);
@@ -615,6 +724,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("reconciles an answered checkpoint question before resuming", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-answer-resume-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     await mkdir(join(root, "plans", "answer"), { recursive: true });
     await writeFile(join(root, "plans", "answer", "plan-spec.md"), "# Answered plan\n");
     const result = (content: string) => ({ exitCode: 0, events: [{ type: "complete", data: { content } }], usage: { tokens: 1 } });
@@ -631,6 +741,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+    await recordFitDecision(port, cookie, runId, root, `docs/plans/${new Date().toISOString().slice(0, 10)}-resume-an-answered-question`);
     await call(port, "POST", "/api/v1/journey", { runId, stage: "set-bearings", workGoal: goal }, cookie);
     expect(JSON.parse((await call(port, "POST", "/api/v1/journey", { runId, stage: "gather-supplies", workGoal: goal }, cookie)).body)).toMatchObject({ status: "question", question: "Which boundary matters?" });
     const pending = JSON.parse((await call(port, "GET", `/api/v1/runs/${runId}`, undefined, cookie)).body).pendingDecision;
@@ -646,6 +757,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("restores an unanswered question batch without losing its in-memory queue", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-unanswered-resume-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     await mkdir(join(root, "plans", "unanswered"), { recursive: true });
     await writeFile(join(root, "plans", "unanswered", "plan-spec.md"), "# Unanswered plan\n");
     const result = (content: string) => ({ exitCode: 0, events: [{ type: "complete", data: { content } }], usage: { tokens: 1 } });
@@ -660,6 +772,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+    await recordFitDecision(port, cookie, runId, root, `docs/plans/${runId}`);
     await call(port, "POST", "/api/v1/journey", { runId, stage: "set-bearings", workGoal: goal }, cookie);
     expect(JSON.parse((await call(port, "POST", "/api/v1/journey", { runId, stage: "gather-supplies", workGoal: goal }, cookie)).body)).toMatchObject({ status: "question", question: "First decision?" });
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
@@ -676,6 +789,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("rejects a restored journey when the newly selected model route differs", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-route-lock-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     const runner = new SyntheticRunner(undefined, [{ exitCode: 0, events: [{ type: "complete", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Bearings saved","artifacts":[]}' } }], usage: { tokens: 1 } }]);
     const server = createServer(); await new Promise<void>((resolve) => server.listen({ host: "127.0.0.1", port: 0 }, resolve)); servers.push(server);
     const address = server.address(); if (!address || typeof address === "string") throw new Error("missing address");
@@ -685,15 +799,17 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+    await recordFitDecision(port, cookie, runId, root, `docs/plans/${runId}`);
     expect((await call(port, "POST", "/api/v1/journey", { runId, stage: "set-bearings", workGoal: goal }, cookie)).status).toBe(200);
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "GET", "/api/v1/history", undefined, cookie);
-    await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "high" }, cookie);
+    await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "gpt-5.6-sol", reasoning: "high" }, cookie);
     expect((await call(port, "POST", "/api/v1/journey", { runId, stage: "gather-supplies", workGoal: goal }, cookie)).status).toBe(409);
   });
 
   it("restores an explicitly requested checkpoint older than the bounded history list", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-old-run-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     await mkdir(join(root, "plans", "old"), { recursive: true });
     await writeFile(join(root, "plans", "old", "plan-spec.md"), "# Old run\n");
     const results = Array.from({ length: 9 }, (_, index) => ({ exitCode: 0, events: [{ type: "complete", data: { content: `BEARING_RESULT {"kind":"action","summary":"Run ${index}","artifacts":["plans/old/plan-spec.md"]}` } }], usage: { tokens: 1 } }));
@@ -708,6 +824,7 @@ describe("repository-first onboarding HTTP", () => {
     for (let index = 0; index < 9; index += 1) {
       const runId = `browser-old-${index}`, goal = `Remember run ${index}`;
       await postOwnerCommand(port, cookie, runId, "createWorkRequest", { title: goal, goal });
+      await recordFitDecision(port, cookie, runId, root, `docs/plans/${runId}`);
       expect((await call(port, "POST", "/api/v1/journey", { runId, stage: "set-bearings", workGoal: goal }, cookie)).status).toBe(200);
     }
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
@@ -728,6 +845,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("restarts a safely cancelled phase with owner steering", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-steer-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     await mkdir(join(root, "plans", "steer"), { recursive: true });
     await writeFile(join(root, "plans", "steer", "plan-spec.md"), "# Plan");
     let release!: (result: { cancelled: true }) => void, entered!: () => void;
@@ -750,6 +868,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, "browser-steer", "createWorkRequest", { title: "Steer safely", goal: "Steer safely" });
+    await recordFitDecision(port, cookie, "browser-steer", root, "docs/plans/browser-steer");
     await call(port, "POST", "/api/v1/journey", { runId: "browser-steer", stage: "set-bearings", workGoal: "Steer safely" }, cookie);
     const running = call(port, "POST", "/api/v1/journey", { runId: "browser-steer", stage: "gather-supplies", workGoal: "Steer safely" }, cookie);
     await started;
@@ -762,6 +881,7 @@ describe("repository-first onboarding HTTP", () => {
 
   it("does not replay a steered phase after ambiguous side effects", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-steer-ambiguous-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     let release!: (result: { unknownSideEffect: true }) => void, entered!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
     const calls: unknown[] = [];
@@ -782,6 +902,7 @@ describe("repository-first onboarding HTTP", () => {
     await call(port, "POST", "/api/v1/repository", { path: root }, cookie);
     await call(port, "POST", "/api/v1/readiness", { provider: "codex", model: "*", reasoning: "medium" }, cookie);
     await postOwnerCommand(port, cookie, "browser-steer-ambiguous", "createWorkRequest", { title: "Do not duplicate writes", goal: "Do not duplicate writes" });
+    await recordFitDecision(port, cookie, "browser-steer-ambiguous", root, "docs/plans/browser-steer-ambiguous");
     await call(port, "POST", "/api/v1/journey", { runId: "browser-steer-ambiguous", stage: "set-bearings", workGoal: "Do not duplicate writes" }, cookie);
     const running = call(port, "POST", "/api/v1/journey", { runId: "browser-steer-ambiguous", stage: "gather-supplies", workGoal: "Do not duplicate writes" }, cookie);
     await started;

@@ -3,11 +3,12 @@ import { constants } from "node:fs";
 import { createServer, request as sendRequest, type Server } from "node:http";
 import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
-import { createFocusContext, validateFocusCompletion, type CommandEvidence, type FocusContext, type FocusRole } from "./focus-mode.js";
+import { createFocusContext, validateFocusCompletion, type CommandEvidence, type FocusCompletion, type FocusContext, type FocusContextResult, type FocusRejection, type FocusRole } from "./focus-mode.js";
 import { executionReviewValid } from "./planning-journey.js";
 
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_REQUEST_BYTES = 16 * 1024;
+const FOCUS_GUARD_LIFETIME_MS = 60 * 60 * 1000;
 
 interface FocusRequest {
   readonly role: FocusRole;
@@ -23,8 +24,46 @@ interface FocusReceipt {
   readonly githubIssueMutation?: boolean;
 }
 
-export type StandaloneFocusResult = { readonly ok: true; readonly changedPaths: readonly string[] } | { readonly ok: false; readonly reason: string };
-export type StandaloneFocusBegin = { readonly ok: true; readonly runId: string; readonly envelope: unknown } | { readonly ok: false; readonly reason: "request_invalid" | "focus_invalid" | "state_invalid" };
+export type StandaloneFocusFailureReason =
+  | Extract<FocusCompletion, { readonly ok: false }>["reason"]
+  | "receipt_invalid"
+  | "authority_invalid"
+  | "review_invalid"
+  | "state_invalid"
+  | "request_too_large"
+  | "request_timeout"
+  | "response_too_large";
+export type StandaloneFocusResult = { readonly ok: true; readonly changedPaths: readonly string[] } | { readonly ok: false; readonly reason: StandaloneFocusFailureReason };
+export type StandaloneFocusDiagnostic = {
+  readonly ok: false;
+  readonly reason: FocusRejection;
+  readonly sliceId?: string;
+  readonly field?: string;
+  readonly detail?: string;
+};
+export type StandaloneFocusBegin =
+  | { readonly ok: true; readonly runId: string; readonly envelope: unknown }
+  | { readonly ok: false; readonly reason: "request_invalid" | "state_invalid" }
+  | StandaloneFocusDiagnostic;
+
+function boundedDiagnostic(value: string | undefined, max: number): string | undefined {
+  if (!value) return undefined;
+  const clean = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+  return clean || undefined;
+}
+
+function standaloneDiagnostic(failure: Extract<FocusContextResult, { readonly ok: false }>): StandaloneFocusDiagnostic {
+  const sliceId = boundedDiagnostic(failure.sliceId, 128);
+  const field = boundedDiagnostic(failure.field, 128);
+  const detail = boundedDiagnostic(failure.detail, 512);
+  return {
+    ok: false,
+    reason: failure.reason,
+    ...(sliceId ? { sliceId } : {}),
+    ...(field ? { field } : {}),
+    ...(detail ? { detail } : {}),
+  };
+}
 
 function safeRelative(value: string): boolean {
   return value.length > 0 && value.length <= 4096 && !isAbsolute(value) && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value) && !/(?:^|\/)\.\.(?:\/|$)/.test(value);
@@ -91,41 +130,62 @@ export async function beginStandaloneFocus(root: string, requestPath: string): P
   if (!canonicalRoot) return { ok: false, reason: "request_invalid" };
   const request = await readJson(canonicalRoot, requestPath);
   if (!focusRequest(request)) return { ok: false, reason: "request_invalid" };
-  const context = await createFocusContext({ root: canonicalRoot, planDirectory: request.planDirectory, role: request.role, objective: request.objective, ...(request.slice ? { currentSlice: request.slice } : {}) });
-  if (!context) return { ok: false, reason: "focus_invalid" };
+  const parsed = await createFocusContext({ root: canonicalRoot, planDirectory: request.planDirectory, role: request.role, objective: request.objective, ...(request.slice ? { currentSlice: request.slice } : {}) });
+  if (!parsed.ok) return standaloneDiagnostic(parsed);
+  const context = parsed.value;
   const capability = randomBytes(32).toString("hex");
   const issueAuthorized = request.githubIssueMutationAuthorized === true;
   let server!: Server;
   server = createServer((incoming, response) => {
     const chunks: Buffer[] = [];
     let length = 0;
-    const finish = (status: number, result: StandaloneFocusResult) => {
+    let finished = false;
+    const finish = (status: number, result: StandaloneFocusResult, consume = true) => {
+      if (finished) return;
+      finished = true;
       response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
-      response.end(JSON.stringify(result), () => server.close());
+      response.end(JSON.stringify(result), consume ? () => server.close() : undefined);
     };
-    if (incoming.method !== "POST" || incoming.url !== `/validate/${capability}`) return finish(404, { ok: false, reason: "state_invalid" });
+    if (incoming.method !== "POST" || incoming.url !== `/validate/${capability}`) return finish(404, { ok: false, reason: "state_invalid" }, false);
     incoming.on("data", (chunk: Buffer) => {
+      if (finished) return;
       length += chunk.length;
-      if (length > MAX_REQUEST_BYTES) incoming.destroy();
-      else chunks.push(chunk);
+      if (length > MAX_REQUEST_BYTES) {
+        // An oversized body is not a legitimate validate request: answer it so the
+        // client settles, but never let it consume the one-use guard.
+        finish(413, { ok: false, reason: "request_too_large" }, false);
+        return;
+      }
+      chunks.push(chunk);
     });
     incoming.on("end", () => {
+      if (finished) return;
       void (async () => {
         try {
           const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { root?: unknown; receiptPath?: unknown };
-          if (body.root !== canonicalRoot || typeof body.receiptPath !== "string") return finish(400, { ok: false, reason: "state_invalid" });
+          // The single use is a budget for validation attempts, so only a request
+          // that reaches validateStored may spend it. A mismatched root or a
+          // missing receiptPath is rejected before validation runs, so it leaves
+          // the guard intact — same rule as the 404 and 413 paths above.
+          if (body.root !== canonicalRoot || typeof body.receiptPath !== "string") return finish(400, { ok: false, reason: "state_invalid" }, false);
           const result = await validateStored(context, canonicalRoot, issueAuthorized, body.receiptPath);
           finish(result.ok ? 200 : 409, result);
-        } catch { finish(400, { ok: false, reason: "state_invalid" }); }
+          // A body that does not parse never named a receipt to validate. Burning
+          // the guard here would make a truncated or mis-encoded request
+          // unrecoverable and force the whole Focus run to restart.
+        } catch { finish(400, { ok: false, reason: "state_invalid" }, false); }
       })();
     });
   });
   const port = await listen(server);
   if (!port) return { ok: false, reason: "state_invalid" };
+  const lifetime = setTimeout(() => server.close(), FOCUS_GUARD_LIFETIME_MS);
+  lifetime.unref();
+  server.once("close", () => clearTimeout(lifetime));
   return { ok: true, runId: `v1.${port}.${capability}`, envelope: context.envelope };
 }
 
-export async function validateStandaloneFocus(root: string, runId: string, receiptPath: string): Promise<StandaloneFocusResult> {
+export async function validateStandaloneFocus(root: string, runId: string, receiptPath: string, timeoutMs = 10_000): Promise<StandaloneFocusResult> {
   const match = /^v1\.([1-9][0-9]{0,4})\.([0-9a-f]{64})$/.exec(runId);
   const port = match ? Number(match[1]) : 0;
   if (!match || port > 65_535 || !safeRelative(receiptPath)) return { ok: false, reason: "state_invalid" };
@@ -133,23 +193,49 @@ export async function validateStandaloneFocus(root: string, runId: string, recei
   if (!canonicalRoot) return { ok: false, reason: "state_invalid" };
   const body = JSON.stringify({ root: canonicalRoot, receiptPath });
   return new Promise((resolveResult) => {
+    let settled = false;
+    let responseStarted = false;
+    const finish = (result: StandaloneFocusResult) => {
+      if (settled) return;
+      settled = true;
+      resolveResult(result);
+    };
+    const fail = (reason: StandaloneFocusFailureReason) => finish({ ok: false, reason });
     const request = sendRequest({ host: "127.0.0.1", port, method: "POST", path: `/validate/${match[2]}`, headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }, (response) => {
+      responseStarted = true;
       const chunks: Buffer[] = [];
       let length = 0;
+      let oversized = false;
       response.on("data", (chunk: Buffer) => {
         length += chunk.length;
-        if (length > MAX_REQUEST_BYTES) response.destroy();
-        else chunks.push(chunk);
+        if (length > MAX_REQUEST_BYTES) {
+          oversized = true;
+          fail("response_too_large");
+          response.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once("aborted", () => fail(oversized ? "response_too_large" : "state_invalid"));
+      response.once("error", () => fail(oversized ? "response_too_large" : "state_invalid"));
+      response.once("close", () => {
+        if (!response.complete) fail(oversized ? "response_too_large" : "state_invalid");
       });
       response.on("end", () => {
         try {
           const result = JSON.parse(Buffer.concat(chunks).toString("utf8")) as StandaloneFocusResult;
-          resolveResult(typeof result === "object" && result !== null && typeof result.ok === "boolean" ? result : { ok: false, reason: "state_invalid" });
-        } catch { resolveResult({ ok: false, reason: "state_invalid" }); }
+          finish(typeof result === "object" && result !== null && typeof result.ok === "boolean" ? result : { ok: false, reason: "state_invalid" });
+        } catch { fail("state_invalid"); }
       });
     });
-    request.setTimeout(10_000, () => request.destroy());
-    request.once("error", () => resolveResult({ ok: false, reason: "state_invalid" }));
+    request.setTimeout(timeoutMs, () => {
+      fail("request_timeout");
+      request.destroy();
+    });
+    request.once("error", () => fail("state_invalid"));
+    request.once("close", () => {
+      if (!responseStarted) fail("state_invalid");
+    });
     request.end(body);
   });
 }

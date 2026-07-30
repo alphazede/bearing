@@ -19,7 +19,7 @@ function role(selection: Selection, overrides: Record<string, unknown> = {}, run
 }
 
 function fakeChild(output = '{"type":"complete","usage":{"total_tokens":2}}\n', exitCode = 0, errorOutput = "") {
-  const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+  const child = new EventEmitter() as ChildProcessWithoutNullStreams & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough };
   Object.assign(child, { pid: undefined, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: () => { queueMicrotask(() => child.emit("close", null)); return true; } });
   queueMicrotask(() => { child.stdout.end(output); child.stderr.end(errorOutput); child.emit("close", exitCode); });
   return child;
@@ -40,7 +40,7 @@ function harness(output?: string, exitCode?: number, errorOutput?: string) {
 
 function chunkedHarness(chunks: readonly string[]) {
   const spawn = () => {
-    const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+    const child = new EventEmitter() as ChildProcessWithoutNullStreams & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough };
     Object.assign(child, { pid: undefined, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true });
     queueMicrotask(() => {
       for (const chunk of chunks) child.stdout.write(chunk);
@@ -68,7 +68,7 @@ describe("production process runner", () => {
     expect(grok.calls[0].executable).toBe("grok-safe");
     expect(grok.calls[0].args).toEqual(["--", "--output-format", "streaming-json", "--prompt-file", "/dev/stdin", "--cwd", repositoryPath, "--model", "grok-build", "--reasoning-effort", "medium", "--max-turns", "2", "--tools", "read,write", "--disallowed-tools", "external-action", "--sandbox", "strict", "--permission-mode", "dontAsk", "--no-memory", "--no-subagents", "--disable-web-search"]);
     const claude = await execute({ provider: "claude", model: "sonnet", reasoning: "high" });
-    expect(claude.calls[0]).toMatchObject({ executable: "claude", args: ["--print", "--output-format", "stream-json", "--verbose", "--model", "sonnet", "--effort", "high", "--permission-mode", "dontAsk", "--allowedTools", "Read,Edit,Write", "--no-session-persistence"], stdin: "private source password=hunter2" });
+    expect(claude.calls[0]).toMatchObject({ executable: "claude", args: ["--print", "--output-format", "stream-json", "--verbose", "--model", "sonnet", "--effort", "medium", "--permission-mode", "dontAsk", "--allowedTools", "Read,Edit,Write", "--no-session-persistence"], stdin: "private source password=hunter2" });
     const pi = await execute({ provider: "pi", model: "zai/glm-5.2", reasoning: "medium" }, {}, { noSession: true });
     expect(pi.calls[0]).toMatchObject({ executable: "pi", args: ["--mode", "json", "--print", "--model", "zai/glm-5.2", "--thinking", "medium", "--tools", "read,write", "--exclude-tools", "external-action", "--no-session", "--offline"] });
     const piV4 = await execute({ provider: "pi", model: "deepseek/deepseek-v4-pro", reasoning: "high" });
@@ -78,7 +78,7 @@ describe("production process runner", () => {
     expect(agy.calls[0].args).not.toContain("--dangerously-skip-permissions");
     expect(agy.calls[0].args.at(-1)).toMatch(/^Read and follow the complete task in @\/tmp\/bearing-prompt-/);
     const opencode = await execute({ provider: "opencode", model: "openai/gpt-5", reasoning: "high" });
-    expect(opencode.calls[0]).toMatchObject({ executable: "opencode", stdin: "", args: expect.arrayContaining(["run", "--format", "json", "--dir", repositoryPath, "--model", "openai/gpt-5", "--variant", "high", "--file"]) });
+    expect(opencode.calls[0]).toMatchObject({ executable: "opencode", stdin: "", args: expect.arrayContaining(["run", "--format", "json", "--dir", repositoryPath, "--model", "openai/gpt-5", "--variant", "medium", "--file"]) });
     expect(JSON.parse((opencode.calls[0].options as { env: Record<string, string> }).env.OPENCODE_PERMISSION)).toMatchObject({ "*": "deny", read: "allow", edit: "allow", bash: "deny", task: "deny", webfetch: "deny", websearch: "deny", external_directory: "deny" });
     for (const result of [codex, grok, claude, agy, opencode, pi, piV4]) {
       expect(result.calls[0].args.join(" ")).not.toMatch(/hunter2|private source/);
@@ -100,9 +100,21 @@ describe("production process runner", () => {
     const denied = await execute({ provider: "codex", model: "gpt-5.6-sol", reasoning: "medium" }, { toolDeny: ["shell"] });
     expect(denied.calls).toHaveLength(0);
     expect(denied.receipt).toMatchObject({ status: "blocked", failure: "unsupported_policy" });
-    const invalidReasoning = await execute({ provider: "pi", model: "zai/glm-5.2", reasoning: "unbounded" });
-    expect(invalidReasoning.calls).toHaveLength(0);
-    expect(invalidReasoning.receipt).toMatchObject({ status: "blocked", failure: "unsupported_policy" });
+    const invalidReasoningHarness = harness();
+    const invalidReasoningSelection: Selection = { provider: "pi", model: "zai/glm-5.2", reasoning: "unbounded" };
+    const invalidReasoning = parseAgentProfile({ schemaVersion: 1, agentRef: "a", profileRef: "p", credentialAccountRef: "environment", roles: ["navigator", "explorer", "crewmate", "surveyor"], toolAllow: ["read", "write"], toolDeny: ["external-action"], authority: { read: true, write: true, network: false, workspace: true, externalAction: false }, enabledSkills: [], context: "off", systemPromptRef: "prompt", limits: { timeoutMs: 50, maxTurns: 2, maxTools: 2, maxRetries: 1, maxConcurrency: 1, maxDelegation: 1, tokenBudget: 50 }, session: { persistence: "off", resume: "never", fork: "never" }, structuredEvents: true, isolation: "auto", selection: invalidReasoningSelection });
+    const resolveInvalidReasoning = vi.fn(resolveRun);
+    if (invalidReasoning.ok) {
+      const invalidRun = resolveInvalidReasoning(invalidReasoning.value, {}, "process-runner-test");
+      if (invalidRun.status === "ready") {
+        const invalidAdapter = createAgentAdapter(invalidReasoningSelection, invalidReasoningHarness.runner);
+        if (!invalidAdapter) throw new Error("missing adapter");
+        await invalidAdapter.execute({ runId: "pi-zai/glm-5.2", repositoryPath, role: invalidRun.value.roles.find((projection) => projection.role === "crewmate")!, task: { prompt: "must not spawn" } });
+      }
+    }
+    expect(invalidReasoning).toEqual({ ok: false, code: "reasoning_unmappable" });
+    expect(resolveInvalidReasoning).not.toHaveBeenCalled();
+    expect(invalidReasoningHarness.calls).toHaveLength(0);
     const boundedAgy = await execute({ provider: "agy", model: "Gemini 3.5 Flash (Low)", reasoning: "low" }, { authority: { read: true, write: true, network: true, workspace: true, externalAction: false } });
     expect(boundedAgy.calls).toHaveLength(0);
     expect(boundedAgy.receipt.warningCodes).toContain("agy_token_budget_unsupported");
@@ -200,9 +212,9 @@ describe("production process runner", () => {
     }
   });
 
-  it("passes the selected Claude model and effort level through unchanged", async () => {
+  it("passes the selected Claude model with the resolved role effort", async () => {
     const claude = await execute({ provider: "claude", model: "claude-fable-5[1m]", reasoning: "max" });
-    expect(claude.calls[0].args).toEqual(["--print", "--output-format", "stream-json", "--verbose", "--model", "claude-fable-5[1m]", "--effort", "max", "--permission-mode", "dontAsk", "--allowedTools", "Read,Edit,Write", "--no-session-persistence"]);
+    expect(claude.calls[0].args).toEqual(["--print", "--output-format", "stream-json", "--verbose", "--model", "claude-fable-5[1m]", "--effort", "medium", "--permission-mode", "dontAsk", "--allowedTools", "Read,Edit,Write", "--no-session-persistence"]);
   });
 
   it("reads Pi's selected model from its configured agent directory", async () => {
@@ -248,7 +260,7 @@ describe("production process runner", () => {
     expect(await harness("not json").runner.run(invocation)).toEqual({ unknownSideEffect: true });
     expect(await harness("x".repeat(1024 * 1024 + 1)).runner.run(invocation)).toMatchObject({ exitCode: 0, events: "oversized" });
     expect(JSON.stringify(await harness('{"type":"complete"}', 0, "password=never-returned".repeat(5000)).runner.run(invocation))).not.toContain("never-returned");
-    const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+    const child = new EventEmitter() as ChildProcessWithoutNullStreams & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough };
     let kills = 0;
     Object.assign(child, { pid: undefined, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: () => { kills += 1; return true; } });
     const runner = new NodeProcessRunner(() => child, () => true, (executable, cwd) => ({ executable, cwd }));
@@ -268,7 +280,7 @@ describe("production process runner", () => {
     const h = harness('{"type":"tool.started"}\nmalformed');
     const result = await h.runner.run({ routeId: "codex", executable: "codex", args: [], stdin: "x", cwd: repositoryPath, timeoutMs: 50, runId: "unknown" });
     expect(result).toEqual({ unknownSideEffect: true });
-    const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+    const child = new EventEmitter() as ChildProcessWithoutNullStreams & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough };
     Object.assign(child, { pid: undefined, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true });
     const runner = new NodeProcessRunner(() => child, () => true, (executable, cwd) => ({ executable, cwd }));
     const pending = runner.run({ routeId: "codex", executable: "codex", args: [], stdin: "x", cwd: repositoryPath, timeoutMs: 5, runId: "tool-timeout" });

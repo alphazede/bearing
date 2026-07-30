@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { BUILTIN_ROUTES, SyntheticRunner, createAgentAdapter } from "../src/adapters/adapters.js";
 import { parseAgentProfile, resolveRun } from "../src/profile/profile.js";
 
-function role(overrides: Record<string, unknown> = {}) {
+function role(overrides: Record<string, unknown> = {}, projectedRole: "navigator" | "explorer" | "crewmate" | "surveyor" = "navigator") {
   const parsed = parseAgentProfile({ schemaVersion: 1, agentRef: "a", profileRef: "p", credentialAccountRef: "account-ref", roles: ["navigator", "explorer", "crewmate", "surveyor"], toolAllow: ["read"], toolDeny: [], authority: { read: true, write: false, network: false, workspace: true, externalAction: false }, enabledSkills: [], context: "off", systemPromptRef: "prompt", limits: { timeoutMs: 20, maxTurns: 2, maxTools: 2, maxRetries: 1, maxConcurrency: 1, maxDelegation: 1, tokenBudget: 5 }, session: { persistence: "off", resume: "never", fork: "never" }, structuredEvents: true, isolation: "auto", selection: { provider: "pi", model: "zai/glm-5.2", reasoning: "low" }, ...overrides });
   if (!parsed.ok) throw new Error(parsed.code);
   const run = resolveRun(parsed.value, {}, "adapter-test"); if (run.status !== "ready") throw new Error(run.code);
-  return run.value.roles[0];
+  return run.value.roles.find(({ role }) => role === projectedRole)!;
 }
 function adapter(runner = new SyntheticRunner(), overrides: Record<string, unknown> = {}) {
   const value = createAgentAdapter(role(overrides).selection, runner); if (!value) throw new Error("missing adapter"); return value;
@@ -27,6 +27,20 @@ describe("provider-neutral adapters", () => {
     expect(runner.calls[0]).toMatchObject({ executable: "pi", args: ["--mode", "json", "--print", "--model", "zai/glm-5.2", "--thinking", "low", "--tools", "read", "--exclude-tools", "", "--no-session", "--offline"], stdin: "do work", cwd: repositoryPath });
     expect(receipt).toMatchObject({ status: "completed", isolation: "attested", events: [{ data: { apiToken: "[redacted]", nested: { secret: "[redacted]" }, okay: true } }] });
     expect(JSON.stringify(receipt)).not.toMatch(/nope|credential|prompt/i);
+  });
+
+  it("launches a role with its resolved provider reasoning while preserving route identity", async () => {
+    const runner = new SyntheticRunner();
+    const crewmate = role({ selection: { provider: "codex", model: "gpt-5.6-sol", reasoning: "high" } }, "crewmate");
+    expect(crewmate.selection.reasoning).toBe("high");
+    expect(crewmate.reasoning.providerLevel).toBe("medium");
+    const codex = createAgentAdapter(crewmate.selection, runner);
+    if (!codex) throw new Error("missing adapter");
+
+    await codex.execute({ runId: "role-reasoning", repositoryPath, role: crewmate, task: { prompt: "implement" } });
+
+    expect(runner.calls[0]?.args).toContain('model_reasoning_effort="medium"');
+    expect(runner.calls[0]?.args).not.toContain('model_reasoning_effort="high"');
   });
 
   it("passes the optional activity observer through the provider-neutral process seam", async () => {
@@ -127,6 +141,26 @@ describe("provider-neutral adapters", () => {
 
   it("rejects malformed durable provider session identifiers", async () => {
     expect(await adapter().execute({ runId: "bad-session", repositoryPath, role: role({ session: { persistence: "persistent", resume: "allowed", fork: "allowed" } }), task: { prompt: "x" }, providerSessionId: "../../other-session" })).toMatchObject({ status: "blocked", failure: "unsupported_policy" });
+  });
+
+  it("classifies unavailable sessions only from route-scoped resume signatures", async () => {
+    const sessionId = "019f8d4e-a637-7e71-8c76-af9d7ec91adf";
+    const selection = { provider: "codex", model: "gpt-5.6-sol", reasoning: "medium" };
+    const persistent = role({ selection, session: { persistence: "persistent", resume: "allowed", fork: "allowed" } });
+    const missingSession = { exitCode: 1, error: { stderr: `Session not found for thread_id: ${sessionId}` } };
+    const executeCodex = async (runId: string, result: typeof missingSession & { events?: unknown }, providerSessionId?: string) => {
+      const codex = createAgentAdapter(selection, new SyntheticRunner(undefined, [result]));
+      if (!codex) throw new Error("missing Codex adapter");
+      return codex.execute({ runId, repositoryPath, role: persistent, task: { prompt: "resume" }, ...(providerSessionId ? { providerSessionId } : {}) });
+    };
+
+    expect(await executeCodex("matched", missingSession, sessionId)).toMatchObject({ status: "failed", failure: "session_unavailable", attempts: 1 });
+    expect(await executeCodex("no-session", missingSession)).toMatchObject({ status: "failed", failure: "nonzero_exit" });
+    expect(await executeCodex("unmatched", { exitCode: 1, error: { stderr: "provider request failed" } }, sessionId)).toMatchObject({ status: "failed", failure: "nonzero_exit" });
+    expect(await executeCodex("structured", { ...missingSession, events: [{ type: "provider.error" }] }, sessionId)).toMatchObject({ status: "failed", failure: "nonzero_exit" });
+
+    const pi = adapter(new SyntheticRunner(undefined, [missingSession]), { session: { persistence: "persistent", resume: "allowed", fork: "allowed" } });
+    expect(await pi.execute({ runId: "wrong-route", repositoryPath, role: role({ session: { persistence: "persistent", resume: "allowed", fork: "allowed" } }), task: { prompt: "resume" }, providerSessionId: sessionId })).toMatchObject({ status: "failed", failure: "nonzero_exit" });
   });
 
   it("truthfully resolves isolation modes", async () => {

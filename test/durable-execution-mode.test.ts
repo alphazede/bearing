@@ -28,6 +28,7 @@ describe("durable execution-mode authority", () => {
     expect(startSchedule({ graph, evidence: durableOwnerEvidence(state), limits, nowMs: 0 })).toMatchObject({ state: "blocked", code: "authority_approval_missing" });
 
     const structuralForgery = { ...state };
+    // @ts-expect-error Deliberately forge an invalid command type to exercise malformed-command rejection.
     const forgedTransition = decide(structuralForgery, command("forged-state", "approveExecutionMode", 2, { recommendationEventId: "evt-2" }), deps);
     expect(forgedTransition).toMatchObject({ ok: false, reason: "malformed_command" });
     expect(isIssuedRunState(forgedTransition.state)).toBe(false);

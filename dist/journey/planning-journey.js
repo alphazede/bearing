@@ -1,29 +1,209 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
 import { BUILTIN_ROUTES, createAgentAdapter } from "../adapters/adapters.js";
-import { createFocusContext, validateFocusCompletion } from "./focus-mode.js";
+import { createFocusContext, snapshotGitState, validateFocusCompletion } from "./focus-mode.js";
+import { resolvePlanDirectory } from "./plan-resolution.js";
+import { artifactComplete, parsePlanDocuments, structuralFindings } from "./plan-structure.js";
+import { advancePlanning, next, planningValidationSignal } from "./planning-state.js";
+import { validatePlan } from "./planning-validator.js";
+import { routeRecon } from "./recon.js";
+import { FIT_EVIDENCE_KINDS, fitMalformed, validateFitReceipt } from "./repository-fit.js";
 import { setBearingsWorkspace } from "./repository-map.js";
+import { validateScope } from "../verification/validator.js";
+function validationRecord(verdict, currentContentHash = verdict.checkedContentHash) {
+    return { ...verdict, currentContentHash };
+}
+export function orchestratePlanning(input) {
+    const artifacts = input.artifacts ?? [];
+    const record = (state, signal, validation) => advancePlanning(state, signal, validation);
+    if (input.failureSignal) {
+        const planningState = record(input.currentState, input.failureSignal);
+        return planningState === "illegal_transition"
+            ? { refused: planningState, findings: [], artifacts }
+            : { planningState, findings: [], artifacts };
+    }
+    if (input.pass === "set-bearings") {
+        return input.currentState === "DRAFT"
+            ? { planningState: input.currentState, findings: [], artifacts }
+            : { refused: "illegal_transition", findings: [], artifacts };
+    }
+    if (input.pass === "gather-supplies") {
+        const planningState = record(input.currentState, "requirementsReady");
+        return planningState === "illegal_transition"
+            ? { refused: planningState, findings: [], artifacts }
+            : { planningState, findings: [], artifacts };
+    }
+    if (input.pass === "recon") {
+        const routed = routeRecon(input.recon);
+        if (!routed.ok)
+            return { refused: "illegal_transition", findings: routed.issues, artifacts };
+        if (routed.state === "SKIPPED" || routed.state === "RECON_PENDING" || routed.state === "ARCHITECTURE_READY") {
+            return { planningState: input.currentState, findings: [], artifacts };
+        }
+        const signal = routed.state === "RECON_READY"
+            ? "reconReady"
+            : routed.state === "RECON_FAILED"
+                ? "reconFailed"
+                : "ownerDecisionRequired";
+        const planningState = record(input.currentState, signal);
+        return planningState === "illegal_transition"
+            ? { refused: planningState, findings: [], artifacts }
+            : { planningState, findings: [], artifacts };
+    }
+    if (input.pass === "map-the-route") {
+        if (input.currentState === "ARCHITECTURE_READY")
+            return { planningState: input.currentState, findings: [], artifacts };
+        // A plan that failed validation re-enters through map-the-route without
+        // repeating architecture. architectureReady is illegal from those three
+        // states; executionPlanReady is the recovery edge the transition table
+        // defines for them, and planningCheckpointFields completes the recovery with
+        // planningValidated. Splitting this pass in two must not drop that path.
+        const signal = input.currentState === "REQUIREMENTS_READY" || input.currentState === "DESIGN_CONFLICT"
+            ? "architectureReady"
+            : input.currentState === "MISSING_VALIDATION"
+                || input.currentState === "UNSAFE_PARALLELISM"
+                || input.currentState === "OWNER_DECISION_REQUIRED"
+                ? "executionPlanReady"
+                : undefined;
+        if (!signal)
+            return { refused: "illegal_transition", findings: [], artifacts };
+        const planningState = record(input.currentState, signal);
+        return planningState === "illegal_transition"
+            ? { refused: planningState, findings: [], artifacts }
+            : { planningState, findings: [], artifacts };
+    }
+    if (input.pass === "draft-implementation") {
+        const planningState = record(input.currentState, "executionPlanReady");
+        return planningState === "illegal_transition"
+            ? { refused: planningState, findings: [], artifacts }
+            : { planningState, findings: [], artifacts };
+    }
+    let findings = input.planningValidation?.findings ?? [];
+    let planningValidation = input.planningValidation;
+    if (input.documents && input.planDirectory) {
+        const current = validatePlan({ documents: input.documents, planDirectory: input.planDirectory });
+        findings = current.findings;
+        planningValidation = input.planningValidation
+            ? { ...input.planningValidation, currentContentHash: current.checkedContentHash }
+            : validationRecord(current);
+    }
+    const signal = planningValidationSignal(planningValidation);
+    if (!signal || !planningValidation)
+        return { refused: "illegal_transition", findings, artifacts };
+    const planningState = record(input.currentState, signal, planningValidation);
+    return planningState === "illegal_transition"
+        ? { refused: planningState, findings, artifacts }
+        : { planningState, findings, artifacts, planningValidation };
+}
+export function planningCheckpointFields(input) {
+    if (input.previousState === undefined)
+        return {};
+    if (input.status === "complete") {
+        if (input.stage === "recon") {
+            const recon = orchestratePlanning({ currentState: input.previousState, pass: "recon", recon: input.recon });
+            if ("refused" in recon)
+                return { refused: recon.refused };
+            return recon.planningState === "RECON_FAILED" || recon.planningState === "OWNER_DECISION_REQUIRED"
+                ? { planningFailure: recon.planningState }
+                : { planningState: recon.planningState };
+        }
+        if (input.stage === "map-route") {
+            const recoveringFailedPlan = input.previousState === "MISSING_VALIDATION"
+                || input.previousState === "UNSAFE_PARALLELISM"
+                || input.previousState === "OWNER_DECISION_REQUIRED";
+            const mapped = orchestratePlanning({ currentState: input.previousState, pass: "map-the-route" });
+            if ("refused" in mapped)
+                return { refused: mapped.refused };
+            if (recoveringFailedPlan && !input.planningValidation) {
+                const planningState = next(mapped.planningState, "planningValidated");
+                return planningState === "illegal_transition"
+                    ? { refused: planningState }
+                    : { planningState };
+            }
+            if (!input.planningValidation)
+                return { planningState: mapped.planningState };
+            const validated = orchestratePlanning({ currentState: mapped.planningState, pass: "planning-validator", planningValidation: input.planningValidation });
+            if ("refused" in validated)
+                return { refused: validated.refused };
+            return planningValidationSignal(input.planningValidation) === "planningValidated"
+                ? { planningState: validated.planningState }
+                : { planningFailure: validated.planningState };
+        }
+        if (input.stage === "gather-supplies") {
+            const gathered = orchestratePlanning({ currentState: input.previousState, pass: "gather-supplies" });
+            return "refused" in gathered ? { refused: gathered.refused } : { planningState: gathered.planningState };
+        }
+        if (input.stage !== "draft-implementation")
+            return {};
+        const mapped = orchestratePlanning({ currentState: input.previousState, pass: "draft-implementation" });
+        if ("refused" in mapped)
+            return { refused: mapped.refused };
+        if (!input.planningValidation)
+            return { planningState: mapped.planningState };
+        const validated = orchestratePlanning({ currentState: mapped.planningState, pass: "planning-validator", planningValidation: input.planningValidation });
+        if ("refused" in validated)
+            return { refused: validated.refused };
+        return planningValidationSignal(input.planningValidation) === "planningValidated"
+            ? { planningState: validated.planningState }
+            : { planningFailure: validated.planningState };
+    }
+    if (input.status !== "failed" || input.failureReason === undefined)
+        return {};
+    let previousState = input.previousState;
+    if (input.stage === "map-route" && input.failureStage === "draft-implementation") {
+        const mapped = orchestratePlanning({ currentState: previousState, pass: "map-the-route" });
+        if ("refused" in mapped)
+            return { refused: mapped.refused };
+        previousState = mapped.planningState;
+    }
+    const failureStage = input.failureStage ?? input.stage;
+    const signals = failureStage === "gather-supplies"
+        ? ["requirementsGap"]
+        : failureStage === "map-route"
+            ? ["designConflict"]
+            : failureStage === "recon"
+                ? ["reconFailed"]
+                : failureStage === "draft-implementation"
+                    ? ["missingValidation", "unsafeParallelism", "ownerDecisionRequired"]
+                    : [];
+    for (const signal of signals) {
+        const pass = input.stage === "gather-supplies" ? "gather-supplies" : input.stage === "recon" ? "recon" : "map-the-route";
+        const projected = orchestratePlanning({ currentState: previousState, pass, failureSignal: signal });
+        if (!("refused" in projected) && projected.planningState === input.failureReason)
+            return { planningFailure: projected.planningState };
+    }
+    return { refused: "illegal_transition" };
+}
+const FOCUS_PLAN_SOURCES = ["plan-spec.md", "design.md", "seit.md", "implementation.md"];
+function malformedFitResult(tokens, check, field) {
+    return { status: "failure", code: "fit_malformed", fitDiagnostic: fitMalformed(check, field).diagnostic, tokens };
+}
 const STAGE_SKILLS = {
-    "set-bearings": ["set-bearings"],
-    "gather-supplies": ["gather-supplies"],
-    "map-route": ["map-the-route"],
-    "draft-implementation": ["map-the-route"],
+    "repository-fit": ["repository-fit"],
+    "set-bearings": ["navigator", "set-bearings"],
+    "gather-supplies": ["navigator", "gather-supplies"],
+    "map-route": ["navigator", "map-the-route"],
+    recon: ["navigator"],
+    "draft-implementation": ["navigator", "map-the-route"],
     "execute-explorer": ["explorer", "crewmate", "surveyor"],
     "execute-expedition": ["navigator", "explorer", "crewmate", "surveyor"],
     review: ["surveyor"],
 };
 const STAGE_BOUNDARY = {
+    "repository-fit": "Inspect only the bounded selected-repository evidence and propose one repository and plan-directory assumption for owner confirmation. Do not write, create a directory, or continue into Set Bearings.",
     "set-bearings": "Create or resume only the plan directory and plan-spec.md stub. Bearing may retain a bounded repository inventory as internal runtime evidence, but plan-local prompt persistence is not required. Do not grill, design, draft implementation.md, or implement the work.",
     "gather-supplies": "Use the complete owner Q&A and update only the validated plan specification. Do not run design, draft implementation.md, or implement the work. Return an action receipt whose artifacts include the validated plan-spec.md path.",
     "map-route": "Use the design substep of Map the Route. Before writing any design artifact, stop at its normal owner lens-approval question when lens approval is not already recorded in the prior owner Q&A. After approval, produce valid complete or amended design.md and seit.md, including stable DES/CONTRACT IDs, Use Cases and Communication Flows, Interface Option Check, OOPDSA Implementation Design, and the prospective SEIT Traceability Matrix. Bearing generates review.html deterministically from the current Markdown sources; do not write or summarize review.html. Stop at the design-and-SEIT validation checkpoint. Do not write implementation.md or execute implementation in this substep. A successful action receipt must include design.md and seit.md in the validated plan directory.",
-    "draft-implementation": "Continue the implementation-drafting substep of Map the Route after the validated design and SEIT checkpoint. Draft implementation.md without executing any slice. Keep each slice reference-only with Goal, Requirement IDs, Design IDs, SEIT proof rows, Type, Design lenses, Implementation role, Agent model route, Agent reasoning level, Ponytail mode, and Review path. Requirement, design, and SEIT IDs must exist in their owning documents and each slice's referenced SEIT rows must map its requirement and design IDs. Ponytail mode must be exactly the standalone lowercase value `full` or `off`. Follow every slice with a matching `### <slice-id> execution manifest` containing Write set, Command IDs, Stop condition, and Human decision. Close each write set with `only` and exact backticked paths, or explicitly declare no writes. Command IDs must be defined in seit.md and mapped by the slice's SEIT proof rows. Declare contiguous Wave 1 through Wave N dependencies when there is more than one slice. Do not restate acceptance, design contracts, test cases, commands, evidence, or execution packet prose. Preserve per-slice assignments for execution; do not replace them with onboarding settings. The Review path must use the harness-native reviewer when available or the Surveyor fallback when unavailable. Bearing generates review.html deterministically from plan-spec.md, design.md, seit.md, and implementation.md; do not write or summarize it. A successful action receipt must include implementation.md.",
+    recon: "After architecture and before implementation drafting, run at most one smallest bounded experiment for one material assumption. If no material assumption needs Recon, return the explicit skipped Recon receipt with no brief, report, or artifacts. Otherwise return one complete brief and matching report in the Recon receipt; a brief without its report is incomplete. Prototype paths remain non-production and must be returned as the complete artifact list. Do not draft implementation.md or execute implementation.",
+    "draft-implementation": "Continue the implementation-drafting substep of Map the Route after the validated design and SEIT checkpoint. Draft implementation.md without executing any slice. Keep each slice reference-only with Goal, Requirement IDs, Design IDs, SEIT proof rows, Type, Design lenses, Implementation role, Agent model route, Agent reasoning level, and Review path. Ponytail mode is optional; when present, use the lowercase value `full` or `off`; trailing sentence punctuation such as `full.` is normalized. Requirement, design, and SEIT IDs must exist in their owning documents and each slice's referenced SEIT rows must map its requirement and design IDs. Follow every slice with a matching `### <slice-id> execution manifest` containing Write set, Command IDs, Stop condition, and Human decision. Close each write set with `only` and exact backticked paths, or explicitly declare no writes. Command IDs must be defined in seit.md and mapped by the slice's SEIT proof rows. Declare contiguous Wave 1 through Wave N dependencies when there is more than one slice. Do not restate acceptance, design contracts, test cases, commands, evidence, or execution packet prose. Preserve per-slice assignments for execution; do not replace them with onboarding settings. The Review path must use the harness-native reviewer when available or the Surveyor fallback when unavailable. Bearing generates review.html deterministically from plan-spec.md, design.md, seit.md, and implementation.md; do not write or summarize it. A successful action receipt must include implementation.md.",
     "execute-explorer": "Execute the approved implementation plan with Explorer and honor each recorded slice model route, reasoning level, Ponytail mode, and review cadence. Do not overwrite slice assignments with onboarding settings. After implementation and validation, replace the one Bearing-owned `<section id=\"bearing-final-qa\" data-status=\"pending\">` baseline with exactly one `<section id=\"bearing-final-qa\" data-status=\"complete\">` containing non-empty `Planned versus actual: <evidence>` and `Validation evidence: <evidence>` text. Put each labeled value in its own attribute-free `<p>` and use plain text only: no nested HTML, markup, `<`, or `>` in either evidence value. Preserve every current embedded planning source and canonical source link. The action receipt must include review.html and every actual changed artifact. Return only paths that actually exist.",
     "execute-expedition": "Execute the approved implementation plan with Expedition and honor each recorded slice model route, reasoning level, Ponytail mode, and review cadence. Do not overwrite slice assignments with onboarding settings. After implementation and validation, replace the one Bearing-owned `<section id=\"bearing-final-qa\" data-status=\"pending\">` baseline with exactly one `<section id=\"bearing-final-qa\" data-status=\"complete\">` containing non-empty `Planned versus actual: <evidence>` and `Validation evidence: <evidence>` text. Put each labeled value in its own attribute-free `<p>` and use plain text only: no nested HTML, markup, `<`, or `>` in either evidence value. Preserve every current embedded planning source and canonical source link. The action receipt must include review.html and every actual changed artifact. Return only paths that actually exist.",
     review: "Perform a read-only review of the integrated uncommitted work. Do not modify files. Return existing evidence paths relevant to the review.",
 };
-function nextStage(stage) { return stage === "set-bearings" ? "gather-supplies" : stage === "gather-supplies" ? "map-route" : stage === "map-route" ? "draft-implementation" : stage === "draft-implementation" ? "execute" : "review"; }
+function nextStage(stage) { return stage === "repository-fit" ? "set-bearings" : stage === "set-bearings" ? "gather-supplies" : stage === "gather-supplies" ? "map-route" : stage === "map-route" ? "recon" : stage === "recon" ? "draft-implementation" : stage === "draft-implementation" ? "execute" : "review"; }
 const MAX_TEXT = 4096;
 const MAX_QA = 64;
 const MAX_GATHER_QUESTIONS = 3;
@@ -37,8 +217,16 @@ function text(value, max = MAX_TEXT) {
     return typeof value === "string" && value.length > 0 && value.length <= max && value === value.trim() && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
 }
 function pathText(value) { return text(value) && !/[\\\r\n\t]/.test(value); }
-function sameSelection(left, right) {
-    return left.provider === right.provider && left.model === right.model && left.reasoning === right.reasoning;
+function focusRejectionStatus(failure) {
+    const segment = (value, fallback) => (value ?? fallback).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 40) || fallback;
+    return [
+        segment(failure.reason, "invalid"),
+        segment(failure.sliceId, "unknown"),
+        segment(failure.field, "unknown"),
+    ].join(":").slice(0, 128);
+}
+function sameRoute(left, right) {
+    return left.provider === right.provider && left.model === right.model;
 }
 async function containedPath(root, value, directoryOnly = false) {
     if (!pathText(value) || value === "." || isAbsolute(value) || posix.normalize(value) !== value)
@@ -66,9 +254,11 @@ function validRequest(request) {
     if (!(request.stage in STAGE_SKILLS) || !Array.isArray(request.priorOwnerQa) || request.priorOwnerQa.length > MAX_QA)
         return false;
     return (request.gatherMode === undefined || request.stage === "gather-supplies") &&
+        (request.requestedPlanDirectory === undefined || request.stage === "set-bearings" && pathText(request.requestedPlanDirectory)) &&
         (request.providerSessionId === undefined || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.providerSessionId)) &&
         (request.reviewPrompt === undefined || text(request.reviewPrompt)) &&
         (request.gateFailureFingerprint === undefined || text(request.gateFailureFingerprint, 512)) &&
+        (request.focusAmendmentConfirmed === undefined || typeof request.focusAmendmentConfirmed === "boolean") &&
         request.priorOwnerQa.every((entry) => typeof entry === "object" && entry !== null && text(entry.question) && text(entry.answer));
 }
 const MAX_PACKAGED_SKILL_BYTES = 64 * 1024;
@@ -121,20 +311,25 @@ function prompt(request, planDirectory, skillInstructions, focus) {
         ...reviewCadence,
         ...cleanupPolicy,
         `Validated plan directory: ${planDirectory ? JSON.stringify(planDirectory) : "none"}`,
-        ...(planDirectory && request.stage !== "set-bearings" ? ["Reuse current session context and perform only bounded live verification when necessary. Do not require or create plan-local prompt artifacts."] : []),
+        ...(planDirectory && request.stage !== "repository-fit" && request.stage !== "set-bearings" ? ["Reuse current session context and perform only bounded live verification when necessary. Do not require or create plan-local prompt artifacts."] : []),
         ...(request.reviewPrompt ? [`Review guidance: ${JSON.stringify(request.reviewPrompt)}`] : []),
         ...(focus ? [
             `BEARING_FOCUS ${JSON.stringify(focus.envelope)}`,
             "Bearing Focus mode is active. Act only on acceptance, required evidence, or the current blocker. Preserve this envelope when delegating a bounded subset to Crewmates. Runtime validation will reject out-of-scope paths, incomplete receipts, missing command evidence, and false completion even if provider hooks are unavailable.",
         ] : []),
+        ...(request.stage === "repository-fit" ? [`Repository-fit evidence kind is a closed vocabulary: ${JSON.stringify(FIT_EVIDENCE_KINDS)}. Use no other value.`] : []),
         "Do not claim completion without actual work and evidence in this agent receipt. Do not invent artifacts, routes, sessions, or authority.",
-        gatheringQuestions
-            ? 'End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"questions","questions":["first question","second question"],"nextStageEstimate":{"stage":"gather-supplies","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific workload basis"}}. Replace the uppercase placeholders with your honest integer estimate; do not copy a canned duration. Use an empty array when no owner decisions are needed. The optional estimate covers the remaining Gather Supplies apply/write step; omit it when you cannot honestly estimate it.'
-            : request.stage === "gather-supplies" && request.gatherMode === "apply"
-                ? 'End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["relative/existing/path"],"nextStageEstimate":{"stage":"map-route","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific full-phase workload basis"}}. Replace the uppercase placeholders with your honest integer estimate; do not copy a canned duration. The optional estimate covers the complete Map the Route phase; omit it when you cannot honestly estimate it.'
-                : focus
-                    ? `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question"} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["every relative path changed during this invocation"],"evidence":[{"commandId":"CMD-ID","status":"passed","summary":"bounded observed result"}]}. On success include every command ID from BEARING_FOCUS exactly once. Never mark failed, skipped, missing, unknown, or duplicate evidence as passed.`
-                    : `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question","nextStageEstimate":{"stage":"${request.stage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific remaining-work basis"}} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["relative/existing/path"],"nextStageEstimate":{"stage":"${nextActionStage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific full-phase workload basis"}}. Replace the uppercase placeholders with honest integer estimates; do not copy a canned duration. A question estimate covers all work remaining in the same stage after the answer. Omit nextStageEstimate when you cannot honestly estimate it.`,
+        request.stage === "repository-fit"
+            ? 'End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"fit","ok":true,"assumption":{"repository":"absolute selected repository","planDirectory":"docs/plans/valid-relative-path","rationale":"evidence-backed reason","evidence":[{"kind":"manifest","path":"package.json","detail":"bounded evidence"}]},"question":"one owner confirmation question"} or BEARING_RESULT {"kind":"fit","ok":false,"reason":"fit_unavailable|fit_malformed|fit_undecidable"}.'
+            : gatheringQuestions
+                ? 'End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"questions","questions":["first question","second question"],"nextStageEstimate":{"stage":"gather-supplies","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific workload basis"}}. Replace the uppercase placeholders with your honest integer estimate; do not copy a canned duration. Use an empty array when no owner decisions are needed. The optional estimate covers the remaining Gather Supplies apply/write step; omit it when you cannot honestly estimate it.'
+                : request.stage === "gather-supplies" && request.gatherMode === "apply"
+                    ? 'End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["relative/existing/path"],"nextStageEstimate":{"stage":"map-route","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific full-phase workload basis"}}. Replace the uppercase placeholders with your honest integer estimate; do not copy a canned duration. The optional estimate covers the complete Map the Route phase; omit it when you cannot honestly estimate it.'
+                    : request.stage === "recon"
+                        ? 'End the final assistant message with exactly one single-line envelope. To skip optional Recon: BEARING_RESULT {"kind":"recon","summary":"why no material assumption needs Recon","artifacts":[]}. To complete Recon: BEARING_RESULT {"kind":"recon","summary":"what the experiment established","artifacts":["every relative existing prototype path"],"brief":{"assumptionId":"bounded id","assumption":"one material assumption","materiality":["architecture"],"falsificationCriterion":"measurable criterion","smallestExperiment":"bounded experiment","writeSet":["literal/relative/path"],"evidenceCommandIds":["CMD-ID"],"timeboxMinutes":MINUTES},"report":{"assumptionId":"same bounded id","measurements":[{"name":"measurement","value":"observed value","method":"method"}],"feasibilityEvidence":["evidence"],"constraints":["constraint"],"rejectedOptions":[{"option":"option","reason":"reason"}],"recommendation":"proceed","materialChange":{"cost":false,"architecture":false,"scope":false,"risk":false},"prototypePaths":["literal/relative/path"],"productionEligible":false},"nextStageEstimate":{"stage":"draft-implementation","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific drafting workload basis"}}. Replace placeholders with actual values; valid materiality values are cost, architecture, scope, and risk, and the valid recommendations are proceed, revise, and stop. Return both brief and report together; a brief-only result is incomplete. Omit nextStageEstimate when you cannot honestly estimate it.'
+                        : focus
+                            ? `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question"} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["every relative path changed during this invocation"],"evidence":[{"commandId":"CMD-ID","status":"passed","summary":"bounded observed result"}]}. On success include every command ID from BEARING_FOCUS exactly once. Never mark failed, skipped, missing, unknown, or duplicate evidence as passed.`
+                            : `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question","nextStageEstimate":{"stage":"${request.stage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific remaining-work basis"}} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["relative/existing/path"],"nextStageEstimate":{"stage":"${nextActionStage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific full-phase workload basis"}}. Replace the uppercase placeholders with honest integer estimates; do not copy a canned duration. A question estimate covers all work remaining in the same stage after the answer. Omit nextStageEstimate when you cannot honestly estimate it.`,
     ].join("\n");
 }
 function estimate(value) {
@@ -163,7 +358,7 @@ function commandEvidence(value) {
             (item.status === "passed" || item.status === "failed") && text(item.summary, 512);
     });
 }
-function envelope(value, maxQuestions = MAX_QA - 1) {
+function envelope(value, maxQuestions = MAX_QA - 1, fitRepository) {
     const line = value.trim().split(/\r?\n/).at(-1) ?? "";
     const prefix = "BEARING_RESULT ";
     if (!line.startsWith(prefix))
@@ -176,11 +371,29 @@ function envelope(value, maxQuestions = MAX_QA - 1) {
         if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
             return "malformed";
         const record = parsed;
+        if (fitRepository !== undefined) {
+            if (record.kind !== "fit")
+                return "malformed";
+            const { kind: _kind, ...candidate } = record;
+            return { receipt: { kind: "fit", fit: validateFitReceipt(candidate, { repository: fitRepository }) } };
+        }
+        if (record.kind === "fit")
+            return "malformed";
         const next = optionalEstimate(record.nextStageEstimate);
         if (record.kind === "question" && Object.keys(record).every((key) => ["kind", "question", "nextStageEstimate"].includes(key)) && [2, 3].includes(Object.keys(record).length) && text(record.question))
             return { receipt: { kind: "question", question: record.question, ...(next.value ? { nextStageEstimate: next.value } : {}) }, ...(next.dropped ? { droppedEstimate: next.dropped } : {}) };
         if (record.kind === "questions" && Object.keys(record).every((key) => ["kind", "questions", "nextStageEstimate"].includes(key)) && [2, 3].includes(Object.keys(record).length) && Array.isArray(record.questions) && record.questions.length <= maxQuestions && record.questions.every((question) => text(question)) && new Set(record.questions).size === record.questions.length)
             return { receipt: { kind: "questions", questions: record.questions, ...(next.value ? { nextStageEstimate: next.value } : {}) }, ...(next.dropped ? { droppedEstimate: next.dropped } : {}) };
+        if (record.kind === "recon" && Object.keys(record).every((key) => ["kind", "summary", "artifacts", "brief", "report", "nextStageEstimate"].includes(key)) && text(record.summary) && Array.isArray(record.artifacts) && record.artifacts.length <= MAX_ARTIFACTS && record.artifacts.every(pathText) && new Set(record.artifacts).size === record.artifacts.length) {
+            const routed = routeRecon({
+                ...(Object.hasOwn(record, "brief") ? { brief: record.brief } : {}),
+                ...(Object.hasOwn(record, "report") ? { report: record.report } : {}),
+            });
+            if (!routed.ok || routed.state === "RECON_PENDING")
+                return "malformed";
+            const { ok: _ok, ...recon } = routed;
+            return { receipt: { kind: "recon", summary: record.summary, artifacts: record.artifacts, recon, ...(next.value ? { nextStageEstimate: next.value } : {}) }, ...(next.dropped ? { droppedEstimate: next.dropped } : {}) };
+        }
         if (record.kind === "action" && Object.keys(record).every((key) => ["kind", "summary", "artifacts", "evidence", "nextStageEstimate"].includes(key)) && [3, 4, 5].includes(Object.keys(record).length) && text(record.summary) && Array.isArray(record.artifacts) && record.artifacts.length > 0 && record.artifacts.length <= MAX_ARTIFACTS && record.artifacts.every(pathText) && new Set(record.artifacts).size === record.artifacts.length && (record.evidence === undefined || commandEvidence(record.evidence)))
             return { receipt: { kind: "action", summary: record.summary, artifacts: record.artifacts, ...(record.evidence ? { evidence: record.evidence } : {}), ...(next.value ? { nextStageEstimate: next.value } : {}) }, ...(next.dropped ? { droppedEstimate: next.dropped } : {}) };
         return "malformed";
@@ -189,21 +402,72 @@ function envelope(value, maxQuestions = MAX_QA - 1) {
         return "malformed";
     }
 }
-function stageArtifactsValid(stage, artifacts, planDirectory) {
+function isPlanSpecArtifactName(name) {
+    return name === "plan-spec.md" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-map\.md$/.test(name);
+}
+function stageArtifactsValid(stage, artifacts, planDirectory, recon) {
     const inPlan = (path) => planDirectory !== undefined && posix.dirname(path) === planDirectory;
-    const planSpec = (path) => posix.basename(path) === "plan-spec.md" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-map\.md$/.test(posix.basename(path));
+    const planSpec = (path) => isPlanSpecArtifactName(posix.basename(path));
     const routeReview = (path) => posix.basename(path) === "review.html" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-review\.html$/.test(posix.basename(path));
+    if (stage === "repository-fit")
+        return artifacts.length === 0;
     if (stage === "set-bearings")
         return artifacts.some(planSpec) && artifacts.some((path) => posix.basename(path) === "repository-map.md" && posix.dirname(posix.dirname(path)) === posix.dirname(artifacts.find(planSpec) ?? ""));
     if (stage === "gather-supplies")
         return artifacts.some((path) => inPlan(path) && planSpec(path));
     if (stage === "map-route")
         return ["design.md", "seit.md"].every((name) => artifacts.some((path) => inPlan(path) && posix.basename(path) === name));
+    if (stage === "recon") {
+        if (!recon)
+            return false;
+        if (recon.state === "SKIPPED")
+            return artifacts.length === 0;
+        return artifacts.length === recon.report.prototypePaths.length
+            && recon.report.prototypePaths.every((path) => artifacts.includes(path) && recon.brief.writeSet.includes(path));
+    }
     if (stage === "draft-implementation")
         return artifacts.some((path) => inPlan(path) && posix.basename(path) === "implementation.md");
     if (stage === "execute-explorer" || stage === "execute-expedition")
         return artifacts.some((path) => inPlan(path) && routeReview(path)) && planDirectory !== undefined && artifacts.some((path) => !path.startsWith(`${planDirectory}/`));
     return true;
+}
+async function gitRepositoryAvailable(root) {
+    const { GIT_COMMON_DIR: _gitCommonDir, GIT_DIR: _gitDir, GIT_WORK_TREE: _gitWorkTree, ...environment } = process.env;
+    return new Promise((resolveAvailability) => {
+        execFile("git", ["-C", root, "rev-parse", "--git-dir"], {
+            encoding: "utf8",
+            env: {
+                ...environment,
+                GIT_CEILING_DIRECTORIES: "",
+                GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
+                LANG: "C",
+                LC_ALL: "C",
+            },
+            maxBuffer: 4 * 1024,
+            timeout: 5_000,
+            windowsHide: true,
+        }, (error, _stdout, stderr) => {
+            if (!error) {
+                resolveAvailability(true);
+                return;
+            }
+            resolveAvailability(error.code === 128
+                && stderr.trim() === "fatal: not a git repository (or any of the parent directories): .git"
+                ? false
+                : undefined);
+        });
+    });
+}
+async function reconCompletionValid(root, before, artifacts, recon) {
+    const after = await snapshotGitState(root, before.head);
+    if (!after || (after.head !== before.head && after.committedPaths.size === 0))
+        return false;
+    const changed = [...new Set([...before.paths.keys(), ...after.paths.keys(), ...after.committedPaths])]
+        .filter((path) => after.committedPaths.has(path) || before.paths.get(path) !== after.paths.get(path));
+    if (recon.state === "SKIPPED")
+        return changed.length === 0;
+    const allowed = new Set(recon.brief.writeSet);
+    return changed.every((path) => allowed.has(path) && artifacts.includes(path));
 }
 const MAX_PLANNING_ARTIFACT = 2 * 1024 * 1024;
 async function readPlanningArtifact(root, value, allowEmpty = false) {
@@ -239,6 +503,35 @@ async function readPlanningArtifact(root, value, allowEmpty = false) {
         await handle?.close();
     }
 }
+async function focusPlanHashes(root, planDirectory) {
+    const contents = await Promise.all(FOCUS_PLAN_SOURCES.map((name) => readPlanningArtifact(root, posix.join(planDirectory, name))));
+    if (!contents.every((content) => content !== undefined))
+        return undefined;
+    const hash = (content) => createHash("sha256").update(content).digest("hex");
+    return {
+        "plan-spec.md": hash(contents[0]),
+        "design.md": hash(contents[1]),
+        "seit.md": hash(contents[2]),
+        "implementation.md": hash(contents[3]),
+    };
+}
+export async function currentPlanningVerdict(root, planDirectory) {
+    try {
+        if (!await containedPath(root, planDirectory, true))
+            return undefined;
+        const names = await readdir(resolve(root, planDirectory));
+        const planName = names.find(isPlanSpecArtifactName);
+        if (!planName || !names.includes("design.md") || !names.includes("seit.md") || !names.includes("implementation.md"))
+            return undefined;
+        const [plan, design, seit, implementation] = await Promise.all([planName, "design.md", "seit.md", "implementation.md"].map((name) => readPlanningArtifact(root, posix.join(planDirectory, name))));
+        return plan && design && seit && implementation
+            ? validatePlan({ documents: { plan, design, seit, implementation }, planDirectory })
+            : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
 async function writePlanningReview(root, value, content) {
     if (Buffer.byteLength(content) > MAX_PLANNING_ARTIFACT || !pathText(value) || value === "." || isAbsolute(value) || posix.normalize(value) !== value)
         return false;
@@ -269,124 +562,128 @@ async function writePlanningReview(root, value, content) {
     }
 }
 function escaped(value) { return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"); }
+const MAX_FOCUS_DRIFT_TEXT = 512;
+function boundedEscaped(value) {
+    const safe = escaped(value);
+    return safe.length <= MAX_FOCUS_DRIFT_TEXT ? safe : `${safe.slice(0, MAX_FOCUS_DRIFT_TEXT - 1)}…`;
+}
+function sameStrings(left, right) {
+    return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+function addedValues(previous, candidate) {
+    const prior = new Set(previous);
+    return candidate.filter((value) => !prior.has(value)).map(boundedEscaped);
+}
+export function focusContractDrift(previous, candidate) {
+    const left = previous.context.envelope;
+    const right = candidate.context.envelope;
+    const addedAllowedPaths = addedValues(left.allowedPaths, right.allowedPaths);
+    const removedAllowedPaths = addedValues(right.allowedPaths, left.allowedPaths);
+    const addedSeitCommandIds = addedValues(left.seitCommandIds, right.seitCommandIds);
+    const removedSeitCommandIds = addedValues(right.seitCommandIds, left.seitCommandIds);
+    const changedAcceptanceCriterion = left.currentAcceptanceCriterion === right.currentAcceptanceCriterion
+        ? undefined
+        : { previous: boundedEscaped(left.currentAcceptanceCriterion), candidate: boundedEscaped(right.currentAcceptanceCriterion) };
+    const changedRemainingSlices = sameStrings(left.remainingSlices, right.remainingSlices)
+        ? undefined
+        : { previous: left.remainingSlices.map(boundedEscaped), candidate: right.remainingSlices.map(boundedEscaped) };
+    const changedObjective = left.immutableObjective === right.immutableObjective
+        ? undefined
+        : { previous: boundedEscaped(left.immutableObjective), candidate: boundedEscaped(right.immutableObjective) };
+    const changedRole = left.role === right.role
+        ? undefined
+        : { previous: boundedEscaped(left.role), candidate: boundedEscaped(right.role) };
+    const changedPlanSources = FOCUS_PLAN_SOURCES
+        .filter((name) => previous.planHashes[name] !== candidate.planHashes[name])
+        .map(boundedEscaped);
+    if (!addedAllowedPaths.length &&
+        !removedAllowedPaths.length &&
+        !addedSeitCommandIds.length &&
+        !removedSeitCommandIds.length &&
+        !changedAcceptanceCriterion &&
+        !changedRemainingSlices &&
+        !changedObjective &&
+        !changedRole &&
+        !changedPlanSources.length)
+        return null;
+    return {
+        addedAllowedPaths,
+        removedAllowedPaths,
+        addedSeitCommandIds,
+        removedSeitCommandIds,
+        ...(changedAcceptanceCriterion ? { changedAcceptanceCriterion } : {}),
+        ...(changedRemainingSlices ? { changedRemainingSlices } : {}),
+        ...(changedObjective ? { changedObjective } : {}),
+        ...(changedRole ? { changedRole } : {}),
+        changedPlanSources,
+    };
+}
 function field(section, name) {
     const label = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const match = new RegExp(`^\\*\\*${label}${name.endsWith("?") ? "" : "\\."}\\*\\*\\s*(.+)$`, "mi").exec(section);
     return match?.[1]?.trim();
 }
-const SLICE_HEADING = /^###\s+Slice\s+(?<id>[A-Za-z]+\d+|\d+(?:\.\d+)+)\b.*$/gm;
-const MANIFEST_HEADING = /^###\s+(?<id>[A-Za-z]+\d+|\d+(?:\.\d+)+)\s+execution manifest\s*$/gmi;
-const REQUIRED_SLICE_FIELDS = ["Goal", "Requirement IDs", "Design IDs", "SEIT proof rows", "Type", "Design lenses", "Implementation role", "Agent model route", "Agent reasoning level", "Ponytail mode", "Review path"];
-const REQUIRED_MANIFEST_FIELDS = ["Write set", "Command IDs", "Stop condition", "Human decision"];
-const PLAN_ID = /\b(?:AC|RISK)-[A-Z0-9][A-Z0-9.-]*\b/gi;
-const DESIGN_ID = /\b(?:DES|CONTRACT)-[A-Z0-9][A-Z0-9.-]*\b/gi;
-const SEIT_ID = /\bSEIT-[A-Z0-9][A-Z0-9.-]*\b/gi;
-const COMMAND_ID = /\b(?:CMD|PROC)-[A-Z0-9][A-Z0-9.-]*\b/gi;
-function sections(content, pattern) {
-    const matches = [...content.matchAll(pattern)];
-    const result = new Map();
-    for (let index = 0; index < matches.length; index += 1) {
-        const id = matches[index].groups?.id;
-        if (!id || result.has(id))
-            return undefined;
-        result.set(id, content.slice(matches[index].index ?? 0, matches[index + 1]?.index ?? content.length));
-    }
-    return result;
-}
-function identifiers(value, pattern) {
-    return new Set([...(value ?? "").matchAll(pattern)].map((match) => match[0].toUpperCase()));
-}
-function markdownSection(content, heading) {
-    const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`^##[ \\t]+${escapedHeading}[ \\t]*\\r?\\n([\\s\\S]*?)(?=^##[ \\t]+|(?![\\s\\S]))`, "mi").exec(content)?.[1]?.trim();
-}
-function traceabilityRows(seit) {
-    const matrix = markdownSection(seit, "Traceability Matrix"), requiredCommands = markdownSection(seit, "Required Commands");
-    if (!matrix || !requiredCommands)
-        return undefined;
-    const table = matrix.split(/\r?\n/).filter((line) => line.trim().startsWith("|"));
-    if (table.length < 3)
-        return undefined;
-    const cells = (line) => line.trim().replace(/^\||\|$/g, "").split("|").map((value) => value.trim());
-    const headers = cells(table[0]).map((value) => value.toLowerCase());
-    const required = ["seit row id", "acceptance/risk id", "design/contract id", "boundary/test layer", "positive case", "negative/failure case", "command/procedure id", "evidence"];
-    if (required.some((name) => !headers.includes(name)))
-        return undefined;
-    const rows = new Map();
-    for (const line of table.slice(2)) {
-        const values = cells(line);
-        if (values.length !== headers.length || required.some((name) => !values[headers.indexOf(name)] || /^(?:-|tbd|todo|n\/a)$/i.test(values[headers.indexOf(name)])))
-            return undefined;
-        const rowIds = identifiers(values[headers.indexOf("seit row id")], SEIT_ID);
-        if (rowIds.size !== 1)
-            return undefined;
-        const id = [...rowIds][0];
-        if (rows.has(id))
-            return undefined;
-        const requirements = identifiers(values[headers.indexOf("acceptance/risk id")], PLAN_ID);
-        const designs = identifiers(values[headers.indexOf("design/contract id")], DESIGN_ID);
-        const commands = identifiers(values[headers.indexOf("command/procedure id")], COMMAND_ID);
-        if (!requirements.size || !designs.size || !commands.size)
-            return undefined;
-        rows.set(id, { requirements, designs, commands });
-    }
-    const commands = new Set([...requiredCommands.matchAll(/^\s*-\s+\*\*((?:CMD|PROC)-[A-Z0-9][A-Z0-9.-]*)\*\*/gmi)].map((match) => match[1].toUpperCase()));
-    return rows.size && commands.size ? { rows, commands } : undefined;
-}
-function structurallyValidImplementation(plan, design, seit, content) {
-    const slices = sections(content, SLICE_HEADING), manifests = sections(content, MANIFEST_HEADING);
-    if (!slices?.size || !manifests || slices.size !== manifests.size || [...slices.keys()].some((id) => !manifests.has(id)))
+export function structurallyValidImplementation(plan, design, seit, content) {
+    const model = parsePlanDocuments({ plan, design, seit, implementation: content });
+    const legacySection = (source, heading) => {
+        const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`^##[ \\t]+${escapedHeading}[ \\t]*\\r?\\n([\\s\\S]*?)(?=^##[ \\t]+|(?![\\s\\S]))`, "mi").exec(source)?.[1] ?? "";
+    };
+    const legacyPlanIds = new Set(`${legacySection(plan, "Acceptance criteria")}\n${legacySection(plan, "Risks and open questions")}`
+        .match(/\b(?:AC|RISK)-[A-Z0-9][A-Z0-9.-]*\b/gi)?.map((value) => value.toUpperCase()) ?? []);
+    const legacyDesignIds = new Set(design.match(/\b(?:DES|CONTRACT)-[A-Z0-9][A-Z0-9.-]*\b/gi)?.map((value) => value.toUpperCase()) ?? []);
+    const additions = new Set([
+        "artifact_frontmatter_invalid",
+        "build_command_in_manifest",
+        "goal_unbounded",
+        "id_format_invalid",
+        "writeset_duplicate",
+        "writeset_multiline",
+        "writeset_readonly_harvest",
+    ]);
+    return structuralFindings(model).every((finding) => {
+        if (additions.has(finding.code) || finding.code === "design_section_missing")
+            return true;
+        if (finding.code === "seit_section_missing" && finding.observed === "Cross-cutting Checks")
+            return true;
+        if (finding.code === "id_unknown") {
+            return (/^(?:AC|RISK)-/i.test(finding.observed) ? legacyPlanIds : legacyDesignIds).has(finding.observed);
+        }
+        if (finding.code === "trace_header_invalid" && finding.observed === model.traceHeaders.join(", ")) {
+            return [
+                "seit row id",
+                "acceptance/risk id",
+                "design/contract id",
+                "boundary/test layer",
+                "positive case",
+                "negative/failure case",
+                "command/procedure id",
+                "evidence",
+            ].every((header) => model.traceHeaders.includes(header));
+        }
+        if (finding.code === "writeset_empty" && finding.sliceId) {
+            const writeSet = model.manifests.get(finding.sliceId)?.fields.get("Write set") ?? "";
+            return /\b(?:none|no writes?(?: required)?|no (?:new|required|source|product) files?)\b/i.test(writeSet);
+        }
+        if (finding.code === "writeset_glob" || finding.code === "writeset_unsafe_path") {
+            return !(/\*|\.\.\.|<|>|\\/.test(finding.observed)
+                || posix.isAbsolute(finding.observed)
+                || /^[A-Za-z]:/.test(finding.observed)
+                || posix.normalize(finding.observed) !== finding.observed
+                || finding.observed.split("/").some((segment) => !segment || segment === "." || segment === ".."));
+        }
+        if (finding.code === "slice_reference_dangling") {
+            return ![...content.matchAll(/\bSlice\s+([A-Za-z]+\d+|\d+(?:\.\d+)+)\b/g)].some((match) => match[1] === finding.observed);
+        }
+        if (finding.code === "wave_noncontiguous") {
+            const waves = new Set([...content.matchAll(/\bWave\s+(\d+)\b/g)].map((match) => Number(match[1])));
+            if (model.slices.size > 1 && !waves.size)
+                return false;
+            const lastWave = waves.size ? Math.max(...waves) : 0;
+            return !waves.size || lastWave >= 1 && waves.size === lastWave && [...Array(lastWave).keys()].every((index) => waves.has(index + 1));
+        }
         return false;
-    const trace = traceabilityRows(seit);
-    if (!trace)
-        return false;
-    const planIds = identifiers(`${markdownSection(plan, "Acceptance criteria") ?? ""}\n${markdownSection(plan, "Risks and open questions") ?? ""}`, PLAN_ID);
-    const designIds = identifiers(design, DESIGN_ID);
-    if (!planIds.size || !designIds.size)
-        return false;
-    const sliceRows = new Map();
-    for (const [id, section] of slices) {
-        if (REQUIRED_SLICE_FIELDS.some((name) => !field(section, name)))
-            return false;
-        const requirements = identifiers(field(section, "Requirement IDs"), PLAN_ID);
-        const designs = identifiers(field(section, "Design IDs"), DESIGN_ID);
-        const proofRows = identifiers(field(section, "SEIT proof rows"), SEIT_ID);
-        if (!requirements.size || !designs.size || !proofRows.size || [...requirements].some((value) => !planIds.has(value)) || [...designs].some((value) => !designIds.has(value)) || [...proofRows].some((value) => !trace.rows.has(value)))
-            return false;
-        const mappedRequirements = new Set([...proofRows].flatMap((value) => [...trace.rows.get(value).requirements]));
-        const mappedDesigns = new Set([...proofRows].flatMap((value) => [...trace.rows.get(value).designs]));
-        if ([...requirements].some((value) => !mappedRequirements.has(value)) || [...designs].some((value) => !mappedDesigns.has(value)))
-            return false;
-        sliceRows.set(id, proofRows);
-    }
-    for (const [id, manifest] of manifests) {
-        if (REQUIRED_MANIFEST_FIELDS.some((name) => !field(manifest, name)))
-            return false;
-        const writeSet = field(manifest, "Write set");
-        const noWrites = /\b(?:none|no writes?(?: required)?|no (?:new|required|source|product) files?)\b/i.test(writeSet);
-        const paths = [...writeSet.matchAll(/`([^`]+)`/g)].map((match) => match[1]);
-        if (!noWrites && (!/\bonly\b/i.test(writeSet) || !paths.length))
-            return false;
-        if (paths.some((path) => /\*|\.\.\.|<|>|\\/.test(path) || posix.isAbsolute(path) || /^[A-Za-z]:/.test(path) || posix.normalize(path) !== path || path.split("/").some((segment) => !segment || segment === "." || segment === "..")))
-            return false;
-        const commandIds = identifiers(field(manifest, "Command IDs"), COMMAND_ID);
-        const mappedCommands = new Set([...(sliceRows.get(id) ?? [])].flatMap((value) => [...trace.rows.get(value).commands]));
-        if (!commandIds.size || [...commandIds].some((value) => !trace.commands.has(value) || !mappedCommands.has(value)))
-            return false;
-    }
-    const sliceIds = new Set(slices.keys());
-    if ([...content.matchAll(/\bSlice\s+([A-Za-z]+\d+|\d+(?:\.\d+)+)\b/g)].some((match) => !sliceIds.has(match[1])))
-        return false;
-    const waves = new Set([...content.matchAll(/\bWave\s+(\d+)\b/g)].map((match) => Number(match[1])));
-    if (slices.size > 1 && !waves.size)
-        return false;
-    const lastWave = waves.size ? Math.max(...waves) : 0;
-    return !waves.size || lastWave >= 1 && waves.size === lastWave && [...Array(lastWave).keys()].every((index) => waves.has(index + 1));
-}
-function completeArtifact(content, type, headings) {
-    if (!new RegExp(`^---[\\s\\S]*^type:\\s*${type}\\s*$[\\s\\S]*^status:\\s*(?:complete|amended)\\s*$[\\s\\S]*^---\\s*$`, "mi").test(content))
-        return false;
-    return headings.every((heading) => new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\n\\s*\\S`, "mi").test(content));
+    });
 }
 function sourceSection(sources) {
     return `<section id="bearing-source-artifacts"><h2>Complete planning artifacts</h2><p>These are the complete source documents used for this review.</p>${sources.map(([name, content]) => `<details><summary>${escaped(name)}</summary><pre>${escaped(content)}</pre></details>`).join("")}</section>`;
@@ -417,7 +714,7 @@ export async function executionReviewValid(root, planDirectory) {
     if (!planDirectory)
         return false;
     const directory = resolve(root, planDirectory), names = await readdir(directory);
-    const planName = names.find((name) => name === "plan-spec.md" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-map\.md$/.test(name));
+    const planName = names.find(isPlanSpecArtifactName);
     const reviewName = names.find((name) => name === "review.html" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-review\.html$/.test(name));
     if (!planName || !reviewName || !["design.md", "seit.md", "implementation.md"].every((name) => names.includes(name)))
         return false;
@@ -438,7 +735,7 @@ async function designReviewArtifacts(root, planDirectory, _repair = false, cance
     if (!planDirectory)
         return undefined;
     const directory = resolve(root, planDirectory), names = await readdir(directory);
-    const planName = names.find((name) => name === "plan-spec.md" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-map\.md$/.test(name));
+    const planName = names.find(isPlanSpecArtifactName);
     const reviewName = names.find((name) => name === "review.html" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-review\.html$/.test(name)) ?? "review.html";
     if (!planName || !names.includes("design.md") || !names.includes("seit.md"))
         return undefined;
@@ -447,7 +744,7 @@ async function designReviewArtifacts(root, planDirectory, _repair = false, cance
     if (!sourceContents.every((content) => content !== undefined))
         return undefined;
     const [plan, design, seit] = sourceContents;
-    if (!completeArtifact(design, "design", ["Use Cases and Communication Flows", "Interface Option Check", "OOPDSA Implementation Design"]) || !completeArtifact(seit, "seit", ["Traceability Matrix", "Cross-cutting Checks"]))
+    if (!artifactComplete(design.trim(), "design", ["Use Cases and Communication Flows", "Interface Option Check", "OOPDSA Implementation Design"]) || !artifactComplete(seit.trim(), "seit", ["Traceability Matrix", "Cross-cutting Checks"]))
         return undefined;
     const reviewPath = posix.join(planDirectory, reviewName);
     const sources = sourceNames.map((name, index) => [name, [plan, design, seit][index]]);
@@ -480,7 +777,7 @@ async function planningReview(root, planDirectory, selection) {
     if (!planDirectory)
         return undefined;
     const directory = resolve(root, planDirectory), names = await readdir(directory);
-    const planName = names.find((name) => name === "plan-spec.md" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-map\.md$/.test(name));
+    const planName = names.find(isPlanSpecArtifactName);
     const reviewName = names.find((name) => name === "review.html" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-review\.html$/.test(name)) ?? "review.html";
     if (!planName || !names.includes("design.md") || !names.includes("seit.md") || !names.includes("implementation.md"))
         return undefined;
@@ -489,7 +786,7 @@ async function planningReview(root, planDirectory, selection) {
     if (!contents.every((content) => content !== undefined))
         return undefined;
     const [plan, design, seit, implementation] = contents;
-    if (!completeArtifact(design, "design", ["Use Cases and Communication Flows", "Interface Option Check", "OOPDSA Implementation Design"]) || !completeArtifact(seit, "seit", ["Traceability Matrix", "Cross-cutting Checks"]))
+    if (!artifactComplete(design.trim(), "design", ["Use Cases and Communication Flows", "Interface Option Check", "OOPDSA Implementation Design"]) || !artifactComplete(seit.trim(), "seit", ["Traceability Matrix", "Cross-cutting Checks"]))
         return undefined;
     if (!structurallyValidImplementation(plan, design, seit, implementation))
         return undefined;
@@ -500,10 +797,11 @@ async function planningReview(root, planDirectory, selection) {
         const section = implementation.slice(start, end);
         const role = field(section, "Implementation role"), model = field(section, "Agent model route"), reasoning = field(section, "Agent reasoning level");
         const ponytail = field(section, "Ponytail mode"), reviewPath = field(section, "Review path");
-        if (!role || !model || !reasoning || !ponytail || !reviewPath)
+        if (!role || !model || !reasoning || !reviewPath)
             return undefined;
         const route = planningRoute(model, selection), normalizedReasoning = reasoning.replace(/[.!?]+$/, "").trim();
-        if (!route || !route.reasoningLevels.includes(normalizedReasoning.toLowerCase()) || !["full", "off"].includes(ponytail))
+        const normalizedPonytail = ponytail?.replace(/[.!?]+$/, "").trim();
+        if (!route || !route.reasoningLevels.includes(normalizedReasoning.toLowerCase()) || (normalizedPonytail !== undefined && !["full", "off"].includes(normalizedPonytail)))
             return undefined;
         assignments.push({ slice: headings[index][1].trim(), role, model, reasoning: normalizedReasoning });
     }
@@ -513,18 +811,64 @@ async function planningReview(root, planDirectory, selection) {
     const review = names.includes(reviewName) ? await readPlanningArtifact(root, posix.join(planDirectory, reviewName), true) : "";
     if (review === undefined || completed !== review && !await writePlanningReview(root, posix.join(planDirectory, reviewName), completed))
         return undefined;
-    return { phases: [...implementation.matchAll(/^##\s+Phase\b/gmi)].length, slices: assignments.length, assignments };
+    const validation = orchestratePlanning({
+        currentState: "EXECUTION_PLAN_READY",
+        pass: "planning-validator",
+        documents: { plan, design, seit, implementation },
+        planDirectory,
+        artifacts: sourceNames.map((name) => posix.join(planDirectory, name)),
+    });
+    if ("refused" in validation || !validation.planningValidation)
+        return undefined;
+    return {
+        review: {
+            phases: [...implementation.matchAll(/^##\s+Phase\s+(?=[A-Za-z0-9.-]*\d)[^\r\n]*$/gmi)].length,
+            slices: assignments.length,
+            assignments,
+        },
+        planningValidation: validation.planningValidation,
+    };
+}
+async function completedValidatorScope(root, planDirectory, focus, completion, evidence, summary) {
+    const sliceIds = [...focus.envelope.remainingSlices];
+    const readinessClaims = [{ text: summary, sliceIds }];
+    const planName = (await readdir(resolve(root, planDirectory)).catch(() => [])).find(isPlanSpecArtifactName);
+    if (!planName)
+        return { slices: [], readinessClaims };
+    const names = [planName, "design.md", "seit.md", "implementation.md"];
+    const contents = await Promise.all(names.map((name) => readPlanningArtifact(root, posix.join(planDirectory, name))));
+    if (!contents.every((content) => content !== undefined))
+        return { slices: [], readinessClaims };
+    const [plan, design, seit, implementation] = contents;
+    const model = parsePlanDocuments({ plan, design, seit, implementation });
+    const slices = sliceIds.flatMap((sliceId) => {
+        const slice = model.slices.get(sliceId);
+        const manifest = model.manifests.get(sliceId);
+        if (!slice || !manifest)
+            return [];
+        return [{
+                sliceId,
+                requirementIds: [...slice.requirementIds],
+                evidenceCommandIds: [...manifest.commandIds],
+                ...(completion.changedPaths.some((path) => manifest.writeSetPaths.includes(path)) ? { completion } : {}),
+                evidence: evidence.filter((item) => manifest.commandIds.has(item.commandId)),
+            }];
+    });
+    return slices.length === sliceIds.length ? { slices, readinessClaims } : { slices: [], readinessClaims };
 }
 /** Minimal provider-neutral bridge from a selected onboarding route to one staged journey action. */
 export class JourneyService {
     runner;
+    planDirectoryResolver;
     active = new Map();
     cancelled = new Set();
     activity = new Map();
     providerSessions = new Map();
     focusContexts = new Map();
-    constructor(runner) {
+    reconBaselines = new Map();
+    constructor(runner, planDirectoryResolver = resolvePlanDirectory) {
         this.runner = runner;
+        this.planDirectoryResolver = planDirectoryResolver;
     }
     cancel(runId) { this.cancelled.add(runId); const processRunId = this.active.get(runId); if (processRunId)
         void this.runner.cancel?.(processRunId); }
@@ -536,10 +880,7 @@ export class JourneyService {
         return JSON.stringify([repositoryPath, runId, selection.provider, selection.model, selection.reasoning]);
     }
     focusKey(repositoryPath, runId) { return JSON.stringify([repositoryPath, runId]); }
-    sameFocusContract(left, right) {
-        const stable = (focus) => ({ ...focus.envelope, currentBlocker: "none", gateFailureFingerprint: "none", reviewPath: focus.reviewPath });
-        return JSON.stringify(stable(left)) === JSON.stringify(stable(right));
-    }
+    reconKey(repositoryPath, runId) { return JSON.stringify([repositoryPath, runId]); }
     beginStage(runId, stage) {
         const current = this.activity.get(runId);
         if (current?.stage === stage)
@@ -560,9 +901,10 @@ export class JourneyService {
         if (current.trail.length > MAX_ACTIVITY_TRAIL)
             current.trail.shift();
     }
-    async executeOnce(request, activityStage = request.stage, recordStageStart = true) {
+    async executeOnce(request, activityStage = request.stage, recordStageStart = true, freshSessionFallback = { used: false }) {
         if (!validRequest(request))
             return { status: "failure", code: "input_invalid", tokens: 0 };
+        const fitStage = request.stage === "repository-fit";
         let repositoryPath;
         try {
             repositoryPath = await realpath(request.repositoryPath);
@@ -577,18 +919,30 @@ export class JourneyService {
             return { status: "failure", code: "input_invalid", tokens: 0 };
         const projected = request.run.roles.find((role) => request.stage === "review" ? role.role === "surveyor" && !role.authority.write : role.role === "crewmate" && role.executor && role.authority.write);
         if (!projected)
-            return { status: "failure", code: "crewmate_unavailable", tokens: 0 };
-        if (!sameSelection(request.selection, projected.selection) || request.run.roles.some((role) => !sameSelection(role.selection, request.selection)))
+            return { status: "failure", code: fitStage ? "fit_unavailable" : "crewmate_unavailable", tokens: 0 };
+        if (!sameRoute(request.selection, projected.selection) || request.run.roles.some((role) => !sameRoute(role.selection, request.selection)))
             return { status: "failure", code: "selection_mismatch", tokens: 0 };
+        let resolvedPlanDirectory;
+        if (request.stage === "set-bearings") {
+            if (!request.requestedPlanDirectory)
+                return { status: "failure", code: "input_invalid", tokens: 0 };
+            const resolution = await this.planDirectoryResolver(repositoryPath, request.requestedPlanDirectory)
+                .catch(() => ({ ok: false, reason: "plan_directory_invalid" }));
+            if (!resolution.ok)
+                return { status: "failure", code: resolution.reason, tokens: 0 };
+            resolvedPlanDirectory = resolution.path;
+        }
         this.beginStage(request.runId, activityStage);
         if (recordStageStart)
             this.recordActivity(request.runId, activityStage, { kind: "stage.started", status: "running" });
         if (request.stage === "set-bearings") {
+            if (!resolvedPlanDirectory)
+                return { status: "failure", code: "input_invalid", tokens: 0 };
             if (this.cancelled.has(request.runId))
                 return { status: "failure", code: "cancelled", tokens: 0 };
             try {
                 this.recordActivity(request.runId, activityStage, { kind: "repository-map.started", status: "running" });
-                const workspace = await setBearingsWorkspace(repositoryPath, request.workGoal, planDirectory);
+                const workspace = await setBearingsWorkspace(repositoryPath, request.workGoal, resolvedPlanDirectory);
                 if (!workspace || !(await Promise.all(workspace.artifacts.map((artifact) => containedPath(repositoryPath, artifact)))).every(Boolean) || !stageArtifactsValid(request.stage, workspace.artifacts, workspace.directory) || this.cancelled.has(request.runId))
                     return { status: "failure", code: this.cancelled.has(request.runId) ? "cancelled" : "artifact_invalid", tokens: 0 };
                 this.recordActivity(request.runId, activityStage, { kind: "workspace.ready", status: workspace.resumed ? "resumed" : "created" });
@@ -604,32 +958,80 @@ export class JourneyService {
         if (executionStage) {
             if (!planDirectory)
                 return { status: "failure", code: "focus_invalid", tokens: 0 };
-            const candidate = await createFocusContext({
-                root: repositoryPath,
-                planDirectory,
-                role: request.stage === "execute-expedition" ? "navigator" : "explorer",
-                objective: request.workGoal,
-                ...(request.reviewPrompt ? { currentBlocker: request.reviewPrompt } : {}),
-                ...(request.gateFailureFingerprint ? { gateFailureFingerprint: request.gateFailureFingerprint } : {}),
-            }).catch(() => undefined);
+            const [parsed, planHashes] = await Promise.all([
+                createFocusContext({
+                    root: repositoryPath,
+                    planDirectory,
+                    role: request.stage === "execute-expedition" ? "navigator" : "explorer",
+                    objective: request.workGoal,
+                    ...(request.reviewPrompt ? { currentBlocker: request.reviewPrompt } : {}),
+                    ...(request.gateFailureFingerprint ? { gateFailureFingerprint: request.gateFailureFingerprint } : {}),
+                }).catch(() => undefined),
+                focusPlanHashes(repositoryPath, planDirectory).catch(() => undefined),
+            ]);
             focusKey = this.focusKey(repositoryPath, request.runId);
             const original = this.focusContexts.get(focusKey);
-            if (!candidate || original && !this.sameFocusContract(original, candidate)) {
-                this.recordActivity(request.runId, activityStage, { kind: "focus.rejected", status: "invalid" });
+            if (!parsed?.ok || !planHashes) {
+                this.recordActivity(request.runId, activityStage, {
+                    kind: "focus.rejected",
+                    status: parsed && !parsed.ok ? focusRejectionStatus(parsed) : "invalid",
+                });
                 return { status: "failure", code: "focus_invalid", tokens: 0 };
             }
-            focus = original
-                ? { ...original, envelope: { ...original.envelope, currentBlocker: candidate.envelope.currentBlocker, gateFailureFingerprint: candidate.envelope.gateFailureFingerprint } }
+            const candidate = { context: parsed.value, planHashes };
+            const drift = original ? focusContractDrift(original, candidate) : null;
+            if (drift && !request.focusAmendmentConfirmed) {
+                this.recordActivity(request.runId, activityStage, { kind: "focus.amendment_required", status: "unconfirmed" });
+                return { status: "failure", code: "focus_amendment_required", focusDrift: drift, tokens: 0 };
+            }
+            const selected = original
+                ? drift
+                    ? candidate
+                    : {
+                        ...original,
+                        context: {
+                            ...original.context,
+                            envelope: {
+                                ...original.context.envelope,
+                                currentBlocker: candidate.context.envelope.currentBlocker,
+                                gateFailureFingerprint: candidate.context.envelope.gateFailureFingerprint,
+                            },
+                        },
+                    }
                 : candidate;
-            this.focusContexts.set(focusKey, focus);
+            focus = selected.context;
+            this.focusContexts.set(focusKey, selected);
+            if (drift)
+                this.recordActivity(request.runId, activityStage, { kind: "focus.amended", status: "confirmed" });
             this.recordActivity(request.runId, activityStage, { kind: "focus.ready", status: "validated" });
+        }
+        const reconKey = this.reconKey(repositoryPath, request.runId);
+        const reconBaseline = request.stage === "recon"
+            ? this.reconBaselines.get(reconKey) ?? await snapshotGitState(repositoryPath)
+            : undefined;
+        if (reconBaseline)
+            this.reconBaselines.set(reconKey, reconBaseline);
+        if (request.stage === "recon" && !reconBaseline) {
+            const gitAvailable = await gitRepositoryAvailable(repositoryPath);
+            if (gitAvailable === false) {
+                this.recordActivity(request.runId, activityStage, { kind: "recon.skipped", status: "git_repository_unavailable" });
+                return {
+                    status: "action",
+                    summary: "Bearing skipped Recon because the selected path is not in a Git repository.",
+                    artifacts: [],
+                    recon: { state: "SKIPPED" },
+                    tokens: 0,
+                };
+            }
+            this.recordActivity(request.runId, activityStage, { kind: "recon.rejected", status: "git_state" });
+            return { status: "failure", code: "completion_invalid", tokens: 0 };
         }
         let taskPrompt;
         try {
             taskPrompt = prompt(request, planDirectory, await packagedSkills(request.stage), focus);
         }
         catch {
-            return { status: "failure", code: "adapter_failed", tokens: 0 };
+            return { status: "failure", code: fitStage ? "fit_unavailable" : "adapter_failed", tokens: 0 };
         }
         let tokens = 0;
         let events;
@@ -637,11 +1039,11 @@ export class JourneyService {
             return { status: "failure", code: "cancelled", tokens: 0 };
         const processRunId = `${request.runId.slice(0, 70)}-${randomUUID()}`;
         this.active.set(request.runId, processRunId);
-        if (request.stage === "review" && request.selection.provider === "codex") {
-            const modelArgs = request.selection.model === "*" ? [] : ["-m", request.selection.model];
+        if (request.stage === "review" && projected.selection.provider === "codex") {
+            const modelArgs = projected.selection.model === "*" ? [] : ["-m", projected.selection.model];
             let result;
             try {
-                result = await this.runner.run({ routeId: "codex", executable: "codex", args: ["exec", "review", "--uncommitted", "--json", ...modelArgs, "-c", `model_reasoning_effort="${request.selection.reasoning}"`, "-c", 'approval_policy="never"', "-c", 'sandbox_mode="read-only"', "--ephemeral"], stdin: "", cwd: repositoryPath, timeoutMs: projected.limits.timeoutMs, runId: processRunId, onActivity: (activity) => this.recordActivity(request.runId, activityStage, activity) });
+                result = await this.runner.run({ routeId: "codex", executable: "codex", args: ["exec", "review", "--uncommitted", "--json", ...modelArgs, "-c", `model_reasoning_effort="${projected.reasoning.providerLevel}"`, "-c", 'approval_policy="never"', "-c", 'sandbox_mode="read-only"', "--ephemeral"], stdin: "", cwd: repositoryPath, timeoutMs: projected.limits.timeoutMs, runId: processRunId, onActivity: (activity) => this.recordActivity(request.runId, activityStage, activity) });
             }
             catch {
                 return { status: "failure", code: "adapter_failed", tokens: 0 };
@@ -661,22 +1063,43 @@ export class JourneyService {
             events = result.events;
         }
         else {
-            const adapter = createAgentAdapter(request.selection, this.runner);
+            let lastAttemptSideEffectFree = false;
+            const observedRunner = {
+                executableAvailable: (executable) => this.runner.executableAvailable(executable),
+                run: async (invocation) => {
+                    const result = await this.runner.run(invocation);
+                    lastAttemptSideEffectFree = result.sideEffectFree === true;
+                    return result;
+                },
+                attestIsolation: () => this.runner.attestIsolation?.(),
+            };
+            const adapter = createAgentAdapter(projected.selection, observedRunner);
             if (!adapter)
-                return { status: "failure", code: "crewmate_unavailable", tokens: 0 };
+                return { status: "failure", code: fitStage ? "fit_unavailable" : "crewmate_unavailable", tokens: 0 };
             let receipt;
-            const questionDiscovery = request.stage === "gather-supplies" && request.gatherMode === "questions";
+            const questionDiscovery = fitStage || request.stage === "gather-supplies" && request.gatherMode === "questions";
             const journeySession = request.stage !== "review";
-            const providerSessionKey = this.providerSessionKey(repositoryPath, request.runId, request.selection);
+            const providerSessionKey = this.providerSessionKey(repositoryPath, request.runId, projected.selection);
             const continuation = journeySession ? request.providerSessionId ?? this.providerSessions.get(providerSessionKey) : undefined;
             try {
                 receipt = await adapter.execute({ runId: processRunId, sessionScope: request.runId, repositoryPath, role: { ...projected, sessionId: journeySession ? projected.sessionId : null, authority: { ...projected.authority, write: questionDiscovery ? false : projected.authority.write, network: request.selection.provider === "agy", externalAction: false }, toolAllow: questionDiscovery ? projected.toolAllow.filter((tool) => !/write|edit/i.test(tool)) : projected.toolAllow }, task: { prompt: taskPrompt }, onActivity: (activity) => this.recordActivity(request.runId, activityStage, activity), ...(continuation ? { providerSessionId: continuation } : {}), ...(executionStage ? { focusMode: true } : {}), ...(request.stage === "execute-expedition" ? { allowSubagents: true } : {}) });
             }
             catch {
-                return { status: "failure", code: "adapter_failed", tokens: 0 };
+                return { status: "failure", code: fitStage ? "fit_unavailable" : "adapter_failed", tokens: 0 };
             }
-            if (receipt.status !== "completed")
-                return { status: "failure", code: this.cancelled.has(request.runId) && (receipt.status === "blocked_reconcile" || receipt.failure === "unknown_side_effect") ? "interrupted" : receipt.failure === "token_budget" ? "token_budget" : receipt.failure === "cancelled" ? "cancelled" : "adapter_failed", tokens: receipt.usage.tokens };
+            if (receipt.status !== "completed") {
+                if (receipt.failure === "session_unavailable") {
+                    this.providerSessions.delete(providerSessionKey);
+                    if (!freshSessionFallback.used && lastAttemptSideEffectFree) {
+                        freshSessionFallback.used = true;
+                        const { providerSessionId: _deadProviderSessionId, ...freshRequest } = request;
+                        const fallback = await this.executeOnce(freshRequest, activityStage, false, freshSessionFallback);
+                        return { ...fallback, tokens: receipt.usage.tokens + fallback.tokens, sessionContinuity: "lost" };
+                    }
+                    return { status: "failure", code: "session_unavailable", tokens: receipt.usage.tokens, sessionContinuity: "lost" };
+                }
+                return { status: "failure", code: this.cancelled.has(request.runId) && (receipt.status === "blocked_reconcile" || receipt.failure === "unknown_side_effect") ? "interrupted" : receipt.failure === "token_budget" ? "token_budget" : receipt.failure === "cancelled" ? "cancelled" : fitStage ? "fit_unavailable" : "adapter_failed", tokens: receipt.usage.tokens };
+            }
             if (journeySession && receipt.providerSessionId)
                 this.providerSessions.set(providerSessionKey, receipt.providerSessionId);
             tokens = receipt.usage.tokens;
@@ -686,20 +1109,27 @@ export class JourneyService {
             return { status: "failure", code: "cancelled", tokens };
         const assistantText = events.flatMap((event) => typeof event === "object" && event !== null && !Array.isArray(event) && typeof event.data?.content === "string" ? [event.data.content] : []).at(-1);
         if (!assistantText)
-            return { status: "failure", code: "result_missing", tokens };
+            return fitStage ? malformedFitResult(tokens, "result_envelope", "assistantText") : { status: "failure", code: "result_missing", tokens };
         if (request.stage === "review" && request.selection.provider === "codex") {
             const summary = assistantText.trim().slice(0, MAX_TEXT).trim();
             return this.cancelled.has(request.runId) ? { status: "failure", code: "cancelled", tokens } : text(summary) ? { status: "action", summary, artifacts: [], tokens } : { status: "failure", code: "result_malformed", tokens };
         }
         const availableQuestions = request.stage === "gather-supplies" && request.gatherMode === "questions" ? Math.min(MAX_GATHER_QUESTIONS, Math.max(0, MAX_QA - request.priorOwnerQa.length)) : MAX_QA - 1;
-        const resultEnvelope = envelope(assistantText, availableQuestions);
+        const resultEnvelope = envelope(assistantText, availableQuestions, fitStage ? repositoryPath : undefined);
         if (resultEnvelope === "missing")
-            return { status: "failure", code: "result_missing", tokens };
+            return fitStage ? malformedFitResult(tokens, "result_envelope", "envelope") : { status: "failure", code: "result_missing", tokens };
         if (resultEnvelope === "malformed")
-            return { status: "failure", code: "result_malformed", tokens };
+            return fitStage ? malformedFitResult(tokens, "result_envelope", "envelope") : { status: "failure", code: "result_malformed", tokens };
         const parsed = resultEnvelope.receipt;
         if (resultEnvelope.droppedEstimate)
             this.recordActivity(request.runId, activityStage, { kind: "estimate.dropped", status: resultEnvelope.droppedEstimate });
+        if (parsed.kind === "fit") {
+            return parsed.fit.ok
+                ? { status: "question", question: parsed.fit.question, fitAssumption: parsed.fit.assumption, tokens }
+                : parsed.fit.reason === "fit_malformed"
+                    ? { status: "failure", code: "fit_malformed", fitDiagnostic: parsed.fit.diagnostic, tokens }
+                    : { status: "failure", code: parsed.fit.reason, tokens };
+        }
         const expectedEstimate = (stage) => {
             if (!parsed.nextStageEstimate || parsed.nextStageEstimate.stage === stage)
                 return parsed.nextStageEstimate;
@@ -721,6 +1151,8 @@ export class JourneyService {
         }
         if (request.stage === "gather-supplies" && request.gatherMode === "questions")
             return { status: "failure", code: "result_malformed", tokens };
+        if (parsed.kind === "recon" && request.stage !== "recon")
+            return { status: "failure", code: "result_malformed", tokens };
         const nextStageEstimate = expectedEstimate(nextStage(request.stage));
         for (const artifact of parsed.artifacts) {
             if (!await containedPath(repositoryPath, artifact))
@@ -728,74 +1160,72 @@ export class JourneyService {
             if (this.cancelled.has(request.runId))
                 return { status: "failure", code: "cancelled", tokens };
         }
-        if (!stageArtifactsValid(request.stage, parsed.artifacts, planDirectory))
+        if (!stageArtifactsValid(request.stage, parsed.artifacts, planDirectory, parsed.kind === "recon" ? parsed.recon : undefined))
             return { status: "failure", code: "artifact_invalid", tokens };
-        const review = request.stage === "draft-implementation" ? await planningReview(repositoryPath, planDirectory, request.selection).catch(() => undefined) : undefined;
+        if (parsed.kind === "recon" && !reconBaseline) {
+            this.recordActivity(request.runId, activityStage, { kind: "recon.rejected", status: "git_state" });
+            return { status: "failure", code: "completion_invalid", tokens };
+        }
+        if (parsed.kind === "recon" && reconBaseline && !await reconCompletionValid(repositoryPath, reconBaseline, parsed.artifacts, parsed.recon))
+            return { status: "failure", code: "artifact_invalid", tokens };
+        const planned = request.stage === "draft-implementation" ? await planningReview(repositoryPath, planDirectory, request.selection).catch(() => undefined) : undefined;
         const finalReviewValid = executionStage ? await executionReviewValid(repositoryPath, planDirectory).catch(() => false) : true;
         if (this.cancelled.has(request.runId))
             return { status: "failure", code: "cancelled", tokens };
-        if (request.stage === "draft-implementation" && !review)
+        if (request.stage === "draft-implementation" && !planned)
             return { status: "failure", code: "artifact_invalid", tokens };
         if (!finalReviewValid)
             return { status: "failure", code: "artifact_invalid", tokens };
+        let verification;
         if (executionStage && focus) {
-            const completion = await validateFocusCompletion(focus, repositoryPath, parsed.artifacts, parsed.evidence ?? []).catch(() => ({ ok: false, reason: "git_state" }));
+            const evidence = parsed.kind === "action" ? parsed.evidence ?? [] : [];
+            const completion = await validateFocusCompletion(focus, repositoryPath, parsed.artifacts, evidence).catch(() => ({ ok: false, reason: "git_state" }));
             if (!completion.ok) {
                 this.recordActivity(request.runId, activityStage, { kind: "focus.rejected", status: completion.reason });
                 return { status: "failure", code: "completion_invalid", tokens };
             }
+            verification = validateScope(await completedValidatorScope(repositoryPath, planDirectory, focus, completion, evidence, parsed.summary));
             this.recordActivity(request.runId, activityStage, { kind: "focus.completed", status: "validated" });
             this.focusContexts.delete(focusKey);
         }
-        else if (parsed.evidence)
+        else if (parsed.kind === "action" && parsed.evidence)
             return { status: "failure", code: "result_malformed", tokens };
         const artifacts = request.stage === "draft-implementation" && planDirectory ? [...new Set([...parsed.artifacts, posix.join(planDirectory, "review.html")])] : parsed.artifacts;
-        return { status: "action", summary: parsed.summary, artifacts, tokens, ...(review ? { planningReview: review } : {}), ...(nextStageEstimate ? { nextStageEstimate } : {}) };
+        if (parsed.kind === "recon")
+            this.reconBaselines.delete(reconKey);
+        return {
+            status: "action",
+            summary: parsed.summary,
+            artifacts,
+            tokens,
+            ...(parsed.kind === "recon" ? { recon: parsed.recon } : {}),
+            ...(planned ? { planningReview: planned.review, planningValidation: planned.planningValidation } : {}),
+            ...(verification === undefined ? {} : { verification }),
+            ...(nextStageEstimate ? { nextStageEstimate } : {}),
+        };
     }
     async executeMapRoute(request) {
+        const freshSessionFallback = { used: false };
+        const design = await this.executeOnce(request, "map-route", true, freshSessionFallback);
+        if (design.status !== "action")
+            return design;
         let designArtifacts;
-        let designEstimate;
         try {
-            const repositoryPath = await realpath(request.repositoryPath);
-            const planDirectory = request.planDirectory === undefined ? undefined : await containedPath(repositoryPath, request.planDirectory, true);
-            if (repositoryPath === request.repositoryPath && planDirectory)
-                designArtifacts = await designReviewArtifacts(repositoryPath, planDirectory);
+            designArtifacts = await designReviewArtifacts(request.repositoryPath, request.planDirectory, true, () => this.cancelled.has(request.runId));
         }
-        catch { /* executeOnce returns the canonical validation failure below */ }
-        let tokens = 0;
-        if (!designArtifacts) {
-            const design = await this.executeOnce(request, "map-route");
-            tokens += design.tokens;
-            if (design.status !== "action")
-                return design;
-            designEstimate = design.nextStageEstimate;
-            try {
-                designArtifacts = await designReviewArtifacts(request.repositoryPath, request.planDirectory, true, () => this.cancelled.has(request.runId));
-            }
-            catch {
-                designArtifacts = undefined;
-            }
-            if (this.cancelled.has(request.runId))
-                return { status: "failure", code: "cancelled", tokens };
-            if (!designArtifacts)
-                return { status: "failure", code: "artifact_invalid", tokens };
-            this.recordActivity(request.runId, "map-route", { kind: "design.ready", status: "completed" });
+        catch {
+            designArtifacts = undefined;
         }
-        else {
-            this.beginStage(request.runId, "map-route");
-            this.recordActivity(request.runId, "map-route", { kind: "stage.started", status: "running" });
-            this.recordActivity(request.runId, "map-route", { kind: "design.ready", status: "resumed" });
-        }
-        this.recordActivity(request.runId, "map-route", { kind: "implementation-draft.started", status: "running" });
-        const implementation = await this.executeOnce({ ...request, stage: "draft-implementation" }, "map-route", false);
-        tokens += implementation.tokens;
-        if (implementation.status !== "action")
-            return { ...implementation, tokens };
-        const artifacts = [...new Set([...designArtifacts, ...implementation.artifacts])];
-        const reviews = artifacts.filter((path) => posix.extname(path) === ".html");
-        return { ...implementation, artifacts: [...artifacts.filter((path) => posix.extname(path) !== ".html"), ...reviews], tokens, ...(implementation.nextStageEstimate ?? designEstimate ? { nextStageEstimate: implementation.nextStageEstimate ?? designEstimate } : {}) };
+        if (this.cancelled.has(request.runId))
+            return { status: "failure", code: "cancelled", tokens: design.tokens, ...(design.sessionContinuity ? { sessionContinuity: design.sessionContinuity } : {}) };
+        if (!designArtifacts)
+            return { status: "failure", code: "artifact_invalid", tokens: design.tokens, ...(design.sessionContinuity ? { sessionContinuity: design.sessionContinuity } : {}) };
+        this.recordActivity(request.runId, "map-route", { kind: "design.ready", status: "completed" });
+        return { ...design, artifacts: [...new Set([...design.artifacts, ...designArtifacts])] };
     }
     async execute(request) {
+        if (request.stage !== "recon")
+            this.reconBaselines.delete(this.reconKey(request.repositoryPath, request.runId));
         try {
             return request.stage === "map-route" ? await this.executeMapRoute(request) : await this.executeOnce(request);
         }

@@ -14,7 +14,8 @@ import {
   hashCommand,
   hashEvent,
 } from "../contracts/run.js";
-import { recommendExecutionMode, type ExecutionMode, type ModeRecommendation } from "../execution/execution-mode.js";
+import { recommendExecutionMode, recommendExecutionModeV2, type ExecutionMode, type ModeRecommendation } from "../execution/execution-mode.js";
+import { isSelectionSignals } from "../execution/selection-score.js";
 
 const issuedStates = new WeakSet<object>();
 const durableEvidence = new WeakSet<object>();
@@ -206,6 +207,16 @@ export function replay(events: readonly EventEnvelopeV1[]): RunState {
   return state;
 }
 
+/** The eight fields every algorithm version has compared since schema v1. */
+function sameRecommendation(derived: ModeRecommendation, payload: Readonly<Record<string, unknown>>): boolean {
+  return derived.recommendedMode === payload.recommendedMode && derived.selectedMode === payload.selectedMode
+    && derived.overridden === payload.overridden && derived.estimatedAgents === payload.estimatedAgents
+    && derived.estimatedTokens === payload.estimatedTokens
+    && derived.tradeoffs.tokens === (payload.tradeoffs as { tokens: string }).tokens
+    && derived.tradeoffs.coordination === (payload.tradeoffs as { coordination: string }).coordination
+    && derived.launchAuthorized === payload.launchAuthorized;
+}
+
 function validateReplayEvent(state: RunState, event: EventEnvelopeV1): void {
   if (event.runId !== state.runId) throw new ReplayError("event run id changes during replay");
   switch (event.type) {
@@ -227,9 +238,25 @@ function validateReplayEvent(state: RunState, event: EventEnvelopeV1): void {
     case "executionModeRecommended":
       if (!state.workRequestCreated || state.executionRecommendation !== null || state.executionApproval !== null) throw new ReplayError("invalid execution recommendation during replay");
       {
+        // The algorithm is selected by the version recorded in the event, so a
+        // pre-Phase-3 event re-derives through unchanged version-1 code and a
+        // version-2 event re-derives from its own recorded signal vector and
+        // threshold. Replay reads nothing outside the event.
         const payload = event.payload;
-        const derived = recommendExecutionMode({ workItems: payload.workItems as number, maxCrewmatesPerExplorer: payload.maxCrewmatesPerExplorer as number, perAgentTokenEstimate: payload.perAgentTokenEstimate as number });
-        if (derived.recommendedMode !== payload.recommendedMode || derived.selectedMode !== payload.selectedMode || derived.overridden !== payload.overridden || derived.estimatedAgents !== payload.estimatedAgents || derived.estimatedTokens !== payload.estimatedTokens || derived.tradeoffs.tokens !== (payload.tradeoffs as { tokens: string }).tokens || derived.tradeoffs.coordination !== (payload.tradeoffs as { coordination: string }).coordination || derived.launchAuthorized !== payload.launchAuthorized) throw new ReplayError("execution recommendation is not deterministic");
+        const inputs = { workItems: payload.workItems as number, maxCrewmatesPerExplorer: payload.maxCrewmatesPerExplorer as number, perAgentTokenEstimate: payload.perAgentTokenEstimate as number };
+        if (payload.algorithmVersion === undefined) {
+          if (!sameRecommendation(recommendExecutionMode(inputs), payload)) throw new ReplayError("execution recommendation is not deterministic");
+          return;
+        }
+        if (payload.algorithmVersion !== 2) throw new ReplayError("unknown execution selection algorithm version");
+        if (!isSelectionSignals(payload.selection)) throw new ReplayError("execution recommendation is not deterministic");
+        const derived = recommendExecutionModeV2(inputs, payload.selection);
+        const fired = payload.firedHardTriggers;
+        if (!sameRecommendation(derived, payload)
+          || derived.complexityScore !== payload.complexityScore
+          || derived.recommendedOrchestration !== payload.recommendedOrchestration
+          || !Array.isArray(fired) || derived.firedHardTriggers.length !== fired.length
+          || derived.firedHardTriggers.some((id, index) => id !== fired[index])) throw new ReplayError("execution recommendation is not deterministic");
       }
       return;
     case "executionModeApproved":
@@ -305,7 +332,10 @@ export function decide(
       return fail(state, "pending_decision_blocks");
     case "recommendExecutionMode":
       if (!state.workRequestCreated || state.executionRecommendation !== null) return fail(state, "illegal_transition");
-      return succeed(state, command, contentHash, deps, "executionModeRecommended", { ...command.payload, ...recommendExecutionMode(command.payload) });
+      // Dispatch by payload shape: a recorded selection vector selects version 2.
+      return succeed(state, command, contentHash, deps, "executionModeRecommended", command.payload.selection === undefined
+        ? { ...command.payload, ...recommendExecutionMode(command.payload) }
+        : { ...command.payload, ...recommendExecutionModeV2(command.payload, command.payload.selection) });
     case "approveExecutionMode":
       if (command.session.actor !== OWNER_ACTOR) return fail(state, "non_owner_approval");
       if (!state.executionRecommendation || state.executionApproval !== null) return fail(state, "recommendation_missing");

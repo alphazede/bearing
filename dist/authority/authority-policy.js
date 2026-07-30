@@ -4,7 +4,7 @@ import { isDurableOwnerEvidence } from "../workflow/aggregate.js";
 export const AUTHORITY_POLICY_SCHEMA_VERSION = 1;
 const MAX_TEXT = 128;
 const MAX_TOOLS = 64;
-const roles = new Set(ROLES);
+const roles = new Set([...ROLES, "trail-boss", "sub-explorer"]);
 const actions = new Set(["recommend", "execute", "certify"]);
 function text(value) {
     return typeof value === "string" && value.length > 0 && value.length <= MAX_TEXT;
@@ -51,6 +51,8 @@ export class AuthorityPolicy {
         if (input.action === "execute") {
             if (!input.evidence)
                 return deny("authority_approval_missing");
+            if (input.role === "trail-boss" && input.executionMode === "explorer")
+                return deny("authority_execution_mode_denied");
             if (!input.executionMode || input.evidence.selectedMode !== input.executionMode)
                 return deny("authority_execution_mode_denied");
             return { allowed: true };

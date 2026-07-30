@@ -46,7 +46,30 @@ export type StoreErrorCode =
   | "previous_hash_mismatch"
   | "sequence_mismatch"
   | "wrong_run_id"
-  | "corrupt_snapshot";
+  | "corrupt_snapshot"
+  | "run_not_settled"
+  | "run_compacted";
+
+const STORE_INTEGRITY_ERROR_CODE_LIST = [
+  "corrupt_ledger",
+  "future_schema",
+  "event_hash_mismatch",
+  "previous_hash_mismatch",
+  "sequence_mismatch",
+  "wrong_run_id",
+  "corrupt_snapshot",
+] as const satisfies readonly StoreErrorCode[];
+
+const STORE_INTEGRITY_ERROR_CODES = new Set<StoreErrorCode>(STORE_INTEGRITY_ERROR_CODE_LIST);
+
+const MALFORMED_REQUIRED_FILE_ERROR_CODES = new Set([
+  "EISDIR",
+  "ENOTDIR",
+  "ELOOP",
+  "EFTYPE",
+]);
+
+export type StoreIntegrityErrorCode = (typeof STORE_INTEGRITY_ERROR_CODE_LIST)[number];
 
 export class BearingStoreError extends Error {
   constructor(
@@ -59,11 +82,46 @@ export class BearingStoreError extends Error {
   }
 }
 
+export function isStoreIntegrityError(
+  error: unknown,
+): error is BearingStoreError & { readonly code: StoreIntegrityErrorCode } {
+  return error instanceof BearingStoreError && STORE_INTEGRITY_ERROR_CODES.has(error.code);
+}
+
 export interface BearingStoreOptions {
   readonly now?: () => string;
   readonly nextEventId?: () => string;
   readonly fault?: (boundary: FaultBoundary) => void | Promise<void>;
 }
+
+/** Live, caller-owned facts that the event-sourced store cannot prove or persist safely. */
+export interface CallerCleanlinessProof {
+  readonly noDirtyOrUnmergedLane: true;
+  readonly runNotBusy: true;
+}
+
+export interface RetentionPolicy {
+  readonly maxAgeDays?: number;
+  readonly maxCompletedRuns?: number;
+  readonly compactSettled?: boolean;
+}
+
+export type RetentionReason = "max_age_days" | "max_completed_runs" | "compact_settled";
+
+export type RetentionPlanEntry =
+  | {
+      readonly runId: string;
+      readonly action: "compact" | "prune";
+      readonly reason: RetentionReason;
+    }
+  | {
+      readonly runId: string;
+      readonly action: "skip";
+      readonly reason: StoreIntegrityErrorCode;
+    };
+
+type RetentionAction = Exclude<RetentionPlanEntry, { readonly action: "skip" }>;
+type RetentionSkip = Extract<RetentionPlanEntry, { readonly action: "skip" }>;
 
 export interface SnapshotWarning {
   readonly code: "snapshot_update_failed";
@@ -78,6 +136,39 @@ export interface StoredRunSummary {
   readonly pendingQuestion?: string;
   readonly checkpointAnswer?: string;
   readonly checkpoint?: NonNullable<RunState["journeyCheckpoint"]>;
+}
+
+export interface UnreadableStoredRunSummary {
+  readonly runId: string;
+  readonly title: string;
+  readonly goal: string;
+  readonly updatedAt: string;
+  readonly unreadable: true;
+  readonly integrityError: StoreIntegrityErrorCode;
+  readonly pendingQuestion?: never;
+  readonly checkpointAnswer?: never;
+  readonly checkpoint?: never;
+}
+
+export type StoredRunListEntry = StoredRunSummary | UnreadableStoredRunSummary;
+
+export interface CompactedRunSummary {
+  readonly title: string;
+  readonly goal: string;
+  readonly updatedAt: string;
+}
+
+export interface CompactedRunState extends RunState {
+  readonly sealed: true;
+  readonly summary: CompactedRunSummary;
+}
+
+export type StoredRunState = RunState | CompactedRunState;
+
+interface RetentionRun {
+  readonly runId: string;
+  readonly state: StoredRunState;
+  readonly updatedAt: string;
 }
 
 export type StoreApplyResult =
@@ -102,6 +193,12 @@ interface SnapshotBody {
   readonly executionRecommendation: RunState["executionRecommendation"];
   readonly executionApproval: RunState["executionApproval"];
   readonly journeyCheckpoint?: RunState["journeyCheckpoint"];
+  readonly compacted?: {
+    readonly atSequence: number;
+    readonly atEventHash: string;
+    readonly compactedAt: string;
+  };
+  readonly summary?: CompactedRunSummary;
 }
 
 interface Snapshot extends SnapshotBody {
@@ -123,7 +220,7 @@ export class BearingStore {
     this.runsRoot = resolve(root, ".bearing", "runs");
   }
 
-  async load(runId: string): Promise<RunState> {
+  async load(runId: string): Promise<StoredRunState> {
     this.assertRunId(runId);
     return await this.serialized(runId, () => this.loadUnlocked(runId));
   }
@@ -138,28 +235,153 @@ export class BearingStore {
     return await this.serialized(parsed.value.runId, () => this.applyUnlocked(parsed.value));
   }
 
-  async list(limit = 20): Promise<readonly StoredRunSummary[]> {
+  async compact(
+    runId: string,
+    cleanlinessProof?: CallerCleanlinessProof,
+  ): Promise<CompactedRunState> {
+    this.assertRunId(runId);
+    assertCallerCleanlinessProof(cleanlinessProof);
+    return await this.serialized(runId, () => this.compactUnlocked(runId, cleanlinessProof));
+  }
+
+  async retentionPlan(
+    policy?: RetentionPolicy,
+    cleanlinessProof?: CallerCleanlinessProof,
+  ): Promise<readonly RetentionPlanEntry[]> {
+    if (!hasEffectiveRetentionPolicy(policy)) return [];
+    assertRetentionPolicy(policy);
+    assertCallerCleanlinessProof(cleanlinessProof);
+
+    let entries: Dirent[];
+    try { entries = await readdir(this.runsRoot, { withFileTypes: true }); }
+    catch (error) { if (isMissing(error)) return []; throw error; }
+    const candidates = await Promise.all(entries
+      .filter((entry) => entry.isDirectory() && RUN_ID_RE.test(entry.name))
+      .map(async (entry) => {
+        let state: StoredRunState;
+        try {
+          state = await this.load(entry.name);
+        } catch (error) {
+          if (isStoreIntegrityError(error)) {
+            return {
+              runId: entry.name,
+              action: "skip",
+              reason: error.code,
+            } satisfies RetentionSkip;
+          }
+          throw error;
+        }
+        if (!isSettled(state, cleanlinessProof)) return undefined;
+        return {
+          runId: entry.name,
+          state,
+          updatedAt: retentionUpdatedAt(state),
+        };
+      }));
+    const completed = candidates
+      .filter((entry): entry is RetentionRun => entry !== undefined && !("action" in entry))
+      .sort(compareRetentionRuns);
+    const skipped = candidates
+      .filter((entry): entry is RetentionSkip => entry !== undefined && "action" in entry)
+      .sort((a, b) => a.runId.localeCompare(b.runId));
+
+    const pruneReasons = new Map<string, RetentionReason>();
+    if (policy.maxAgeDays !== undefined) {
+      const now = Date.parse(this.options.now?.() ?? new Date().toISOString());
+      if (!Number.isFinite(now)) throw new RangeError("store clock returned an invalid timestamp");
+      const cutoff = now - policy.maxAgeDays * 24 * 60 * 60 * 1_000;
+      for (const run of completed) {
+        if (retentionTimestamp(run) <= cutoff) pruneReasons.set(run.runId, "max_age_days");
+      }
+    }
+    if (policy.maxCompletedRuns !== undefined) {
+      const retained = completed
+        .filter((run) => !pruneReasons.has(run.runId))
+        .sort((a, b) => compareRetentionRuns(b, a))
+        .slice(policy.maxCompletedRuns);
+      for (const run of retained) pruneReasons.set(run.runId, "max_completed_runs");
+    }
+
+    return [
+      ...completed.flatMap((run): RetentionAction[] => {
+        const pruneReason = pruneReasons.get(run.runId);
+        if (pruneReason !== undefined) {
+          return [{ runId: run.runId, action: "prune", reason: pruneReason }];
+        }
+        if (policy.compactSettled === true && !isCompactedRunState(run.state)) {
+          return [{ runId: run.runId, action: "compact", reason: "compact_settled" }];
+        }
+        return [];
+      }),
+      ...skipped,
+    ];
+  }
+
+  async applyRetention(
+    policy?: RetentionPolicy,
+    cleanlinessProof?: CallerCleanlinessProof,
+  ): Promise<readonly RetentionPlanEntry[]> {
+    const plan = await this.retentionPlan(policy, cleanlinessProof);
+    const actions = plan.filter((entry): entry is RetentionAction => entry.action !== "skip");
+    for (const entry of actions) {
+      if (entry.action === "compact") await this.compact(entry.runId, cleanlinessProof);
+      else {
+        await this.serialized(entry.runId, async () => {
+          const state = await this.loadUnlocked(entry.runId);
+          if (isSettled(state, cleanlinessProof)) await this.deleteUnlocked(entry.runId);
+        });
+      }
+    }
+    return actions;
+  }
+
+  async list(limit = 20): Promise<readonly StoredRunListEntry[]> {
     let entries: Dirent[];
     try { entries = await readdir(this.runsRoot, { withFileTypes: true }); }
     catch (error) { if (isMissing(error)) return []; throw error; }
     const candidates = await Promise.all(entries.filter((entry) => entry.isDirectory() && RUN_ID_RE.test(entry.name)).map(async (entry) => {
-      try { return { entry, modified: (await stat(join(this.runsRoot, entry.name, "events.jsonl"))).mtimeMs }; }
+      const dir = join(this.runsRoot, entry.name);
+      try {
+        const ledger = await stat(join(dir, "events.jsonl"));
+        if (ledger.size > 0) return { entry, modified: ledger.mtimeMs };
+      } catch { /* A missing ledger is valid only for a compacted snapshot. */ }
+      try { return { entry, modified: (await stat(join(dir, "snapshot.json"))).mtimeMs }; }
       catch { return { entry, modified: -1 }; }
     }));
     candidates.sort((a, b) => b.modified - a.modified || a.entry.name.localeCompare(b.entry.name));
-    const summaries = await Promise.all(candidates.slice(0, 100).map(async ({ entry }) => {
-      const state = await this.load(entry.name);
+    const summaries = await Promise.all(candidates.slice(0, 100).map(async ({ entry, modified }) => {
+      let state: StoredRunState;
+      try {
+        state = await this.load(entry.name);
+      } catch (error) {
+        if (!isStoreIntegrityError(error)) throw error;
+        return {
+          runId: entry.name,
+          title: `Unreadable run: ${entry.name}`,
+          goal: `Integrity check failed (${error.code}). Bearing left this run untouched.`,
+          updatedAt: new Date(modified).toISOString(),
+          unreadable: true,
+          integrityError: error.code,
+        } satisfies UnreadableStoredRunSummary;
+      }
+      if (isCompactedRunState(state)) {
+        return {
+          runId: entry.name,
+          ...state.summary,
+          ...(state.journeyCheckpoint ? { checkpoint: state.journeyCheckpoint } : {}),
+        } satisfies StoredRunSummary;
+      }
       const created = state.events.find((event) => event.type === "workRequestCreated");
       if (!created || typeof created.payload.title !== "string" || typeof created.payload.goal !== "string") return undefined;
       const answered = state.journeyCheckpoint?.questionDecisionId === undefined ? undefined : [...state.events].reverse().find((event) => event.type === "ownerAnswered" && event.payload.decisionId === state.journeyCheckpoint?.questionDecisionId && typeof event.payload.answer === "string");
       return { runId: entry.name, title: created.payload.title, goal: created.payload.goal, updatedAt: state.events.at(-1)?.recordedAt ?? created.recordedAt, ...(state.pendingDecision ? { pendingQuestion: state.pendingDecision.question } : {}), ...(answered ? { checkpointAnswer: answered.payload.answer as string } : {}), ...(state.journeyCheckpoint ? { checkpoint: state.journeyCheckpoint } : {}) } satisfies StoredRunSummary;
     }));
-    return summaries.filter((entry): entry is StoredRunSummary => entry !== undefined).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, Math.max(0, Math.min(limit, 50)));
+    return summaries.filter((entry): entry is StoredRunListEntry => entry !== undefined).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, Math.max(0, Math.min(limit, 50)));
   }
 
   async delete(runId: string): Promise<void> {
     this.assertRunId(runId);
-    await this.serialized(runId, () => rm(this.runDir(runId), { recursive: true, force: true }));
+    await this.serialized(runId, () => this.deleteUnlocked(runId));
   }
 
   async clear(): Promise<void> {
@@ -171,6 +393,7 @@ export class BearingStore {
 
   private async applyUnlocked(command: CommandEnvelopeV1): Promise<StoreApplyResult> {
     const state = await this.loadUnlocked(command.runId);
+    if (isCompactedRunState(state)) throw storeError("run_compacted", "compacted runs are sealed");
     const result = decide(state, command, {
       recordedAt: this.options.now?.() ?? new Date().toISOString(),
       nextEventId: this.options.nextEventId ?? randomUUID,
@@ -193,12 +416,87 @@ export class BearingStore {
     return { ...result, durable: true, snapshotWarning };
   }
 
-  private async loadUnlocked(runId: string): Promise<RunState> {
+  private async compactUnlocked(
+    runId: string,
+    cleanlinessProof: CallerCleanlinessProof,
+  ): Promise<CompactedRunState> {
+    const events = await this.readLedger(runId);
+    let snapshot = await this.readSnapshot(runId);
+    if (snapshot !== null && snapshot.runId !== runId) {
+      throw storeError("wrong_run_id", "snapshot run id mismatch");
+    }
+
+    if (snapshot?.compacted !== undefined) {
+      const sealed = this.loadCompactedSnapshot(snapshot, events);
+      if (!isSettled(sealed, cleanlinessProof)) {
+        throw storeError("run_not_settled", "run is not proven settled");
+      }
+      if (events.length > 0) await this.truncateLedger(runId);
+      return sealed;
+    }
+
+    if (snapshot !== null) {
+      if (snapshot.revision > events.length) {
+        throw storeError("corrupt_snapshot", "snapshot is ahead of ledger");
+      }
+      const prefixEvents = events.slice(0, snapshot.revision);
+      const prefix = prefixEvents.length === 0 ? initialRunState(runId) : this.replayLedger(prefixEvents);
+      this.verifySnapshotProjection(snapshot, prefix);
+    }
+
+    const replayed = this.replayLedger(events);
+    if (!isSettled(replayed, cleanlinessProof)) {
+      throw storeError("run_not_settled", "run is not proven settled");
+    }
+
+    if (snapshot === null || snapshot.revision !== events.length) {
+      await this.writeSnapshot(runId, replayed);
+      snapshot = await this.readSnapshot(runId);
+      if (snapshot === null || snapshot.compacted !== undefined || snapshot.revision !== events.length) {
+        throw storeError("corrupt_snapshot", "current snapshot regeneration failed");
+      }
+      if (snapshot.runId !== runId) {
+        throw storeError("wrong_run_id", "snapshot run id mismatch");
+      }
+    }
+    this.verifySnapshotProjection(snapshot, replayed);
+    const created = events.find((event) => event.type === "workRequestCreated");
+    const last = events.at(-1);
+    if (!created || !last || typeof created.payload.title !== "string" || typeof created.payload.goal !== "string") {
+      throw storeError("corrupt_ledger", "settled run is missing its work request summary");
+    }
+
+    const compactedBody: SnapshotBody = {
+      ...snapshotBody(replayed),
+      compacted: {
+        atSequence: events.length,
+        atEventHash: last.hash,
+        compactedAt: this.options.now?.() ?? new Date().toISOString(),
+      },
+      summary: {
+        title: created.payload.title,
+        goal: created.payload.goal,
+        updatedAt: last.recordedAt,
+      },
+    };
+    await this.writeSnapshotBody(runId, compactedBody);
+
+    const written = await this.readSnapshot(runId);
+    if (written === null || canonicalStringify(withoutHash(written)) !== canonicalStringify(compactedBody)) {
+      throw storeError("corrupt_snapshot", "compacted snapshot verification failed");
+    }
+    const sealed = stateFromCompactedSnapshot(written);
+    await this.truncateLedger(runId);
+    return sealed;
+  }
+
+  private async loadUnlocked(runId: string): Promise<StoredRunState> {
     const events = await this.readLedger(runId);
     const snapshot = await this.readSnapshot(runId);
     if (snapshot === null) return events.length === 0 ? initialRunState(runId) : this.replayLedger(events);
 
     if (snapshot.runId !== runId) throw storeError("wrong_run_id", "snapshot run id mismatch");
+    if (snapshot.compacted !== undefined) return this.loadCompactedSnapshot(snapshot, events);
     if (snapshot.revision > events.length) throw storeError("corrupt_snapshot", "snapshot is ahead of ledger");
     const prefixEvents = events.slice(0, snapshot.revision);
     const prefix = prefixEvents.length === 0 ? initialRunState(runId) : this.replayLedger(prefixEvents);
@@ -208,6 +506,20 @@ export class BearingStore {
     return this.replayLedger(events);
   }
 
+  private loadCompactedSnapshot(snapshot: Snapshot, events: readonly EventEnvelopeV1[]): CompactedRunState {
+    if (events.length !== 0 && events.length !== snapshot.revision) {
+      throw storeError("corrupt_snapshot", "compacted snapshot has an incomplete ledger tail");
+    }
+    if (events.length > 0) this.verifySnapshotProjection(snapshot, this.replayLedger(events));
+    return stateFromCompactedSnapshot(snapshot);
+  }
+
+  private verifySnapshotProjection(snapshot: Snapshot, state: RunState): void {
+    if (canonicalStringify(snapshotBody(state)) !== canonicalStringify(snapshotProjectionBody(snapshot))) {
+      throw storeError("corrupt_snapshot", "snapshot projection disagrees with ledger");
+    }
+  }
+
   private async readLedger(runId: string): Promise<EventEnvelopeV1[]> {
     const path = join(this.runDir(runId), "events.jsonl");
     let text: string;
@@ -215,6 +527,9 @@ export class BearingStore {
       text = await readFile(path, "utf8");
     } catch (error) {
       if (isMissing(error)) return [];
+      if (isMalformedRequiredFile(error)) {
+        throw storeError("corrupt_ledger", "ledger path is not a readable file", error);
+      }
       throw error;
     }
     if (text.length === 0) return [];
@@ -252,11 +567,21 @@ export class BearingStore {
   }
 
   private async readSnapshot(runId: string): Promise<Snapshot | null> {
-    let value: unknown;
+    let text: string;
     try {
-      value = JSON.parse(await readFile(join(this.runDir(runId), "snapshot.json"), "utf8"));
+      text = await readFile(join(this.runDir(runId), "snapshot.json"), "utf8");
     } catch (error) {
       if (isMissing(error)) return null;
+      if (isMalformedRequiredFile(error)) {
+        throw storeError("corrupt_snapshot", "snapshot path is not a readable file", error);
+      }
+      throw error;
+    }
+
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch (error) {
       throw storeError("corrupt_snapshot", "snapshot is not JSON", error);
     }
     if (!isObject(value)) throw storeError("corrupt_snapshot", "snapshot is not an object");
@@ -338,6 +663,20 @@ export class BearingStore {
     }
   }
 
+  private async truncateLedger(runId: string): Promise<void> {
+    const file = await open(join(this.runDir(runId), "events.jsonl"), "r+");
+    try {
+      await file.truncate(0);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+  }
+
+  private async deleteUnlocked(runId: string): Promise<void> {
+    await rm(this.runDir(runId), { recursive: true, force: true });
+  }
+
   private replayLedger(events: readonly EventEnvelopeV1[]): RunState {
     try {
       return replay(events);
@@ -347,9 +686,12 @@ export class BearingStore {
   }
 
   private async writeSnapshot(runId: string, state: RunState): Promise<void> {
+    await this.writeSnapshotBody(runId, snapshotBody(state));
+  }
+
+  private async writeSnapshotBody(runId: string, body: SnapshotBody): Promise<void> {
     const dir = this.runDir(runId);
     const temp = join(dir, "snapshot.json.tmp");
-    const body = snapshotBody(state);
     const bytes = `${JSON.stringify({ ...body, hash: digest(canonicalStringify(body)) })}\n`;
     let boundary: FaultBoundary = "before-snapshot-temp-write";
     try {
@@ -432,12 +774,125 @@ function snapshotBody(state: RunState): SnapshotBody {
   };
 }
 
+function snapshotProjectionBody(snapshot: Snapshot): SnapshotBody {
+  const { hash: _hash, compacted: _compacted, summary: _summary, ...body } = snapshot;
+  return body;
+}
+
 function withoutHash(snapshot: Snapshot): SnapshotBody {
   const { hash: _hash, ...body } = snapshot;
   return body;
 }
 
+function stateFromSnapshot(snapshot: Snapshot): RunState {
+  return Object.assign(initialRunState(snapshot.runId), {
+    revision: snapshot.revision,
+    events: [] as readonly EventEnvelopeV1[],
+    outcomes: new Map(snapshot.outcomes.map((outcome) => [outcome.commandId, outcome])),
+    pendingDecision: snapshot.pendingDecision,
+    workRequestCreated: snapshot.workRequestCreated,
+    executionRecommendation: snapshot.executionRecommendation,
+    executionApproval: snapshot.executionApproval,
+    journeyCheckpoint: snapshot.journeyCheckpoint ?? null,
+  });
+}
+
+function stateFromCompactedSnapshot(snapshot: Snapshot): CompactedRunState {
+  if (snapshot.compacted === undefined || snapshot.summary === undefined) {
+    throw storeError("corrupt_snapshot", "compacted snapshot is missing terminal metadata");
+  }
+  return Object.assign(stateFromSnapshot(snapshot), {
+    sealed: true as const,
+    summary: snapshot.summary,
+  });
+}
+
+export function isCompactedRunState(state: StoredRunState): state is CompactedRunState {
+  return "sealed" in state && state.sealed === true;
+}
+
+/**
+ * Shared settle proof for compaction and retention.
+ *
+ * The store proves the event-sourced conditions itself: the final review checkpoint is complete
+ * and no owner decision is pending. It trusts the caller for exactly the two transient conditions
+ * that cannot safely live in the append-only ledger: there is no dirty or unmerged lane, and the
+ * run is not busy. Missing or incomplete caller proof fails closed.
+ */
+function isSettled(state: RunState, cleanlinessProof?: CallerCleanlinessProof): boolean {
+  const checkpoint = state.journeyCheckpoint;
+  return hasCallerCleanlinessProof(cleanlinessProof) &&
+    state.pendingDecision === null &&
+    checkpoint !== null &&
+    checkpoint.stage === "review" &&
+    checkpoint.status === "complete";
+}
+
+function hasCallerCleanlinessProof(
+  proof: CallerCleanlinessProof | undefined,
+): proof is CallerCleanlinessProof {
+  return proof?.noDirtyOrUnmergedLane === true && proof.runNotBusy === true;
+}
+
+function assertCallerCleanlinessProof(
+  proof: CallerCleanlinessProof | undefined,
+): asserts proof is CallerCleanlinessProof {
+  if (!hasCallerCleanlinessProof(proof)) {
+    throw storeError("run_not_settled", "caller cleanliness proof is required");
+  }
+}
+
+function hasEffectiveRetentionPolicy(policy: RetentionPolicy | undefined): policy is RetentionPolicy {
+  return policy !== undefined &&
+    (policy.maxAgeDays !== undefined ||
+      policy.maxCompletedRuns !== undefined ||
+      policy.compactSettled === true);
+}
+
+function assertRetentionPolicy(policy: RetentionPolicy): void {
+  if (policy.maxAgeDays !== undefined &&
+    (!Number.isFinite(policy.maxAgeDays) || policy.maxAgeDays < 0)) {
+    throw new RangeError("maxAgeDays must be a non-negative finite number");
+  }
+  if (policy.maxCompletedRuns !== undefined &&
+    (!Number.isSafeInteger(policy.maxCompletedRuns) || policy.maxCompletedRuns < 0)) {
+    throw new RangeError("maxCompletedRuns must be a non-negative safe integer");
+  }
+}
+
+function retentionUpdatedAt(state: StoredRunState): string {
+  if (isCompactedRunState(state)) return state.summary.updatedAt;
+  const updatedAt = state.events.at(-1)?.recordedAt;
+  if (updatedAt === undefined) {
+    throw storeError("corrupt_ledger", "settled run is missing its final event timestamp");
+  }
+  return updatedAt;
+}
+
+function retentionTimestamp(run: RetentionRun): number {
+  const timestamp = Date.parse(run.updatedAt);
+  if (!Number.isFinite(timestamp)) {
+    throw storeError("corrupt_snapshot", `run ${run.runId} has an invalid retention timestamp`);
+  }
+  return timestamp;
+}
+
+function compareRetentionRuns(a: RetentionRun, b: RetentionRun): number {
+  return retentionTimestamp(a) - retentionTimestamp(b) || a.runId.localeCompare(b.runId);
+}
+
 function validSnapshotShape(value: Snapshot): boolean {
+  const terminal = value.compacted === undefined && value.summary === undefined ||
+    isObject(value.compacted) && Object.keys(value.compacted).length === 3 &&
+    Number.isSafeInteger(value.compacted.atSequence) && value.compacted.atSequence > 0 &&
+    typeof value.compacted.atEventHash === "string" && HASH_RE.test(value.compacted.atEventHash) &&
+    typeof value.compacted.compactedAt === "string" && value.compacted.compactedAt.length > 0 &&
+    isObject(value.summary) && Object.keys(value.summary).length === 3 &&
+    typeof value.summary.title === "string" && value.summary.title.length > 0 &&
+    typeof value.summary.goal === "string" && value.summary.goal.length > 0 &&
+    typeof value.summary.updatedAt === "string" && value.summary.updatedAt.length > 0 &&
+    value.compacted.atSequence === value.revision &&
+    value.compacted.atEventHash === value.lastEventHash;
   return value.schemaVersion === 1 &&
     typeof value.runId === "string" &&
     Number.isSafeInteger(value.revision) && value.revision >= 0 &&
@@ -453,6 +908,7 @@ function validSnapshotShape(value: Snapshot): boolean {
       isObject(outcome) && typeof outcome.commandId === "string" &&
       typeof outcome.contentHash === "string" && HASH_RE.test(outcome.contentHash) &&
       Array.isArray(outcome.eventIds) && outcome.eventIds.every((id) => typeof id === "string")) &&
+    terminal &&
     typeof value.hash === "string" && HASH_RE.test(value.hash);
 }
 
@@ -475,6 +931,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isMissing(error: unknown): boolean {
   return isObject(error) && error.code === "ENOENT";
+}
+
+function isMalformedRequiredFile(error: unknown): boolean {
+  return isObject(error)
+    && typeof error.code === "string"
+    && MALFORMED_REQUIRED_FILE_ERROR_CODES.has(error.code);
 }
 
 function storeError(code: StoreErrorCode, message: string, cause?: unknown): BearingStoreError {

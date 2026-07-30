@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { CommandEnvelopeV1 } from "../src/contracts/run.js";
-import { AuthorityPolicy, type AuthorityFacts } from "../src/authority/authority-policy.js";
+import {
+  AUTHORITY_POLICY_SCHEMA_VERSION,
+  AuthorityPolicy,
+  type AuthorityFacts,
+} from "../src/authority/authority-policy.js";
+import {
+  startSchedule,
+  type ScheduleLimits,
+  type WorkGraph,
+} from "../src/execution/execution-scheduler.js";
+import { ROLES } from "../src/profile/profile.js";
 import { decide, durableOwnerEvidence, initialRunState, type DecideDeps, type DurableOwnerEvidence } from "../src/workflow/aggregate.js";
 
 const policy = new AuthorityPolicy();
@@ -30,8 +40,88 @@ function ownerEvidence(kind: "owner-approval" | "owner-override", selectedMode: 
 }
 
 const approval = ownerEvidence("owner-approval", "explorer");
+const expeditionApproval = ownerEvidence("owner-approval", "expedition");
 
 describe("AuthorityPolicy", () => {
+  it("widens only the accepted authority-fact role set and keeps profile roles unchanged", () => {
+    expect(AUTHORITY_POLICY_SCHEMA_VERSION).toBe(1);
+    expect(ROLES).toEqual(["navigator", "explorer", "crewmate", "surveyor"]);
+    const candidates = ["navigator", "explorer", "crewmate", "surveyor", "trail-boss", "sub-explorer", "unknown"] as const;
+    const accepted = candidates.filter((role) =>
+      policy.evaluate(facts({ role: role as AuthorityFacts["role"] })).allowed);
+
+    expect(accepted).toEqual([
+      "navigator",
+      "explorer",
+      "crewmate",
+      "surveyor",
+      "trail-boss",
+      "sub-explorer",
+    ]);
+  });
+
+  it("requires durable owner evidence for both new roles and grants neither certification", () => {
+    for (const role of ["trail-boss", "sub-explorer"] as const) {
+      expect(policy.evaluate(facts({ role, action: "execute", executionMode: "expedition" })))
+        .toEqual({ allowed: false, code: "authority_approval_missing" });
+      expect(policy.evaluate(facts({
+        role,
+        action: "execute",
+        evidence: { ...expeditionApproval },
+        executionMode: "expedition",
+      }))).toEqual({ allowed: false, code: "authority_facts_invalid" });
+      expect(policy.evaluate(facts({
+        role,
+        action: "execute",
+        evidence: expeditionApproval,
+        executionMode: "expedition",
+      }))).toEqual({ allowed: true });
+      expect(policy.evaluate(facts({ role, action: "certify", certifiedExecutionSessionId: "execution-a" })))
+        .toEqual({ allowed: false, code: "authority_role_denied" });
+    }
+  });
+
+  it("denies Trail Boss outside expedition and preserves matching-mode enforcement", () => {
+    expect(policy.evaluate(facts({
+      role: "trail-boss",
+      action: "execute",
+      evidence: approval,
+      executionMode: "explorer",
+    }))).toEqual({ allowed: false, code: "authority_execution_mode_denied" });
+    expect(policy.evaluate(facts({
+      role: "sub-explorer",
+      action: "execute",
+      evidence: expeditionApproval,
+      executionMode: "explorer",
+    }))).toEqual({ allowed: false, code: "authority_execution_mode_denied" });
+  });
+
+  it("lets the scheduler consume both widened roles only with explicit caps and expedition evidence", () => {
+    const graph: WorkGraph = {
+      schemaVersion: 1,
+      executionMode: "expedition",
+      limits: { maxNodes: 6, maxCrewmatesPerExplorer: 2 },
+      nodes: [
+        { id: "navigator", role: "navigator", parentId: null, dependencies: [], sessionId: "navigator", tool: "execute", allowedTools: ["execute"], profileId: "navigator", profileConcurrency: 1 },
+        { id: "boss", role: "trail-boss", parentId: "navigator", dependencies: ["navigator"], sessionId: "boss", tool: "execute", allowedTools: ["execute"], profileId: "boss", profileConcurrency: 1 },
+        { id: "explorer", role: "explorer", parentId: "boss", dependencies: ["boss"], sessionId: "explorer", tool: "execute", allowedTools: ["execute"], profileId: "explorer", profileConcurrency: 2 },
+        { id: "direct", role: "crewmate", parentId: "explorer", dependencies: ["explorer"], sessionId: "direct", tool: "execute", allowedTools: ["execute"], profileId: "crew", profileConcurrency: 2 },
+        { id: "sub", role: "sub-explorer", parentId: "explorer", dependencies: ["explorer"], sessionId: "sub", tool: "execute", allowedTools: ["execute"], profileId: "sub", profileConcurrency: 1 },
+        { id: "sub-crew", role: "crewmate", parentId: "sub", dependencies: ["sub"], sessionId: "sub-crew", tool: "execute", allowedTools: ["execute"], profileId: "crew", profileConcurrency: 2 },
+      ],
+    };
+    const limits: ScheduleLimits = {
+      globalConcurrency: 3,
+      roleConcurrency: { navigator: 1, explorer: 1, crewmate: 2, "trail-boss": 1, "sub-explorer": 1 },
+      remainingTokenBudget: 100,
+      perAgentTokenEstimate: 10,
+      timeoutMs: 50,
+    };
+
+    expect(startSchedule({ graph, evidence: expeditionApproval, limits, nowMs: 0 }))
+      .toMatchObject({ state: "active", batches: [{ nodeIds: ["navigator"] }] });
+  });
+
   it("permits recommendations and only non-Surveyor executions with durable owner evidence", () => {
     for (const role of ["navigator", "explorer", "crewmate", "surveyor"] as const) {
       expect(policy.evaluate(facts({ role }))).toEqual({ allowed: true });

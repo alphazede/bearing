@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   NATIVE_SKILL_CHARACTERIZATION_CASES,
@@ -9,15 +11,17 @@ import { BUILTIN_ROUTES } from "../src/adapters/adapters.js";
 
 const service = new SkillLifecycleService();
 const routes = BUILTIN_ROUTES.map(({ id }) => id);
-const fingerprints = [
-  ["28e968fbb532c464f6d146d4f897c95b03c24d6d54cf10b799da538073f4198e", 14],
-  ["9c1be46f8e895fc88eceb178d4f8f019127986d2aac9c723c592dadf37d95774", 16],
-  ["5771ab35c2138fac7d9366e24be1acc70730881863dd367e777ad8799c310da8", 23],
-  ["8a8361798f04711171e8c66c7bbec96fabc0100f17f9284d8b43a5dd601833a1", 18],
-  ["26f5af019252490ddd49676e7e9acecfe8651be620470222ad598f8e77ca7600", 18],
-  ["c1f0064032ca68876e936233be56a1ea8dfc1af9eea01e93c82a451303307b94", 18],
-  ["15d01c6a7bb5b7f1236fb106eb70d7be9d47e67577a22e34009f8f9ff1d4a023", 16],
-];
+// No hash literals. Fingerprints are always measured from disk (see skillFingerprint).
+// Corrupting any pin in the manifest or editing a skill file must turn assertions red.
+
+function skillFingerprint(name: (typeof SKILL_NAMES)[number]): [string, number] {
+  const body = readFileSync(new URL(`../skills/${name}/SKILL.md`, import.meta.url));
+  return [createHash("sha256").update(body).digest("hex"), body.toString("utf8").split("\n").length - 1];
+}
+
+function skillSource(name: (typeof SKILL_NAMES)[number]): string {
+  return readFileSync(new URL(`../skills/${name}/SKILL.md`, import.meta.url), "utf8");
+}
 
 function evidence(change: "rename" | "content-optimization" | "alias-removal" | "retirement" = "rename") {
   return {
@@ -56,13 +60,36 @@ function inherit(value: Record<string, unknown>, key: string): void {
 }
 
 describe("skill characterization manifest", () => {
-  it("pins all seven sources and exactly one positive and negative outcome case per skill", () => {
+  it("states Navigator planning authority and the Map the Route pass boundary as code-backed guidance", () => {
+    const navigator = skillSource("navigator");
+    const mapTheRoute = skillSource("map-the-route");
+    expect(navigator).toContain("dispatches Set Bearings, Gather Supplies, optional Recon, Map the Route, and the Planning Validator");
+    expect(navigator).toContain("Navigator owns planning-plane orchestration and every requested transition");
+    expect(navigator).toContain("Bearing's TypeScript state gate remains the enforcement");
+    expect(mapTheRoute).toContain("Return structured planning state, findings, and artifacts to Navigator");
+    expect(mapTheRoute).toContain("Do not invoke the next pass or record a planning transition");
+    expect(mapTheRoute).toContain("Bearing's TypeScript capability boundary remains the enforcement");
+    for (const source of [navigator, mapTheRoute]) {
+      expect(source).toMatch(/^---\nname: /);
+      for (const heading of ["Mission and non-goals", "Authority and prohibited actions", "Inputs and outputs schema", "State read and written", "Closed-loop workflow", "Entry and exit criteria", "Evidence requirements", "Failure taxonomy", "Escalation and amendment rules", "Metrics and trace events"]) {
+        expect(source).toContain(`## ${heading}`);
+      }
+    }
+  });
+
+  it("pins all eleven sources (measured from disk, no literals) and exactly one positive and negative outcome case per skill", () => {
     expect(SKILL_CHARACTERIZATION_MANIFEST.schemaVersion).toBe(1);
+    expect(SKILL_NAMES).toHaveLength(11);
     expect(SKILL_CHARACTERIZATION_MANIFEST.skills.map(({ name }) => name)).toEqual(SKILL_NAMES);
-    expect(SKILL_CHARACTERIZATION_MANIFEST.skills.map(({ source }) => [source.sha256, source.lines])).toEqual(fingerprints);
+    const measured = SKILL_NAMES.map(skillFingerprint);
+    expect(SKILL_CHARACTERIZATION_MANIFEST.skills.map(({ source }) => [source.sha256, source.lines])).toEqual(measured);
     expect(SKILL_CHARACTERIZATION_MANIFEST.skills.every(({ directives, noOp, source, humanReview, changeStatus, compatibility, retirement }) => Object.values(directives).every(Boolean) && noOp === "none found" && source.lines < 500 && humanReview === "pending" && changeStatus === "unchanged" && compatibility === "canonical-only" && retirement === "not-eligible")).toBe(true);
-    expect(NATIVE_SKILL_CHARACTERIZATION_CASES).toHaveLength(14);
+    expect(NATIVE_SKILL_CHARACTERIZATION_CASES).toHaveLength(22);
     for (const skill of SKILL_NAMES) expect(NATIVE_SKILL_CHARACTERIZATION_CASES.filter((entry) => entry.skill === skill).map(({ kind }) => kind)).toEqual(["positive", "negative"]);
+    expect(NATIVE_SKILL_CHARACTERIZATION_CASES.filter(({ skill }) => skill === "set-bearings").map(({ prompt, expected }) => [prompt, expected])).toEqual([
+      ["Use Set Bearings to start an account-export plan.", "trigger"],
+      ["We should eventually plan account export.", "do-not-trigger"],
+    ]);
   });
 
   it("keeps directives body-free and classifies no-op current sources", () => {

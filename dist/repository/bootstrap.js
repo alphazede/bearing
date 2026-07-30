@@ -2,26 +2,48 @@ import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { access, lstat, mkdir, open, readdir, realpath, rename, stat, unlink, writeFile, } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { BUILTIN_ROUTES } from "../adapters/adapters.js";
+import { resolveExecutable } from "./executable-path.js";
+import { assessRepositorySafety } from "./safety.js";
 const WORKSPACE_SCHEMA_VERSION = 1;
 const BEARING_DIR = ".bearing";
 const WORKSPACE_FILE = "workspace.json";
 const TEMP_PREFIX = ".bearing.tmp-";
 const OWNER_FILE = "owner.json";
 const OWNER_TEMP_PREFIX = ".owner.tmp-";
+const BEARING_IGNORE_LINES = [".bearing", ".bearing/", "/.bearing", "/.bearing/"];
 export class RepositoryBootstrap {
-    async choose(inputPath) {
+    async choose(inputPath, opts) {
         const validated = await this.validateRepositoryPath(inputPath);
         if (!validated.ok)
             return validated;
         const repositoryPath = validated.repositoryPath;
+        const isGitRoot = await lstat(join(repositoryPath, ".git"))
+            .then((marker) => marker.isDirectory() || marker.isFile())
+            .catch(() => false);
+        const safety = assessRepositorySafety({
+            candidate: repositoryPath,
+            isGitRoot,
+            agentExecutableRealpaths: opts?.agentExecutableRealpaths ?? knownAgentExecutableRealpaths(),
+            ownerConfirmedNonGit: opts?.ownerConfirmedNonGit === true,
+        });
+        if (!safety.ok && safety.code === "repository_contains_agent") {
+            return { ok: false, reason: "repository_contains_agent" };
+        }
         const bearingPath = join(repositoryPath, BEARING_DIR);
         const existing = await this.validateExistingBearing(bearingPath, repositoryPath);
+        if (!safety.ok) {
+            if (existing !== "missing" && existing.ok && existing.status === "resumed") {
+                return this.withOwner(existing);
+            }
+            return { ok: false, reason: "repository_not_git" };
+        }
         if (existing !== "missing")
             return existing.ok ? this.withOwner(existing) : existing;
         const interrupted = await this.hasInterruptedInitialization(repositoryPath);
         if (interrupted)
             return { ok: false, reason: "interrupted_initialization" };
-        const initialized = await this.initialize(repositoryPath, bearingPath);
+        const initialized = await this.initialize(repositoryPath, bearingPath, await gitignoreState(repositoryPath, isGitRoot));
         return initialized.ok ? this.withOwner(initialized) : initialized;
     }
     async rememberOwnerName(repositoryPath, input) {
@@ -134,7 +156,7 @@ export class RepositoryBootstrap {
         const entries = await readdir(repositoryPath);
         return entries.some((entry) => entry.startsWith(TEMP_PREFIX));
     }
-    async initialize(repositoryPath, bearingPath) {
+    async initialize(repositoryPath, bearingPath, gitignore) {
         const tmpPath = join(repositoryPath, `${TEMP_PREFIX}${process.pid}-${Date.now()}-${randomBytes(8).toString("hex")}`);
         const manifest = {
             schemaVersion: WORKSPACE_SCHEMA_VERSION,
@@ -147,7 +169,7 @@ export class RepositoryBootstrap {
             await syncPath(tmpPath);
             await rename(tmpPath, bearingPath);
             await syncPath(repositoryPath);
-            return { ok: true, status: "initialized", repositoryPath };
+            return { ok: true, status: "initialized", repositoryPath, gitignoreMissing: gitignore.missing, gitignoreAbsent: gitignore.absent };
         }
         catch (err) {
             if (isNodeError(err, "EEXIST") ||
@@ -161,6 +183,30 @@ export class RepositoryBootstrap {
             return { ok: false, reason: "initialize_failed" };
         }
     }
+}
+function knownAgentExecutableRealpaths() {
+    return [...new Set(BUILTIN_ROUTES.flatMap(({ executable }) => resolveExecutable(executable) ?? []))];
+}
+/** Recognizes every literal `.bearing` ignore spelling Git treats as covering the directory. */
+export function ignoresBearingDirectory(gitignoreBody) {
+    return gitignoreBody
+        .split(/\r?\n/)
+        .some((line) => BEARING_IGNORE_LINES.includes(line.trim()));
+}
+/**
+ * Distinguishes "a .gitignore exists but does not ignore .bearing/" from "there is
+ * no .gitignore at all". Only the first case can be repaired by the consent
+ * endpoint, which appends to an existing regular file and never creates one, so
+ * only the first sets `gitignoreMissing`. Reporting the absent case as missing
+ * would offer the owner an add action that always fails.
+ */
+async function gitignoreState(repositoryPath, isGitRoot) {
+    if (!isGitRoot)
+        return { missing: false, absent: false };
+    const gitignore = await readRegularFileNoFollow(join(repositoryPath, ".gitignore"));
+    if (!gitignore.ok)
+        return { missing: false, absent: true };
+    return { missing: !ignoresBearingDirectory(gitignore.body), absent: false };
 }
 function normalizeOwnerName(value) {
     const name = value.trim();

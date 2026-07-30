@@ -1,16 +1,70 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, request as httpRequest, type Server } from "node:http";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
-import { createFocusContext, validateFocusCompletion, type CommandEvidence } from "../src/journey/focus-mode.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createFocusContext, snapshotGitState, validateFocusCompletion, type CommandEvidence } from "../src/journey/focus-mode.js";
 import { beginStandaloneFocus, validateStandaloneFocus } from "../src/journey/standalone-focus.js";
 import { renderPlanningReview } from "../src/journey/planning-journey.js";
 
 const exec = promisify(execFile);
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+const servers: Server[] = [];
+const writeSetClauseReason = "ambiguous write authority fails closed rather than silently granting write access; restate the prohibition in prose without backticks per planning contract rule 5";
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function listen(server: Server): Promise<number> {
+  await new Promise<void>((resolve) => server.listen({ host: "127.0.0.1", port: 0 }, resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("test server did not listen");
+  servers.push(server);
+  return address.port;
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs = 100): Promise<T | "unsettled"> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<"unsettled">((resolve) => {
+        timeout = setTimeout(() => resolve("unsettled"), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function loopbackRequest(
+  port: number,
+  method: string,
+  path: string,
+  body = "",
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      host: "127.0.0.1",
+      port,
+      method,
+      path,
+      headers: { "content-length": Buffer.byteLength(body) },
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => resolve({
+        status: response.statusCode ?? 0,
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
+}
 
 const plan = "---\ntype: plan-spec\nstatus: complete\n---\n\n## Acceptance criteria\n\n- **AC-1** — Import bounded data.\n";
 const design = "---\ntype: design\nstatus: complete\n---\n\n## Design\n\n- **DES-1** — Keep the import bounded.\n";
@@ -45,13 +99,20 @@ async function context(root: string) {
   return createFocusContext({ root, planDirectory: "docs/plans/import", role: "explorer", objective: "Import bounded data" });
 }
 
+async function acceptedContext(root: string) {
+  const result = await context(root);
+  return result.ok ? result.value : undefined;
+}
+
 const passed: CommandEvidence[] = [{ commandId: "CMD-UNIT", status: "passed", summary: "1 test passed" }];
 
 describe("Focus mode", () => {
   it("derives one compact bounded envelope from approved planning sources", async () => {
     const root = await repository();
-    const focus = await context(root);
-    expect(focus?.envelope).toMatchObject({
+    const result = await context(root);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.value.envelope).toMatchObject({
       role: "explorer",
       immutableObjective: "Import bounded data",
       currentAcceptanceCriterion: "AC-1 — Import bounded data.",
@@ -64,10 +125,14 @@ describe("Focus mode", () => {
   });
 
   it("rejects malformed, wildcard, traversal, duplicate, and non-Git contracts", async () => {
-    for (const writeSet of ["`src/*.ts` only.", "`../outside.ts` only.", "`src/import.ts`, `src/import.ts` only."]) {
+    for (const [writeSet, rejection] of [
+      ["`src/*.ts` only.", { ok: false, reason: "write_set_path_invalid", sliceId: "1.1", field: "Write set", detail: "src/*.ts" }],
+      ["`../outside.ts` only.", { ok: false, reason: "write_set_path_invalid", sliceId: "1.1", field: "Write set", detail: "../outside.ts" }],
+      ["`src/import.ts`, `src/import.ts` only.", { ok: false, reason: "write_set_path_duplicate", sliceId: "1.1", field: "Write set", detail: "src/import.ts" }],
+    ] as const) {
       const root = await repository();
       await writeFile(join(root, "docs/plans/import/implementation.md"), implementation.replace("`src/import.ts` only.", writeSet));
-      expect(await context(root)).toBeUndefined();
+      expect(await context(root)).toEqual(rejection);
     }
     const root = await mkdtemp(join(tmpdir(), "bearing-focus-no-git-"));
     roots.push(root);
@@ -77,12 +142,74 @@ describe("Focus mode", () => {
       writeFile(join(root, "docs/plans/import/seit.md"), seit),
       writeFile(join(root, "docs/plans/import/implementation.md"), implementation),
     ]);
-    expect(await context(root)).toBeUndefined();
+    expect(await context(root)).toEqual({ ok: false, reason: "git_state" });
+  });
+
+  it("returns a distinct typed rejection for every authoring failure", async () => {
+    const cases = [
+      [implementation.replace("**Goal.** Import bounded data.\n\n", ""), { ok: false, reason: "field_missing", sliceId: "1.1", field: "Goal" }],
+      [implementation.replace("**Requirement IDs.** AC-1\n\n", ""), { ok: false, reason: "field_missing", sliceId: "1.1", field: "Requirement IDs" }],
+      [implementation.replace("**Write set.** `src/import.ts` only.\n\n", ""), { ok: false, reason: "field_missing", sliceId: "1.1", field: "Write set" }],
+      [implementation.replace("**Command IDs.** CMD-UNIT\n\n", ""), { ok: false, reason: "field_missing", sliceId: "1.1", field: "Command IDs" }],
+      [implementation.replace("Import bounded data.", "x".repeat(513)), { ok: false, reason: "goal_too_long", sliceId: "1.1", field: "Goal", detail: "length=513 limit=512" }],
+      [implementation.replace("`src/import.ts` only.", "`src/import.ts`."), { ok: false, reason: "write_set_only_missing", sliceId: "1.1", field: "Write set" }],
+      [implementation.replace("`src/import.ts` only.", "Write only."), { ok: false, reason: "write_set_empty", sliceId: "1.1", field: "Write set" }],
+      [implementation.replace("CMD-UNIT", "UNKNOWN"), { ok: false, reason: "command_id_invalid", sliceId: "1.1", field: "Command IDs" }],
+      [implementation.replace("CMD-UNIT", "CMD-MISSING"), { ok: false, reason: "command_id_unmapped", sliceId: "1.1", field: "Command IDs", detail: "CMD-MISSING" }],
+      [implementation.replace("### Slice 1.1 — Import", "### Slice 1.1 — Import\n\n### Slice 1.1 — Duplicate"), { ok: false, reason: "duplicate_slice_id", sliceId: "1.1" }],
+      [implementation.replace("### 1.1 execution manifest", "### 1.1 execution manifest\n\n### 1.1 execution manifest"), { ok: false, reason: "duplicate_manifest_id", sliceId: "1.1" }],
+    ] as const;
+    for (const [candidate, rejection] of cases) {
+      const root = await repository();
+      await writeFile(join(root, "docs/plans/import/implementation.md"), candidate);
+      expect(await context(root)).toEqual(rejection);
+    }
+  });
+
+  it("rejects a prohibited backticked path instead of granting it", async () => {
+    const root = await repository();
+    await writeFile(
+      join(root, "docs/plans/import/implementation.md"),
+      implementation.replace("`src/import.ts` only.", "Write only `src/a.ts`. Do not modify `src/secret.ts`."),
+    );
+    expect(await context(root)).toEqual({
+      ok: false,
+      reason: "write_set_negation",
+      sliceId: "1.1",
+      field: "Write set",
+      detail: writeSetClauseReason,
+    });
+
+    const acceptedRoot = await repository();
+    const accepted = await context(acceptedRoot);
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) throw new Error(accepted.reason);
+    expect(accepted.value.envelope.allowedPaths).toEqual(["docs/plans/import/review.html", "src/import.ts"]);
+  });
+
+  it.each([
+    "Write only `src/a.ts`; `src/secret.ts` must not be modified.",
+    "Write only `src/a.ts`; `src/secret.ts` is read-only.",
+    "Write only `src/a.ts`; leave `src/secret.ts` untouched.",
+    "Write only `src/a.ts`; must not modify `src/secret.ts`.",
+  ])("rejects a prohibited path instead of granting it: %s", async (writeSet) => {
+    const root = await repository();
+    await writeFile(
+      join(root, "docs/plans/import/implementation.md"),
+      implementation.replace("`src/import.ts` only.", writeSet),
+    );
+    expect(await context(root)).toEqual({
+      ok: false,
+      reason: "write_set_negation",
+      sliceId: "1.1",
+      field: "Write set",
+      detail: writeSetClauseReason,
+    });
   });
 
   it("accepts only declared net changes, complete artifacts, and passing command evidence", async () => {
     const root = await repository();
-    const focus = await context(root);
+    const focus = await acceptedContext(root);
     if (!focus) throw new Error("missing focus context");
     await mkdir(join(root, ".bearing"), { recursive: true });
     await Promise.all([
@@ -98,7 +225,7 @@ describe("Focus mode", () => {
 
   it("tracks declared and undeclared changes after the agent commits them", async () => {
     const acceptedRoot = await repository();
-    const accepted = await context(acceptedRoot);
+    const accepted = await acceptedContext(acceptedRoot);
     if (!accepted) throw new Error("missing focus context");
     await Promise.all([
       writeFile(join(acceptedRoot, "src/import.ts"), "export const imported = true;\n"),
@@ -109,7 +236,7 @@ describe("Focus mode", () => {
     expect(await validateFocusCompletion(accepted, acceptedRoot, ["src/import.ts", "docs/plans/import/review.html"], passed)).toEqual({ ok: true, changedPaths: ["docs/plans/import/review.html", "src/import.ts"] });
 
     const rejectedRoot = await repository();
-    const rejected = await context(rejectedRoot);
+    const rejected = await acceptedContext(rejectedRoot);
     if (!rejected) throw new Error("missing focus context");
     await Promise.all([
       writeFile(join(rejectedRoot, "notes.txt"), "committed outside the write set\n"),
@@ -124,7 +251,7 @@ describe("Focus mode", () => {
   it("detects an unauthorized edit to a file that was already dirty", async () => {
     const root = await repository();
     await writeFile(join(root, "notes.txt"), "owner draft before execution\n");
-    const focus = await context(root);
+    const focus = await acceptedContext(root);
     if (!focus) throw new Error("missing focus context");
     await Promise.all([
       writeFile(join(root, "notes.txt"), "agent changed owner draft\n"),
@@ -134,16 +261,17 @@ describe("Focus mode", () => {
     expect(await validateFocusCompletion(focus, root, ["notes.txt", "src/import.ts", "docs/plans/import/review.html"], passed)).toEqual({ ok: false, reason: "path_outside_write_set" });
   });
 
-  it("rejects missing artifacts and missing, unknown, duplicate, or failed evidence", async () => {
+  it("rejects missing artifacts and missing, unknown, or duplicate evidence", async () => {
+    // A failed command is no longer folded in here: it reports command_regressed, because a broken
+    // build is a regression rather than a gap in the evidence. Its own test covers that outcome.
     const invalidEvidence: CommandEvidence[][] = [
       [],
       [{ commandId: "CMD-OTHER", status: "passed", summary: "passed" }],
       [...passed, ...passed],
-      [{ commandId: "CMD-UNIT", status: "failed", summary: "failed" }],
     ];
     for (const evidence of invalidEvidence) {
       const root = await repository();
-      const focus = await context(root);
+      const focus = await acceptedContext(root);
       if (!focus) throw new Error("missing focus context");
       await Promise.all([
         writeFile(join(root, "src/import.ts"), "export const imported = true;\n"),
@@ -152,15 +280,52 @@ describe("Focus mode", () => {
       expect(await validateFocusCompletion(focus, root, ["src/import.ts", "docs/plans/import/review.html"], evidence)).toEqual({ ok: false, reason: "evidence_invalid" });
     }
     const root = await repository();
-    const focus = await context(root);
+    const focus = await acceptedContext(root);
     if (!focus) throw new Error("missing focus context");
     await writeFile(join(root, "src/import.ts"), "export const imported = true;\n");
     expect(await validateFocusCompletion(focus, root, ["docs/plans/import/review.html"], passed)).toEqual({ ok: false, reason: "artifact_missing" });
   });
 
+  it("rejects a declared production artifact that was never changed", async () => {
+    // The fabricated-fix shape: declare the production file and its test, change only the test.
+    // Every other completion check passes — there is a product change, nothing escaped the write
+    // set, and every changed path is declared — so this is the one rule that catches it.
+    const root = await repository();
+    const focus = await acceptedContext(root);
+    if (!focus) throw new Error("missing focus context");
+    await writeFile(join(root, "docs/plans/import/review.html"), "complete\n");
+
+    expect(await validateFocusCompletion(
+      focus,
+      root,
+      ["src/import.ts", "docs/plans/import/review.html"],
+      passed,
+    )).toEqual({ ok: false, reason: "artifact_unchanged" });
+    expect(await readFile(join(root, "src/import.ts"), "utf8")).toContain("false");
+  });
+
+  it("reports a failed declared command as a regression, not as missing evidence", async () => {
+    // A command that ran and failed means previously-working behaviour broke. Folding it into
+    // evidence_invalid gave a broken build the same soft verdict as a missing summary.
+    const root = await repository();
+    const focus = await acceptedContext(root);
+    if (!focus) throw new Error("missing focus context");
+    await Promise.all([
+      writeFile(join(root, "src/import.ts"), "export const imported = true;\n"),
+      writeFile(join(root, "docs/plans/import/review.html"), "complete\n"),
+    ]);
+
+    expect(await validateFocusCompletion(
+      focus,
+      root,
+      ["src/import.ts", "docs/plans/import/review.html"],
+      [{ commandId: "CMD-UNIT", status: "failed", summary: "unit suite failed" }],
+    )).toEqual({ ok: false, reason: "command_regressed" });
+  });
+
   it("rejects completion with only the runtime-owned review change", async () => {
     const root = await repository();
-    const focus = await context(root);
+    const focus = await acceptedContext(root);
     if (!focus) throw new Error("missing focus context");
     await writeFile(join(root, "docs/plans/import/review.html"), "complete\n");
     expect(await validateFocusCompletion(focus, root, ["docs/plans/import/review.html"], passed)).toEqual({ ok: false, reason: "no_product_change" });
@@ -197,5 +362,185 @@ describe("Focus mode", () => {
     await mkdir(join(root, ".bearing/focus"), { recursive: true });
     await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({ role: "crewmate", objective: "Do whatever is needed" }));
     expect(await beginStandaloneFocus(root, ".bearing/focus/request.json")).toEqual({ ok: false, reason: "request_invalid" });
+  });
+
+  it("carries a bounded typed parser rejection out of the standalone Focus guard", async () => {
+    const root = await repository();
+    await writeFile(join(root, "docs/plans/import/implementation.md"), implementation.replace("Import bounded data.", "x".repeat(513)));
+    await mkdir(join(root, ".bearing/focus"), { recursive: true });
+    await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({
+      role: "crewmate",
+      objective: "Import bounded data",
+      planDirectory: "docs/plans/import",
+      slice: "1.1",
+    }));
+    const result = await beginStandaloneFocus(root, ".bearing/focus/request.json");
+    expect(result).toEqual({
+      ok: false,
+      reason: "goal_too_long",
+      sliceId: "1.1",
+      field: "Goal",
+      detail: "length=513 limit=512",
+    });
+    expect(Object.values(result).every((value) => typeof value !== "string" || value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value))).toBe(true);
+  });
+
+  it("expires an abandoned standalone focus guard", async () => {
+    const root = await repository();
+    await mkdir(join(root, ".bearing/focus"), { recursive: true });
+    await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({
+      role: "crewmate",
+      objective: "Import bounded data",
+      planDirectory: "docs/plans/import",
+      slice: "1.1",
+    }));
+
+    vi.useFakeTimers();
+    let begun;
+    try {
+      begun = await beginStandaloneFocus(root, ".bearing/focus/request.json");
+      expect(begun.ok).toBe(true);
+      await vi.runAllTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
+    if (!begun?.ok) throw new Error(begun?.reason ?? "focus guard did not begin");
+
+    expect(await validateStandaloneFocus(root, begun.runId, ".bearing/focus/missing-receipt.json"))
+      .toEqual({ ok: false, reason: "state_invalid" });
+  });
+
+  it("settles with a typed reason when the validation request times out", async () => {
+    const root = await repository();
+    let received!: () => void;
+    const requestReceived = new Promise<void>((resolve) => { received = resolve; });
+    const port = await listen(createServer(() => received()));
+
+    const pending = validateStandaloneFocus(
+      root,
+      `v1.${port}.${"a".repeat(64)}`,
+      "receipt.json",
+      25,
+    );
+    await requestReceived;
+
+    expect(await settleWithin(pending, 200)).toEqual({ ok: false, reason: "request_timeout" });
+  });
+
+  it("settles with a typed reason when the guard response is oversized", async () => {
+    const root = await repository();
+    const port = await listen(createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write(Buffer.alloc(16 * 1024 + 1, "x"));
+    }));
+
+    expect(await settleWithin(
+      validateStandaloneFocus(root, `v1.${port}.${"b".repeat(64)}`, "receipt.json"),
+    )).toEqual({ ok: false, reason: "response_too_large" });
+  });
+
+  it("keeps the one-use guard available after an unrelated loopback probe", async () => {
+    const root = await repository();
+    await mkdir(join(root, ".bearing/focus"), { recursive: true });
+    await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({
+      role: "crewmate",
+      objective: "Import bounded data",
+      planDirectory: "docs/plans/import",
+      slice: "1.1",
+    }));
+    const begun = await beginStandaloneFocus(root, ".bearing/focus/request.json");
+    if (!begun.ok) throw new Error(begun.reason);
+    const [, portText] = begun.runId.split(".");
+
+    const probe = await loopbackRequest(Number(portText), "GET", "/probe");
+    expect(probe.status).toBe(404);
+    expect(JSON.parse(probe.body)).toEqual({ ok: false, reason: "state_invalid" });
+    expect(await validateStandaloneFocus(root, begun.runId, ".bearing/focus/missing-receipt.json"))
+      .toEqual({ ok: false, reason: "receipt_invalid" });
+  });
+
+  it("responds to an oversized matching request instead of dropping the connection", async () => {
+    const root = await repository();
+    await mkdir(join(root, ".bearing/focus"), { recursive: true });
+    await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({
+      role: "crewmate",
+      objective: "Import bounded data",
+      planDirectory: "docs/plans/import",
+      slice: "1.1",
+    }));
+    const begun = await beginStandaloneFocus(root, ".bearing/focus/request.json");
+    if (!begun.ok) throw new Error(begun.reason);
+    const [, portText, capability] = begun.runId.split(".");
+
+    const response = await settleWithin(loopbackRequest(
+      Number(portText),
+      "POST",
+      `/validate/${capability}`,
+      "x".repeat(16 * 1024 + 1),
+    ));
+    expect(response).not.toBe("unsettled");
+    expect(response).toEqual({
+      status: 413,
+      body: JSON.stringify({ ok: false, reason: "request_too_large" }),
+    });
+
+    // Invariant, not a regression guard: answering an oversized request must never
+    // consume the one-use guard. Today the guard survives either way, because
+    // `response.end`'s callback does not fire while the oversized body stays
+    // unconsumed, so the scheduled `server.close()` never runs. Passing
+    // `consume: false` states the intent explicitly instead of depending on that
+    // stream timing, and this assertion locks the behaviour in if it ever changes.
+    await new Promise((settle) => setTimeout(settle, 250));
+    expect(await validateStandaloneFocus(root, begun.runId, ".bearing/focus/missing-receipt.json"))
+      .toEqual({ ok: false, reason: "receipt_invalid" });
+  });
+
+  // A 400 is rejected before validateStored runs, so it spends no validation
+  // attempt and must leave the one-use guard intact, exactly as 404 and 413 do.
+  it.each([
+    ["a body that does not parse", "{not json"],
+    ["a body naming a different root", JSON.stringify({ root: "/elsewhere", receiptPath: "receipt.json" })],
+    ["a body with no receiptPath", JSON.stringify({ root: "PLACEHOLDER_ROOT" })],
+  ])("keeps the one-use guard available after %s", async (_label, rawBody) => {
+    const root = await repository();
+    await mkdir(join(root, ".bearing/focus"), { recursive: true });
+    await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({
+      role: "crewmate",
+      objective: "Import bounded data",
+      planDirectory: "docs/plans/import",
+      slice: "1.1",
+    }));
+    const begun = await beginStandaloneFocus(root, ".bearing/focus/request.json");
+    if (!begun.ok) throw new Error(begun.reason);
+    const [, portText, capability] = begun.runId.split(".");
+
+    const response = await settleWithin(loopbackRequest(
+      Number(portText),
+      "POST",
+      `/validate/${capability}`,
+      rawBody.replace("PLACEHOLDER_ROOT", await realpath(root)),
+    ));
+    expect(response).not.toBe("unsettled");
+    expect(response).toEqual({
+      status: 400,
+      body: JSON.stringify({ ok: false, reason: "state_invalid" }),
+    });
+
+    // The guard survives, so a subsequent well-formed request still reaches
+    // validation and fails on the receipt rather than on a closed server.
+    await new Promise((settle) => setTimeout(settle, 250));
+    expect(await validateStandaloneFocus(root, begun.runId, ".bearing/focus/missing-receipt.json"))
+      .toEqual({ ok: false, reason: "receipt_invalid" });
+  });
+});
+
+describe("snapshotGitState", () => {
+  it("succeeds when the working tree contains an empty untracked directory", async () => {
+    const root = await repository();
+    // Git reports an empty untracked directory as `dir/`; it must not fail the snapshot closed.
+    await mkdir(join(root, "scratch-empty"), { recursive: true });
+    const snapshot = await snapshotGitState(root);
+    expect(snapshot).toBeDefined();
+    expect([...(snapshot?.paths.keys() ?? [])].some((path) => path.endsWith("/"))).toBe(false);
   });
 });
