@@ -107,7 +107,7 @@ describe("fictional B2B showcase workflows", () => {
   it("closes every catalog and public showcase evidence path within the fixture", async () => {
     const paths = fictionalB2bWorkflows.flatMap((workflow) => [
       ...workflow.expectedArtifacts.map(({ path }) => path),
-      ...workflow.outcomeExpectations.flatMap(({ evidence = [] }) => evidence),
+      ...workflow.outcomeExpectations.flatMap((expectation) => "evidence" in expectation ? expectation.evidence : []),
       ...projectWorkflowShowcase(workflow.id)!.evidence.evidence.flatMap(({ href }) => href ? [href] : []),
     ]);
     for (const path of paths) {

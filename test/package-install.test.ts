@@ -23,7 +23,9 @@ async function assertInstall(root: string): Promise<void> {
     access(join(root, "hooks/focus-reminder.cjs")),
   ]);
   await expect(exec("bearing", ["--version"], { cwd: root, env: { PATH: join(root, "empty-path") } })).rejects.toMatchObject({ code: "ENOENT" });
-  const fallback = await exec(process.execPath, [join(root, "dist/cli.js"), "bogus"], { cwd: root, env: { PATH: join(root, "empty-path") } }).catch((error) => error as { code?: number; stderr?: string });
+  const fallback: { code?: number; stderr?: string } = await exec(process.execPath, [join(root, "dist/cli.js"), "bogus"], { cwd: root, env: { PATH: join(root, "empty-path") } })
+    .then(({ stderr }) => ({ stderr }))
+    .catch((error: unknown) => error as { code?: number; stderr?: string });
   expect(fallback.code).toBe(2);
   expect(fallback.stderr).toContain("usage: bearing");
   const internalSkill = await readFile(join(root, "skills/crewmate/SKILL.md"), "utf8");

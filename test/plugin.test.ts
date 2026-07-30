@@ -20,10 +20,10 @@ describe("Bearing plugin contract", () => {
       author: { name: "William Rumph / AlphaZede" },
       interface: { developerName: "William Rumph / AlphaZede" },
     });
-    expect(codexManifest.version).toBe("0.1.3");
+    expect(codexManifest.version).toBe("0.1.5");
     expect(claudeManifest).toMatchObject({
       name: "bearing",
-      version: "0.1.3",
+      version: "0.1.5",
       skills: "./plugin-skills/",
       hooks: "./hooks/claude-codex-hooks.json",
       author: { name: "William Rumph / AlphaZede" },
@@ -139,7 +139,7 @@ describe("Bearing plugin contract", () => {
     expect(readmeProse).toContain("reads the relevant packaged `SKILL.md` files and embeds them");
     expect(readmeProse).toContain("do not need AlphaZede's private skill installation");
     expect(readmeProse).toContain("guarded Explorer, Navigator, and Crewmate wrappers");
-    expect(readmeProse).toContain("Each raw internal skill disables both user and model invocation");
+    expect(readmeProse).toContain("The internal skills disable user and model invocation");
     expect(readmeProse).toContain("The hook is optional");
     expect(readmeProse).toContain("one-use loopback guard process");
     expect(readmeProse).toContain("security boundaries, artifact validation, approval checks, and deterministic `review.html` generation");
@@ -149,5 +149,31 @@ describe("Bearing plugin contract", () => {
     expect(readmeProse).toContain("asks for owner approval to rerun only the Bearing CLI launch with host escalation");
     expect(readmeProse).toContain("does not weaken the sandbox, tools, authority, or isolation of agents Bearing starts");
     expect(readmeProse).not.toContain("does not launch automatically");
+  });
+
+  it("keeps the installed headless journey grammar aligned with its stable receipt boundary", async () => {
+    const rawReadme = await read("../README.md");
+    const rawHeadlessJourney = rawReadme.split("## Headless journey", 2)[1]!.split("## Real browser journey", 1)[0]!;
+    const readme = prose(rawHeadlessJourney);
+    const skill = prose(await read("../plugin-skills/bearing/SKILL.md"));
+    for (const surface of [readme, skill]) {
+      expect(surface).toContain("journey create --repo");
+      expect(surface).toContain("journey status");
+      expect(surface).toContain("journey resume");
+      expect(surface).toContain("journey decide");
+      expect(surface).toContain("journey progress --stage");
+      expect(surface).toContain("journey approve-route");
+      expect(surface).toContain("journey select-explorer");
+      expect(surface).toContain("allowedActions");
+      expect(surface).toContain("runId");
+      expect(surface).toContain("revision");
+      expect(surface).toContain("ok: false");
+      expect(surface).not.toMatch(/okf_status|BRAN|bearer\s+[A-Za-z0-9._-]+/i);
+    }
+    expect(rawHeadlessJourney).not.toContain("--stage repository-fit");
+    expect(rawHeadlessJourney).toContain("--stage set-bearings");
+    expect(rawHeadlessJourney.indexOf("journey decide")).toBeLessThan(
+      rawHeadlessJourney.indexOf("--stage set-bearings"),
+    );
   });
 });

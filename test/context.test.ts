@@ -27,7 +27,21 @@ describe("context boundary", () => {
   });
 
   it("cannot enlarge authority, tools, isolation, or limits", () => {
-    const role = { context: "off", authority: { read: true, write: false, network: false, workspace: true, externalAction: false }, toolAllow: ["read"], toolDeny: ["shell"], isolationRequested: "required", limits: { timeoutMs: 1, maxTurns: 1, maxTools: 1, maxRetries: 1, maxConcurrency: 1, maxDelegation: 1, tokenBudget: 1 } } as RoleProjection;
+    const role: RoleProjection = {
+      role: "crewmate",
+      identity: "test-role",
+      sessionId: null,
+      selection: { provider: "test", model: "test", reasoning: "medium" },
+      reasoning: { tier: "medium", providerLevel: "medium", clamped: false },
+      context: "off",
+      authority: { read: true, write: false, network: false, workspace: true, externalAction: false },
+      toolAllow: ["read"],
+      toolDeny: ["shell"],
+      isolationRequested: "required",
+      fallbackEnabled: false,
+      limits: { timeoutMs: 1, maxTurns: 1, maxTools: 1, maxRetries: 1, maxConcurrency: 1, maxDelegation: 1, tokenBudget: 1 },
+      executor: true,
+    };
     const changed = withContext(role, "rag-assisted");
     expect(changed.context).toBe("rag-assisted");
     expect(changed.authority).toBe(role.authority);

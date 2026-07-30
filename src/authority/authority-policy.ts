@@ -1,5 +1,6 @@
 /** Pure, fail-closed authority checks; durable evidence is supplied by a caller. */
 import { ROLES, type Role } from "../profile/profile.js";
+import type { ExecutorRole } from "../execution/execution-scheduler.js";
 import { isDurableOwnerEvidence, type DurableOwnerEvidence } from "../workflow/aggregate.js";
 
 export const AUTHORITY_POLICY_SCHEMA_VERSION = 1 as const;
@@ -22,7 +23,7 @@ export type AuthorityDecision =
 
 export interface AuthorityFacts {
   readonly schemaVersion: typeof AUTHORITY_POLICY_SCHEMA_VERSION;
-  readonly role: Role;
+  readonly role: Role | ExecutorRole;
   readonly action: AuthorityAction;
   readonly tool: string;
   readonly allowedTools: readonly string[];
@@ -38,7 +39,7 @@ export interface AuthorityFacts {
 
 const MAX_TEXT = 128;
 const MAX_TOOLS = 64;
-const roles = new Set<string>(ROLES);
+const roles = new Set<string>([...ROLES, "trail-boss", "sub-explorer"]);
 const actions = new Set<string>(["recommend", "execute", "certify"]);
 
 function text(value: unknown): value is string {
@@ -81,6 +82,7 @@ export class AuthorityPolicy {
     }
     if (input.action === "execute") {
       if (!input.evidence) return deny("authority_approval_missing");
+      if (input.role === "trail-boss" && input.executionMode === "explorer") return deny("authority_execution_mode_denied");
       if (!input.executionMode || input.evidence.selectedMode !== input.executionMode) return deny("authority_execution_mode_denied");
       return { allowed: true };
     }

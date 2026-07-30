@@ -10,8 +10,9 @@ import {
   type RoleProjection,
   type Selection,
 } from "../profile/profile.js";
+import { REASONING_PROVIDER_MAP, type ReasoningProvider, type ReasoningTier } from "../profile/reasoning-policy.js";
 
-export const REASONING_LEVELS = ["default", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "thinking"] as const;
+export const REASONING_LEVELS = ["default", "off", "none", "minimal", "low", "medium", "high", "very-high", "xhigh", "max", "ultra", "thinking"] as const;
 
 export interface RouteInspectionPort {
   executableAvailable(executable: string): boolean;
@@ -103,6 +104,37 @@ function normalized(options: readonly RouteModelOption[], fallbackOption: readon
   return safe.length ? safe.slice(0, 64) : fallbackOption;
 }
 
+function clampRunToModel(run: ResolvedRun, levels: readonly string[]): ResolvedRun | undefined {
+  const order = REASONING_LEVELS as readonly string[];
+  const roles = run.roles.map((role) => {
+    const requested = order.indexOf(role.reasoning.providerLevel);
+    const providerLevel = levels
+      .filter((level) => order.indexOf(level) <= requested)
+      .sort((left, right) => order.indexOf(right) - order.indexOf(left))[0];
+    return requested < 0 || providerLevel === undefined
+      ? undefined
+      : providerLevel === role.reasoning.providerLevel
+        ? role
+        : { ...role, reasoning: { ...role.reasoning, providerLevel, clamped: true } };
+  });
+  if (roles.some((role) => role === undefined)) return undefined;
+  const clampedRoles = roles as readonly RoleProjection[];
+  return {
+    ...run,
+    roles: clampedRoles,
+    receipt: {
+      ...run.receipt,
+      effective: {
+        ...run.receipt.effective,
+        route: {
+          ...(run.receipt.effective.route as Readonly<Record<string, unknown>>),
+          reasoning: Object.fromEntries(clampedRoles.map((role) => [role.role, role.reasoning.providerLevel])),
+        },
+      },
+    },
+  };
+}
+
 export class ReadinessService {
   private readonly models = new Map<string, readonly RouteModelOption[]>();
   constructor(
@@ -147,24 +179,34 @@ export class ReadinessService {
   }
 
   async check(selection: Selection, repositoryPath = process.cwd()): Promise<ReadinessResult> {
-    const effectiveSelection = {
-      provider: this.overrides.provider ?? selection.provider,
-      model: this.overrides.model ?? selection.model,
-      reasoning: this.overrides.reasoning ?? selection.reasoning,
-    };
-    const route = descriptor(effectiveSelection);
+    const profile = parseAgentProfile({ ...BASE_PROFILE, selection });
+    if (!profile.ok || !profile.value.selection) {
+      return { status: "blocked", detected: false, verified: false, code: "selection_unavailable", repair: "choose_detected_route" };
+    }
+    const resolved = resolveRun(profile.value, this.overrides, randomUUID());
+    if (resolved.status !== "ready") {
+      return { status: "blocked", detected: false, verified: false, code: "selection_unavailable", repair: "choose_detected_route" };
+    }
+    const routeSelection = resolved.value.roles[0]?.selection;
+    const provider = routeSelection && Object.hasOwn(REASONING_PROVIDER_MAP.minimal, routeSelection.provider) ? routeSelection.provider as ReasoningProvider : undefined;
+    if (!routeSelection || !provider) {
+      return { status: "blocked", detected: false, verified: false, code: "selection_unavailable", repair: "choose_detected_route" };
+    }
+    const providerSelection = { ...routeSelection, reasoning: REASONING_PROVIDER_MAP[routeSelection.reasoning as ReasoningTier][provider] };
+    const route = descriptor(providerSelection);
     const detected = route ? this.inspection.executableAvailable(route.executable) : false;
     const models = route && detected ? this.discover(route.id, repositoryPath, true) : undefined;
-    const selectedModel = models?.find(({ model }) => model === effectiveSelection.model);
-    if (!route || !detected || !models || (this.inspection.modelOptions !== undefined && (!selectedModel || !selectedModel.reasoningLevels.includes(effectiveSelection.reasoning)))) {
+    const selectedModel = models?.find(({ model }) => model === providerSelection.model);
+    const run = this.inspection.modelOptions === undefined
+      ? resolved.value
+      : route && selectedModel
+        ? clampRunToModel(resolved.value, selectedModel.reasoningLevels.filter((level) => route.reasoningLevels.includes(level)))
+        : undefined;
+    if (!route || !detected || !models || !run) {
       return { status: "blocked", detected, verified: false, code: "selection_unavailable", repair: "choose_detected_route" };
     }
-    const resolved = resolveRun({ ...BASE_PROFILE, selection }, this.overrides, randomUUID());
-    if (resolved.status !== "ready") {
-      return { status: "blocked", detected, verified: false, code: "selection_unavailable", repair: "choose_detected_route" };
-    }
-    const verificationRole = resolved.value.roles.find((role) => role.role === "crewmate") ?? resolved.value.roles[0];
-    const verified = this.verification ? await this.verification.verify(effectiveSelection, verificationRole, repositoryPath).catch(() => false) : false;
-    return { status: verified ? "ready" : "detected", detected: true, verified, run: resolved.value };
+    const verificationRole = run.roles.find((role) => role.role === "crewmate") ?? run.roles[0];
+    const verified = this.verification ? await this.verification.verify(verificationRole.selection, verificationRole, repositoryPath).catch(() => false) : false;
+    return { status: verified ? "ready" : "detected", detected: true, verified, run };
   }
 }

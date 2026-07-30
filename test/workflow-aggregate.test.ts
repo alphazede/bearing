@@ -47,6 +47,8 @@ function envelope(
         payload: { decisionId: "dec-1", answer: "yes" },
         ...overrides,
       } as CommandEnvelopeV1;
+    default:
+      throw new Error(`unsupported test command type: ${overrides.type}`);
     case "recommendExecutionMode":
       return { ...base, payload: { workItems: 2, maxCrewmatesPerExplorer: 3, perAgentTokenEstimate: 10 }, ...overrides } as CommandEnvelopeV1;
     case "approveExecutionMode":
@@ -291,7 +293,10 @@ describe("boundary parsing", () => {
 
   it("rejects malformed and future-schema event envelopes", () => {
     expect(parseEventEnvelope(null).ok).toBe(false);
-    expect(parseEventEnvelope({ schemaVersion: 7 }).reason).toBe("future_schema");
+    const future = parseEventEnvelope({ schemaVersion: 7 });
+    expect(future.ok).toBe(false);
+    if (future.ok) throw new Error("expected future schema rejection");
+    expect(future.reason).toBe("future_schema");
   });
 });
 
@@ -381,5 +386,369 @@ describe("command content hash", () => {
     const c = { ...a, correlationId: "corr-2" };
     expect(hashCommand(a)).toBe(hashCommand(b));
     expect(hashCommand(a)).not.toBe(hashCommand(c));
+  });
+});
+
+// --- Slice 3.4: frozen pre-Phase-3 event corpus ------------------------------
+// Captured from the pre-Phase-3 code path (the tracked build output at commit
+// ea763c4, which predates every Phase 3 selection slice) and committed as data
+// before aggregate.ts was touched. Regenerating these events with the new code
+// would only prove that the new code agrees with itself.
+
+const FROZEN_APPROVED_RUN = [
+    {
+      "schemaVersion": 1,
+      "eventId": "event-1",
+      "runId": "run-legacy-approved",
+      "sequence": 1,
+      "recordedAt": "2026-07-20T00:00:00.000Z",
+      "type": "workRequestCreated",
+      "actor": "owner",
+      "sessionId": "session-owner",
+      "correlationId": "correlation-legacy",
+      "causationId": "command-create",
+      "commandContentHash": "2052b6a3fd7b9599a2a62508db9234912845c9bf12788bf2143382ee4c3d0f75",
+      "payload": {
+        "title": "Legacy run",
+        "goal": "Replay unchanged"
+      },
+      "evidenceRefs": [],
+      "previousHash": "",
+      "hash": "e24065b7c9775f477dd40073e8ab9784a121c1aac23f6bfc2887da1bb12292ea"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "event-2",
+      "runId": "run-legacy-approved",
+      "sequence": 2,
+      "recordedAt": "2026-07-20T00:00:00.000Z",
+      "type": "executionModeRecommended",
+      "actor": "owner",
+      "sessionId": "session-owner",
+      "correlationId": "correlation-legacy",
+      "causationId": "command-recommend",
+      "commandContentHash": "d24452c73508eecb1932df7c14232bdd4c669dc797eb368137e48fb035e2cc41",
+      "payload": {
+        "workItems": 2,
+        "maxCrewmatesPerExplorer": 3,
+        "perAgentTokenEstimate": 10,
+        "recommendedMode": "explorer",
+        "selectedMode": "explorer",
+        "overridden": false,
+        "estimatedAgents": 3,
+        "estimatedTokens": 30,
+        "tradeoffs": {
+          "tokens": "lower manager token overhead",
+          "coordination": "one Explorer coordinates all Crewmates"
+        },
+        "launchAuthorized": false
+      },
+      "evidenceRefs": [],
+      "previousHash": "e24065b7c9775f477dd40073e8ab9784a121c1aac23f6bfc2887da1bb12292ea",
+      "hash": "5fa877e3f4a5b7de983223d401bc976a0bb23fef88f7f2f417aa8406c4025b7e"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "event-3",
+      "runId": "run-legacy-approved",
+      "sequence": 3,
+      "recordedAt": "2026-07-20T00:00:00.000Z",
+      "type": "executionModeApproved",
+      "actor": "owner",
+      "sessionId": "session-owner",
+      "correlationId": "correlation-legacy",
+      "causationId": "command-decision",
+      "commandContentHash": "7c0dd31a4029a5ad640f2e675e331b9dafc006efa9d9710cbb099f3d8b2f8f25",
+      "payload": {
+        "recommendationEventId": "event-2",
+        "selectedMode": "explorer",
+        "overridden": false
+      },
+      "evidenceRefs": [],
+      "previousHash": "5fa877e3f4a5b7de983223d401bc976a0bb23fef88f7f2f417aa8406c4025b7e",
+      "hash": "332b74b71d7c4d3500f47d4236de635dce51958ad6404ecec28a11927765bef6"
+    }
+  ] as unknown as readonly EventEnvelopeV1[];
+
+const FROZEN_OVERRIDDEN_RUN = [
+    {
+      "schemaVersion": 1,
+      "eventId": "event-1",
+      "runId": "run-legacy-overridden",
+      "sequence": 1,
+      "recordedAt": "2026-07-20T00:00:00.000Z",
+      "type": "workRequestCreated",
+      "actor": "owner",
+      "sessionId": "session-owner",
+      "correlationId": "correlation-legacy",
+      "causationId": "command-create",
+      "commandContentHash": "82c2820db631f610afd2dca362d235197bfc7d87c77155ef383e26604fec6a0e",
+      "payload": {
+        "title": "Legacy run",
+        "goal": "Replay unchanged"
+      },
+      "evidenceRefs": [],
+      "previousHash": "",
+      "hash": "2ca35b6c83a241d6f6eb38ef0cfff8a8f64507db58859a1d3762624980898a66"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "event-2",
+      "runId": "run-legacy-overridden",
+      "sequence": 2,
+      "recordedAt": "2026-07-20T00:00:00.000Z",
+      "type": "executionModeRecommended",
+      "actor": "owner",
+      "sessionId": "session-owner",
+      "correlationId": "correlation-legacy",
+      "causationId": "command-recommend",
+      "commandContentHash": "59c0055ee4cf0e3681e32476d271a8c342219684c4d7e6dfb4edb8c3a7df7307",
+      "payload": {
+        "workItems": 5,
+        "maxCrewmatesPerExplorer": 2,
+        "perAgentTokenEstimate": 1000,
+        "recommendedMode": "expedition",
+        "selectedMode": "expedition",
+        "overridden": false,
+        "estimatedAgents": 9,
+        "estimatedTokens": 9000,
+        "tradeoffs": {
+          "tokens": "higher Navigator and Explorer token overhead",
+          "coordination": "bounded Explorer groups reduce coordination fan-out"
+        },
+        "launchAuthorized": false
+      },
+      "evidenceRefs": [],
+      "previousHash": "2ca35b6c83a241d6f6eb38ef0cfff8a8f64507db58859a1d3762624980898a66",
+      "hash": "92dc33f249aba7f04ebbd8b18527011f8fff1c4072ef98f5fcfe16066809e39f"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "event-3",
+      "runId": "run-legacy-overridden",
+      "sequence": 3,
+      "recordedAt": "2026-07-20T00:00:00.000Z",
+      "type": "executionModeOverridden",
+      "actor": "owner",
+      "sessionId": "session-owner",
+      "correlationId": "correlation-legacy",
+      "causationId": "command-decision",
+      "commandContentHash": "9f9398030f9aa3e1f3cc746ef8f1002f844bbc829ed4553017dd417917496e3f",
+      "payload": {
+        "recommendationEventId": "event-2",
+        "selectedMode": "explorer",
+        "overridden": true
+      },
+      "evidenceRefs": [],
+      "previousHash": "92dc33f249aba7f04ebbd8b18527011f8fff1c4072ef98f5fcfe16066809e39f",
+      "hash": "b9ad4cb1251173a85f376951ff9a8191f8440bd07d99fad69d68cebb77e5537b"
+    }
+  ] as unknown as readonly EventEnvelopeV1[];
+
+const FROZEN_APPROVED_RECOMMENDATION = {
+    "workItems": 2,
+    "maxCrewmatesPerExplorer": 3,
+    "perAgentTokenEstimate": 10,
+    "recommendedMode": "explorer",
+    "selectedMode": "explorer",
+    "overridden": false,
+    "estimatedAgents": 3,
+    "estimatedTokens": 30,
+    "tradeoffs": {
+      "tokens": "lower manager token overhead",
+      "coordination": "one Explorer coordinates all Crewmates"
+    },
+    "launchAuthorized": false,
+    "eventId": "event-2"
+  };
+
+const FROZEN_OVERRIDDEN_RECOMMENDATION = {
+    "workItems": 5,
+    "maxCrewmatesPerExplorer": 2,
+    "perAgentTokenEstimate": 1000,
+    "recommendedMode": "expedition",
+    "selectedMode": "expedition",
+    "overridden": false,
+    "estimatedAgents": 9,
+    "estimatedTokens": 9000,
+    "tradeoffs": {
+      "tokens": "higher Navigator and Explorer token overhead",
+      "coordination": "bounded Explorer groups reduce coordination fan-out"
+    },
+    "launchAuthorized": false,
+    "eventId": "event-2"
+  };
+
+describe("frozen pre-Phase-3 replay corpus", () => {
+  it("replays a legacy approved run to the same state", () => {
+    const state = replay(FROZEN_APPROVED_RUN);
+    expect(state.runId).toBe("run-legacy-approved");
+    expect(state.revision).toBe(3);
+    expect(state.events).toEqual(FROZEN_APPROVED_RUN);
+    expect(state.executionRecommendation).toEqual(FROZEN_APPROVED_RECOMMENDATION);
+    expect(state.executionApproval).toEqual({ eventId: "event-3", kind: "owner-approval", selectedMode: "explorer" });
+  });
+
+  it("replays a legacy overridden run to the same state", () => {
+    const state = replay(FROZEN_OVERRIDDEN_RUN);
+    expect(state.revision).toBe(3);
+    expect(state.executionRecommendation).toEqual(FROZEN_OVERRIDDEN_RECOMMENDATION);
+    expect(state.executionApproval).toEqual({ eventId: "event-3", kind: "owner-override", selectedMode: "explorer" });
+  });
+
+  it("carries no algorithm version and keeps its recorded hash chain", () => {
+    for (const corpus of [FROZEN_APPROVED_RUN, FROZEN_OVERRIDDEN_RUN]) {
+      const recommended = corpus.find((event) => event.type === "executionModeRecommended")!;
+      expect(Object.keys(recommended.payload)).toHaveLength(10);
+      expect(recommended.payload.algorithmVersion).toBeUndefined();
+      expect(parseEventEnvelope(recommended).ok).toBe(true);
+      let previousHash = "";
+      for (const event of corpus) {
+        const { hash: _hash, ...body } = event;
+        expect(event.previousHash).toBe(previousHash);
+        expect(event.hash).toBe(hashEvent(body));
+        previousHash = event.hash;
+      }
+    }
+  });
+
+  it("still raises a replay error when a legacy derived field is hand-edited", () => {
+    const tampered = FROZEN_APPROVED_RUN.map((event) => event.type === "executionModeRecommended"
+      ? { ...event, payload: { ...event.payload, estimatedAgents: 4 } }
+      : event);
+    expect(() => replay(tampered)).toThrow(/execution recommendation is not deterministic/);
+  });
+});
+
+// --- Slice 3.4: version-dispatched replay derivation -------------------------
+
+const SELECTION_BASE = {
+  algorithmVersion: 2 as const,
+  threshold: 8,
+  hardTriggers: { multiRepository: false, securityCriticalIntegration: false, dataMigration: false, irreversibleOperations: false, phaseExplorerCount: 0 },
+  complexity: { phaseCount: 0, sliceCount: 0, dependencyEdgeCount: 0, sharedFileOverlapCount: 0, serviceCount: 0, expectedConcurrency: 0, integrationCheckpointCount: 0, riskRating: "low" as const },
+  subExplorerCount: 0,
+};
+
+function selection(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ...SELECTION_BASE, ...overrides };
+}
+
+/** create → recommend, using the aggregate's own decide path. */
+function recommendRun(payload: Record<string, unknown>, runId = RUN_ID): readonly EventEnvelopeV1[] {
+  const d = deps();
+  let state = initialRunState(runId);
+  const created = decide(state, { ...envelope({ commandId: "c1", type: "createWorkRequest" }), runId } as CommandEnvelopeV1, d);
+  if (!created.ok) throw new Error(`create failed: ${created.reason}`);
+  state = created.state;
+  const recommended = decide(state, {
+    ...envelope({ commandId: "c2", type: "recommendExecutionMode", expectedRevision: 1 }), runId, payload,
+  } as unknown as CommandEnvelopeV1, d);
+  if (!recommended.ok) throw new Error(`recommend failed: ${recommended.reason}`);
+  return recommended.state.events;
+}
+
+function tamper(events: readonly EventEnvelopeV1[], patch: Record<string, unknown>): readonly EventEnvelopeV1[] {
+  return events.map((event) => event.type === "executionModeRecommended"
+    ? { ...event, payload: { ...event.payload, ...patch } }
+    : event);
+}
+
+const THREE_INPUTS = { workItems: 2, maxCrewmatesPerExplorer: 3, perAgentTokenEstimate: 10 };
+
+describe("version-dispatched selection", () => {
+  it("keeps the ten-key version-1 payload when no selection vector is supplied", () => {
+    const events = recommendRun(THREE_INPUTS);
+    const payload = events[1].payload;
+    expect(Object.keys(payload)).toHaveLength(10);
+    expect(payload.algorithmVersion).toBeUndefined();
+    expect(payload.recommendedMode).toBe("explorer");
+    expect(parseEventEnvelope(events[1]).ok).toBe(true);
+    expect(replay(events).executionRecommendation).toMatchObject({ recommendedMode: "explorer", eventId: "evt-2" });
+  });
+
+  it("emits the fifteen-key version-2 payload when a selection vector is supplied", () => {
+    const events = recommendRun({ ...THREE_INPUTS, selection: selection({ hardTriggers: { ...SELECTION_BASE.hardTriggers, dataMigration: true } }) });
+    const payload = events[1].payload;
+    expect(Object.keys(payload)).toHaveLength(15);
+    expect(payload).toMatchObject({
+      algorithmVersion: 2, complexityScore: 0, firedHardTriggers: ["data_migration"],
+      recommendedOrchestration: "trail-boss", recommendedMode: "expedition", launchAuthorized: false,
+    });
+    expect(parseEventEnvelope(events[1]).ok).toBe(true);
+    expect(replay(events).executionRecommendation).toMatchObject({ recommendedOrchestration: "trail-boss" });
+  });
+
+  it("re-derives from the threshold recorded in the event, not from any module default", () => {
+    const critical = { complexity: { ...SELECTION_BASE.complexity, riskRating: "critical" as const } };
+    const lenient = recommendRun({ ...THREE_INPUTS, selection: selection({ ...critical, threshold: 4 }) }, "run-lenient");
+    const strict = recommendRun({ ...THREE_INPUTS, selection: selection({ ...critical, threshold: 5 }) }, "run-strict");
+    expect(lenient[1].payload.recommendedOrchestration).toBe("trail-boss");
+    expect(strict[1].payload.recommendedOrchestration).toBe("explorer");
+    expect(replay(lenient).executionRecommendation).toMatchObject({ recommendedOrchestration: "trail-boss" });
+    expect(replay(strict).executionRecommendation).toMatchObject({ recommendedOrchestration: "explorer" });
+  });
+
+  it.each([
+    ["complexityScore", { complexityScore: 1 }],
+    ["firedHardTriggers", { firedHardTriggers: ["data_migration"] }],
+    ["recommendedOrchestration", { recommendedOrchestration: "trail-boss", recommendedMode: "expedition" }],
+    ["recommendedMode", { recommendedMode: "expedition" }],
+    ["estimatedAgents", { estimatedAgents: 99 }],
+  ])("raises a replay error when %s is hand-edited on a version-2 event", (_label, patch) => {
+    const events = recommendRun({ ...THREE_INPUTS, selection: selection() });
+    expect(() => replay(tamper(events, patch))).toThrow(/execution recommendation is not deterministic/);
+  });
+
+  it("raises a replay error when the recorded threshold is hand-edited", () => {
+    const critical = { complexity: { ...SELECTION_BASE.complexity, riskRating: "critical" as const } };
+    const events = recommendRun({ ...THREE_INPUTS, selection: selection({ ...critical, threshold: 8 }) });
+    expect(events[1].payload.recommendedOrchestration).toBe("explorer");
+    expect(() => replay(tamper(events, { selection: selection({ ...critical, threshold: 4 }) }))).toThrow(/execution recommendation is not deterministic/);
+  });
+
+  it.each([1, 3, "2", null])("raises a replay error for algorithm version %s", (algorithmVersion) => {
+    const events = recommendRun({ ...THREE_INPUTS, selection: selection() });
+    expect(() => replay(tamper(events, { algorithmVersion }))).toThrow(/unknown execution selection algorithm version/);
+  });
+
+  it("fails closed when a version-2 event carries no usable signal vector", () => {
+    const events = recommendRun({ ...THREE_INPUTS, selection: selection() });
+    expect(() => replay(tamper(events, { selection: { threshold: 8 } }))).toThrow(/execution recommendation is not deterministic/);
+  });
+
+  it("leaves the owner approval and override paths untouched on a version-2 recommendation", () => {
+    const d = deps();
+    let state = initialRunState(RUN_ID);
+    const created = decide(state, envelope({ commandId: "c1", type: "createWorkRequest" }), d);
+    if (!created.ok) throw new Error("create failed");
+    state = created.state;
+    const recommended = decide(state, {
+      ...envelope({ commandId: "c2", type: "recommendExecutionMode", expectedRevision: 1 }),
+      payload: { ...THREE_INPUTS, selection: selection({ hardTriggers: { ...SELECTION_BASE.hardTriggers, dataMigration: true } }) },
+    } as unknown as CommandEnvelopeV1, d);
+    if (!recommended.ok) throw new Error("recommend failed");
+    state = recommended.state;
+    expect(state.executionRecommendation).toMatchObject({ recommendedMode: "expedition", launchAuthorized: false });
+
+    const agentApproval = decide(state, {
+      ...envelope({ commandId: "c3", type: "approveExecutionMode", expectedRevision: 2 }),
+      payload: { recommendationEventId: "evt-2" }, session: { sessionId: "sess-1", actor: "agent" },
+    } as CommandEnvelopeV1, d);
+    expect(agentApproval).toMatchObject({ ok: false, reason: "non_owner_approval" });
+
+    const sameMode = decide(state, {
+      ...envelope({ commandId: "c4", type: "overrideExecutionMode", expectedRevision: 2 }),
+      payload: { recommendationEventId: "evt-2", selectedMode: "expedition" },
+    } as CommandEnvelopeV1, d);
+    expect(sameMode).toMatchObject({ ok: false, reason: "illegal_transition" });
+
+    const approved = decide(state, {
+      ...envelope({ commandId: "c5", type: "approveExecutionMode", expectedRevision: 2 }),
+      payload: { recommendationEventId: "evt-2" },
+    } as CommandEnvelopeV1, d);
+    if (!approved.ok) throw new Error("approve failed");
+    expect(approved.events[0].payload).toEqual({ recommendationEventId: "evt-2", selectedMode: "expedition", overridden: false });
+    expect(replay(approved.state.events).executionApproval).toEqual({ eventId: "evt-3", kind: "owner-approval", selectedMode: "expedition" });
   });
 });

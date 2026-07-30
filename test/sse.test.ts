@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -215,7 +215,7 @@ function call(
 
 async function launch() {
   const output: string[] = [];
-  const deps: Required<LauncherDeps> = {
+  const deps: LauncherDeps = {
     openBrowser: () => {},
     stdout: { write: (value) => (output.push(value), true) },
     stderr: { write: () => true },
@@ -303,6 +303,7 @@ describe("SSE raw HTTP boundary", () => {
     });
 
     const root = await mkdtemp(join(tmpdir(), "bearing-sse-"));
+    await mkdir(join(root, ".git"));
     roots.push(root);
     expect((await call(
       port,
@@ -342,6 +343,7 @@ describe("SSE raw HTTP boundary", () => {
     const { port, headers, cookie } = await launch();
     const authenticated = { ...headers, cookie };
     const root = await mkdtemp(join(tmpdir(), "bearing-sse-"));
+    await mkdir(join(root, ".git"));
     roots.push(root);
     expect((await call(
       port,

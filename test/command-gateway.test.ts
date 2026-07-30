@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { request } from "node:http";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -50,7 +50,7 @@ function call(
 
 async function launch() {
   const output: string[] = [];
-  const deps: Required<LauncherDeps> = {
+  const deps: LauncherDeps = {
     openBrowser: () => {},
     stdout: { write: (value) => (output.push(value), true) },
     stderr: { write: () => true },
@@ -111,6 +111,7 @@ describe("command gateway", () => {
   it("rejects every malformed or unauthenticated raw request without mutation", async () => {
     const { port, headers, cookie } = await launch();
     const root = await mkdtemp(join(tmpdir(), "bearing-gateway-"));
+    await mkdir(join(root, ".git"));
     roots.push(root);
     expect((await call(
       port,
@@ -155,6 +156,7 @@ describe("command gateway", () => {
   it("durably accepts once, then rejects stale and conflicting duplicate commands", async () => {
     const { port, headers, cookie } = await launch();
     const root = await mkdtemp(join(tmpdir(), "bearing-gateway-"));
+    await mkdir(join(root, ".git"));
     roots.push(root);
     const authenticated = { ...headers, cookie };
     expect((await call(
@@ -188,6 +190,7 @@ describe("command gateway", () => {
     expect((await call(port, "GET", "/api/v1/runs/run", { ...headers, cookie })).status).toBe(409);
 
     const root = await mkdtemp(join(tmpdir(), "bearing-projection-"));
+    await mkdir(join(root, ".git"));
     roots.push(root);
     const authenticated = { ...headers, cookie };
     expect((await call(port, "POST", "/api/v1/repository", authenticated, JSON.stringify({ path: root }))).status).toBe(200);
@@ -204,6 +207,7 @@ describe("command gateway", () => {
   it("accepts the browser's exact create, recommend, approve, and override envelopes without launching", async () => {
     const { port, headers, cookie } = await launch();
     const root = await mkdtemp(join(tmpdir(), "bearing-browser-"));
+    await mkdir(join(root, ".git"));
     roots.push(root);
     const authenticated = { ...headers, cookie };
     expect((await call(port, "POST", "/api/v1/repository", authenticated, JSON.stringify({ path: root }))).status).toBe(200);
@@ -252,6 +256,7 @@ describe("command gateway", () => {
   it("rejects recommendation estimates outside the browser bounds", async () => {
     const { port, headers, cookie } = await launch();
     const root = await mkdtemp(join(tmpdir(), "bearing-bounds-"));
+    await mkdir(join(root, ".git"));
     roots.push(root);
     const authenticated = { ...headers, cookie };
     await call(port, "POST", "/api/v1/repository", authenticated, JSON.stringify({ path: root }));

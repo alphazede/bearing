@@ -1,5 +1,5 @@
 import { createServer, request, type Server } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -39,6 +39,7 @@ async function onboard(port: string, session: LocalSessionService): Promise<stri
   const exchanged = session.exchange(session.capability); if (!exchanged.ok) throw new Error("exchange failed");
   const cookie = `${SESSION_COOKIE_NAME}=${exchanged.cookieValue}`;
   const root = await mkdtemp(join(tmpdir(), "bearing-showcase-")); roots.push(root);
+  await mkdir(join(root, ".git"));
   expect((await call(port, "/api/v1/repository", cookie, "POST", JSON.stringify({ path: root }))).status).toBe(200);
   return cookie;
 }
@@ -51,6 +52,7 @@ describe("native browser showcase HTTP", () => {
     const cookie = `${SESSION_COOKIE_NAME}=${exchanged.cookieValue}`;
     expect((await call(port, "/api/v1/workflows", cookie)).status).toBe(409);
     const root = await mkdtemp(join(tmpdir(), "bearing-showcase-")); roots.push(root);
+    await mkdir(join(root, ".git"));
     await call(port, "/api/v1/repository", cookie, "POST", JSON.stringify({ path: root }));
     const catalog = await call(port, "/api/v1/workflows", cookie);
     expect(catalog.status).toBe(200);

@@ -4,6 +4,7 @@ import { createReadStream } from "node:fs";
 import { lstat, readFile, readlink, realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { classifyWriteSetClause } from "./plan-structure.js";
 const exec = promisify(execFile);
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_ITEMS = 128;
@@ -21,16 +22,21 @@ function field(section, name) {
     const label = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return new RegExp(`^\\*\\*${label}\\.\\*\\*\\s*(.+)$`, "mi").exec(section)?.[1]?.trim();
 }
-function sections(content, pattern) {
+function reject(reason, context = {}) {
+    return { ok: false, reason, ...context };
+}
+function sections(content, pattern, duplicateReason) {
     const matches = [...content.matchAll(pattern)];
     const result = new Map();
     for (let index = 0; index < matches.length; index += 1) {
         const id = matches[index].groups?.id;
-        if (!id || result.has(id))
-            return undefined;
+        if (!id)
+            return reject("slice_structure_invalid");
+        if (result.has(id))
+            return reject(duplicateReason, { sliceId: id });
         result.set(id, content.slice(matches[index].index ?? 0, matches[index + 1]?.index ?? content.length));
     }
-    return result;
+    return { ok: true, value: result };
 }
 async function source(root, path) {
     if (!safePath(path))
@@ -67,49 +73,96 @@ function acceptance(plan, requirementIds) {
     return requirementIds[0];
 }
 function parseContract(plan, implementation, seit, currentSlice) {
-    const sliceSections = sections(implementation, SLICE);
-    const manifests = sections(implementation, MANIFEST);
-    if (!sliceSections?.size || !manifests || sliceSections.size !== manifests.size || sliceSections.size > MAX_ITEMS)
-        return undefined;
-    if (currentSlice && (!sliceSections.has(currentSlice) || !manifests.has(currentSlice)))
-        return undefined;
-    const selectedSlices = currentSlice ? new Map([[currentSlice, sliceSections.get(currentSlice)]]) : sliceSections;
+    const sliceSections = sections(implementation, SLICE, "duplicate_slice_id");
+    const manifests = sections(implementation, MANIFEST, "duplicate_manifest_id");
+    if (!sliceSections.ok)
+        return sliceSections;
+    if (!manifests.ok)
+        return manifests;
+    if (!sliceSections.value.size || sliceSections.value.size !== manifests.value.size)
+        return reject("slice_structure_invalid");
+    if (sliceSections.value.size > MAX_ITEMS)
+        return reject("contract_limit_exceeded", { field: "Slices" });
+    if (currentSlice && (!sliceSections.value.has(currentSlice) || !manifests.value.has(currentSlice)))
+        return reject("slice_not_found", { field: "currentSlice" });
+    const selectedSlices = currentSlice ? new Map([[currentSlice, sliceSections.value.get(currentSlice)]]) : sliceSections.value;
     const allowedPaths = [];
     const commands = [];
     const requirements = [];
     for (const [id, slice] of selectedSlices) {
-        const manifest = manifests.get(id);
+        const manifest = manifests.value.get(id);
+        if (!manifest)
+            return reject("slice_structure_invalid", { sliceId: id, field: "execution manifest" });
         const goal = field(slice, "Goal");
         const requirementField = field(slice, "Requirement IDs");
-        const writeSet = manifest && field(manifest, "Write set");
-        const commandField = manifest && field(manifest, "Command IDs");
-        if (!goal || !requirementField || !writeSet || !commandField || !boundedText(goal, 512))
-            return undefined;
+        const writeSet = field(manifest, "Write set");
+        const commandField = field(manifest, "Command IDs");
+        if (!goal)
+            return reject("field_missing", { sliceId: id, field: "Goal" });
+        if (!requirementField)
+            return reject("field_missing", { sliceId: id, field: "Requirement IDs" });
+        if (!writeSet)
+            return reject("field_missing", { sliceId: id, field: "Write set" });
+        if (!commandField)
+            return reject("field_missing", { sliceId: id, field: "Command IDs" });
+        if (!boundedText(goal, 512)) {
+            return goal.length > 512
+                ? reject("goal_too_long", { sliceId: id, field: "Goal", detail: `length=${goal.length} limit=512` })
+                : reject("field_invalid", { sliceId: id, field: "Goal" });
+        }
+        const writeSetClauseRejection = classifyWriteSetClause(writeSet);
+        if (writeSetClauseRejection) {
+            return reject("write_set_negation", {
+                sliceId: id,
+                field: "Write set",
+                detail: writeSetClauseRejection.reason,
+            });
+        }
         const paths = [...writeSet.matchAll(/`([^`]+)`/g)].map((match) => match[1]);
         const noWrites = /\b(?:none|no writes?(?: required)?)\b/i.test(writeSet);
-        if (noWrites && paths.length || !noWrites && (!/\bonly\b/i.test(writeSet) || !paths.length) || paths.some((path) => !safePath(path)) || new Set(paths).size !== paths.length)
-            return undefined;
+        if (noWrites && paths.length)
+            return reject("write_set_conflict", { sliceId: id, field: "Write set" });
+        if (!noWrites && !/\bonly\b/i.test(writeSet))
+            return reject("write_set_only_missing", { sliceId: id, field: "Write set" });
+        if (!noWrites && !paths.length)
+            return reject("write_set_empty", { sliceId: id, field: "Write set" });
+        const unsafe = paths.find((path) => !safePath(path));
+        if (unsafe)
+            return reject("write_set_path_invalid", { sliceId: id, field: "Write set", detail: unsafe });
+        const duplicate = paths.find((path, index) => paths.indexOf(path) !== index);
+        if (duplicate)
+            return reject("write_set_path_duplicate", { sliceId: id, field: "Write set", detail: duplicate });
+        const requirementIds = [...requirementField.matchAll(/\b(?:AC|RISK)-[A-Z0-9][A-Z0-9.-]*\b/gi)].map((match) => match[0].toUpperCase());
+        if (!requirementIds.length)
+            return reject("requirement_id_invalid", { sliceId: id, field: "Requirement IDs" });
         const ids = commandIds(commandField);
-        if (!ids.length || ids.some((command) => !SAFE_ID.test(command) || !new RegExp(`\\b${command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(seit)))
-            return undefined;
+        if (!ids.length || ids.some((command) => !SAFE_ID.test(command)))
+            return reject("command_id_invalid", { sliceId: id, field: "Command IDs" });
+        const unmapped = ids.find((command) => !new RegExp(`\\b${command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(seit));
+        if (unmapped)
+            return reject("command_id_unmapped", { sliceId: id, field: "Command IDs", detail: unmapped });
         allowedPaths.push(...paths);
         commands.push(...ids);
-        requirements.push(...[...requirementField.matchAll(/\b(?:AC|RISK)-[A-Z0-9][A-Z0-9.-]*\b/gi)].map((match) => match[0].toUpperCase()));
+        requirements.push(...requirementIds);
     }
     const uniquePaths = [...new Set(allowedPaths)].sort();
     const uniqueCommands = [...new Set(commands)].sort();
-    if (!uniquePaths.length || uniquePaths.length > MAX_ITEMS || uniqueCommands.length > MAX_ITEMS)
-        return undefined;
+    if (!uniquePaths.length)
+        return reject("write_set_empty", { field: "Write set" });
+    if (uniquePaths.length > MAX_ITEMS)
+        return reject("contract_limit_exceeded", { field: "Write set" });
+    if (uniqueCommands.length > MAX_ITEMS)
+        return reject("contract_limit_exceeded", { field: "Command IDs" });
     const criterion = acceptance(plan, requirements);
     if (!criterion)
-        return undefined;
-    return {
-        currentAcceptanceCriterion: criterion,
-        allowedPaths: uniquePaths,
-        requiredEvidence: uniqueCommands.map((id) => `${id}: passing command evidence`),
-        seitCommandIds: uniqueCommands,
-        remainingSlices: [...selectedSlices.keys()],
-    };
+        return reject("acceptance_missing", { field: "Requirement IDs" });
+    return { ok: true, value: {
+            currentAcceptanceCriterion: criterion,
+            allowedPaths: uniquePaths,
+            requiredEvidence: uniqueCommands.map((id) => `${id}: passing command evidence`),
+            seitCommandIds: uniqueCommands,
+            remainingSlices: [...selectedSlices.keys()],
+        } };
 }
 async function fingerprint(root, path) {
     const candidate = resolve(root, path);
@@ -183,6 +236,10 @@ export async function snapshotGitState(root, beforeHead) {
                 return undefined;
             const status = record.slice(0, 2);
             const path = record.slice(3);
+            // Git reports an empty untracked directory as `dir/` (trailing slash); it holds no
+            // content to snapshot, so skip it rather than failing the whole snapshot closed.
+            if (status === "??" && path.endsWith("/"))
+                continue;
             if (!safePath(path))
                 return undefined;
             if (!(status === "??" && path.startsWith(".bearing/")))
@@ -206,37 +263,49 @@ export async function snapshotGitState(root, beforeHead) {
     }
 }
 export async function createFocusContext(input) {
-    if (!safePath(input.planDirectory) || !boundedText(input.objective))
-        return undefined;
+    if (!safePath(input.planDirectory))
+        return reject("input_invalid", { field: "planDirectory" });
+    if (!boundedText(input.objective))
+        return reject("input_invalid", { field: "objective" });
     const planPath = posix.join(input.planDirectory, "plan-spec.md");
     const implementationPath = posix.join(input.planDirectory, "implementation.md");
     const seitPath = posix.join(input.planDirectory, "seit.md");
     const [plan, implementation, seit, snapshot] = await Promise.all([
         source(input.root, planPath), source(input.root, implementationPath), source(input.root, seitPath), snapshotGitState(input.root),
     ]);
-    if (!plan || !implementation || !seit || !snapshot)
-        return undefined;
+    if (!plan)
+        return reject("source_invalid", { field: "plan-spec.md" });
+    if (!implementation)
+        return reject("source_invalid", { field: "implementation.md" });
+    if (!seit)
+        return reject("source_invalid", { field: "seit.md" });
+    if (!snapshot)
+        return reject("git_state");
     const contract = parseContract(plan, implementation, seit, input.currentSlice);
     const blocker = input.currentBlocker ?? "none";
     const gate = input.gateFailureFingerprint ?? "none";
-    if (!contract || !boundedText(blocker) || !boundedText(gate, 512))
-        return undefined;
+    if (!contract.ok)
+        return contract;
+    if (!boundedText(blocker))
+        return reject("input_invalid", { field: "currentBlocker" });
+    if (!boundedText(gate, 512))
+        return reject("input_invalid", { field: "gateFailureFingerprint" });
     const reviewPath = posix.join(input.planDirectory, "review.html");
-    return {
-        envelope: {
-            version: 1,
-            role: input.role,
-            immutableObjective: input.objective,
-            ...contract,
-            allowedPaths: [...new Set([...contract.allowedPaths, reviewPath])].sort(),
-            currentBlocker: blocker,
-            gateFailureFingerprint: gate,
-            prohibition: "Do not perform unrelated work.",
-        },
-        reviewPath,
-        beforeHead: snapshot.head,
-        before: snapshot.paths,
-    };
+    return { ok: true, value: {
+            envelope: {
+                version: 1,
+                role: input.role,
+                immutableObjective: input.objective,
+                ...contract.value,
+                allowedPaths: [...new Set([...contract.value.allowedPaths, reviewPath])].sort(),
+                currentBlocker: blocker,
+                gateFailureFingerprint: gate,
+                prohibition: "Do not perform unrelated work.",
+            },
+            reviewPath,
+            beforeHead: snapshot.head,
+            before: snapshot.paths,
+        } };
 }
 function validEvidence(required, evidence) {
     if (evidence.length !== required.length || evidence.length > MAX_ITEMS)
@@ -263,6 +332,19 @@ export async function validateFocusCompletion(context, root, artifacts, evidence
         return { ok: false, reason: "path_outside_write_set" };
     if (changed.some((path) => !artifacts.includes(path)))
         return { ok: false, reason: "artifact_missing" };
+    // The receipt's artifact list and the paths that actually changed must be the SAME set, not merely
+    // overlapping. Enforcing only `changed ⊆ artifacts` lets an agent declare a production file it never
+    // touched: declare src/thing.ts plus its test, change only the test, and every other check still
+    // passes — there is a product change, and nothing changed outside the write set. That is the exact
+    // shape of a fabricated fix, and it is the failure this boundary exists to refuse.
+    if (artifacts.some((path) => !changed.includes(path)))
+        return { ok: false, reason: "artifact_unchanged" };
+    // A declared command that ran and FAILED is a regression signal, not a gap in the evidence. Folding
+    // both into evidence_invalid gave a broken build the same soft verdict as a missing summary, so the
+    // one outcome that means "previously-working behaviour stopped working" was the easiest to overlook.
+    if (evidence.some((item) => item && typeof item === "object" && SAFE_ID.test(item.commandId) && item.status === "failed")) {
+        return { ok: false, reason: "command_regressed" };
+    }
     if (!validEvidence(context.envelope.seitCommandIds, evidence))
         return { ok: false, reason: "evidence_invalid" };
     if (!changed.some((path) => path !== context.reviewPath))

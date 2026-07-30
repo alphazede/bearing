@@ -30,9 +30,26 @@ class FakeRunner implements PickerProcessRunner {
 describe("RepositoryChoiceService", () => {
   it("discovers the nearest Git root and otherwise falls back to launch cwd", async () => {
     const git = await root(); await mkdir(join(git, ".git")); const nested = join(git, "a", "b"); await mkdir(nested, { recursive: true });
-    expect((await new RepositoryChoiceService({ launchCwd: nested, platform: "linux", runner: new FakeRunner(new Set()), readLinuxRelease: async () => undefined }).options()).current).toEqual({ path: git, source: "git-root" });
+    const gitOptions = await new RepositoryChoiceService({ launchCwd: nested, platform: "linux", runner: new FakeRunner(new Set()), readLinuxRelease: async () => undefined }).options();
+    if ("unavailable" in gitOptions) throw new Error("expected Git repository options");
+    expect(gitOptions.current).toEqual({ path: git, source: "git-root", isGitRoot: true });
     const cwd = await plainRoot();
-    expect((await new RepositoryChoiceService({ launchCwd: cwd, platform: "linux", runner: new FakeRunner(new Set()), readLinuxRelease: async () => undefined }).options()).current).toEqual({ path: cwd, source: "cwd" });
+    const cwdOptions = await new RepositoryChoiceService({ launchCwd: cwd, platform: "linux", runner: new FakeRunner(new Set()), readLinuxRelease: async () => undefined }).options();
+    if ("unavailable" in cwdOptions) throw new Error("expected cwd repository options");
+    expect(cwdOptions.current).toEqual({ path: cwd, source: "cwd", isGitRoot: false });
+  });
+
+  it("surfaces an unavailable launch cwd without rejecting", async () => {
+    const cwd = await root(); await rm(cwd, { recursive: true });
+    const service = new RepositoryChoiceService({ launchCwd: cwd, platform: "linux", runner: new FakeRunner(new Set()) });
+    await expect(service.options()).resolves.toEqual({ unavailable: "launch_cwd_unavailable" });
+    await expect(service.resolve("current")).resolves.toEqual({ unavailable: "launch_cwd_unavailable" });
+  });
+
+  it("exposes the injected known-agent realpaths", () => {
+    const paths = ["/opt/agents/codex", "/opt/agents/claude"] as const;
+    const service = new RepositoryChoiceService({ agentExecutableRealpaths: () => paths });
+    expect(service.agentExecutableRealpaths()).toBe(paths);
   });
 
   it("reports display-only platform, bounded distro, and picker capability", async () => {
@@ -53,7 +70,9 @@ describe("RepositoryChoiceService", () => {
     for (const [platform, available, executable, args] of cases) {
       const output = platform === "win32" ? "C:\\work\\repo\r\n" : "/tmp/repository\n";
       const runner = new FakeRunner(available, { exitCode: 0, stdout: output });
-      expect((await new RepositoryChoiceService({ launchCwd: cwd, platform, runner }).resolve("browse")).result).toBe("selected");
+      const resolved = await new RepositoryChoiceService({ launchCwd: cwd, platform, runner }).resolve("browse");
+      if ("unavailable" in resolved) throw new Error("expected picker result");
+      expect(resolved.result).toBe("selected");
       expect(runner.calls[0]).toMatchObject({ executable, timeoutMs: 300_000, maxOutputBytes: 4096 });
       expect(runner.calls[0].args).toEqual([...args]);
     }
@@ -92,7 +111,9 @@ describe("RepositoryChoiceService", () => {
       [{ exitCode: 0, stdout: "x".repeat(4097) }, "invalid"],
     ] as const) {
       const service = new RepositoryChoiceService({ launchCwd: cwd, platform: "linux", runner: new FakeRunner(new Set(["zenity"]), processResult) });
-      expect((await service.resolve("browse")).result).toBe(result);
+      const resolved = await service.resolve("browse");
+      if ("unavailable" in resolved) throw new Error("expected classified picker result");
+      expect(resolved.result).toBe(result);
     }
   });
 });

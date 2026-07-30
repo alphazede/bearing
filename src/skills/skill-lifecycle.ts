@@ -3,8 +3,8 @@ import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 export const SKILL_LIFECYCLE_SCHEMA_VERSION = 1 as const;
 
 export const SKILL_NAMES = [
-  "set-bearings", "gather-supplies", "map-the-route", "navigator",
-  "explorer", "crewmate", "surveyor",
+  "repository-fit", "set-bearings", "gather-supplies", "map-the-route", "navigator",
+  "explorer", "crewmate", "validator", "grader", "park-ranger", "surveyor",
 ] as const;
 export type SkillName = (typeof SKILL_NAMES)[number];
 
@@ -41,17 +41,21 @@ const characterization = (
   noOp: "none found", humanReview: "pending", changeStatus: "unchanged", compatibility: "canonical-only", retirement: "not-eligible",
 });
 
-/** Pinned characterization of the seven workflow skills shipped in this package. */
+/** Pinned characterization of the eleven workflow skills shipped in this package. */
 export const SKILL_CHARACTERIZATION_MANIFEST = {
   schemaVersion: SKILL_LIFECYCLE_SCHEMA_VERSION,
   skills: [
-    characterization("set-bearings", "Set Bearings", "Bounded workspace and repository-map policy.", "Start or resume a plan workspace.", "Bearing enters Set Bearings.", "Create only the workspace, stub, and repository map.", "Do not trigger for a tentative planning discussion.", "28e968fbb532c464f6d146d4f897c95b03c24d6d54cf10b799da538073f4198e", 14),
-    characterization("gather-supplies", "Gather Supplies", "Material-decision and specification policy.", "Harden a plan specification.", "Bearing enters Gather Supplies.", "Resolve only material decisions and write the specification.", "Do not trigger for a request to merely summarize documentation.", "9c1be46f8e895fc88eceb178d4f8f019127986d2aac9c723c592dadf37d95774", 16),
-    characterization("map-the-route", "Map the Route", "Design, SEIT, and implementation-route policy.", "Design an approved plan.", "Bearing enters Map the Route.", "Write design and SEIT, then draft implementation after validation.", "Do not trigger for a request to execute an existing route.", "5771ab35c2138fac7d9366e24be1acc70730881863dd367e777ad8799c310da8", 23),
-    characterization("navigator", "Navigator", "Dependent-wave execution and authority policy.", "Run dependent implementation waves.", "The owner selects Expedition.", "Coordinate independent Explorer lanes by wave.", "Do not trigger for one bounded route with no parallel lanes.", "8a8361798f04711171e8c66c7bbec96fabc0100f17f9284d8b43a5dd601833a1", 18),
-    characterization("explorer", "Explorer", "Bounded route execution and validation policy.", "Execute one approved route.", "The owner selects Explorer or Navigator delegates a lane.", "Apply Crewmate packets, inspect diffs, and validate.", "Do not trigger for unapproved multi-wave planning.", "26f5af019252490ddd49676e7e9acecfe8651be620470222ad598f8e77ca7600", 18),
-    characterization("crewmate", "Crewmate", "Bounded implementation-role and scope policy.", "Make one approved change.", "Explorer or Navigator assigns a settled coding packet.", "Edit only allowed paths and return validation evidence.", "Do not trigger for an unresolved design decision.", "c1f0064032ca68876e936233be56a1ea8dfc1af9eea01e93c82a451303307b94", 18),
-    characterization("surveyor", "Surveyor", "Independent read-only review policy.", "Review completed integrated work.", "The selected harness lacks a native reviewer.", "Review once and report verified actionable findings.", "Do not trigger when a native review is available.", "15d01c6a7bb5b7f1236fb106eb70d7be9d47e67577a22e34009f8f9ff1d4a023", 16),
+    characterization("repository-fit", "Repository Fit", "Repository and plan-directory confirmation policy.", "Propose a repository fit for owner confirmation.", "Bearing enters Repository Fit.", "Use bounded evidence to return one assumption and question.", "Do not trigger after repository fit is confirmed.", "ca97c3078890baf8ad6b9e403d58e0c0ec8080abe176decec1eea23284c3155a", 52),
+    characterization("set-bearings", "Set Bearings", "Bounded workspace and repository-map policy.", "Start or resume a plan workspace.", "Bearing enters Set Bearings.", "Create only the workspace, stub, and repository map.", "Do not trigger for a tentative planning discussion.", "1476fca2c51157c8f2d1d27b4d8abe3a395967d185db0045d8244696e6620c74", 71),
+    characterization("gather-supplies", "Gather Supplies", "Material-decision and specification policy.", "Harden a plan specification.", "Bearing enters Gather Supplies.", "Resolve only material decisions and write the specification.", "Do not trigger for a request to merely summarize documentation.", "c8463121d916fb3ca2616838c3e1835c15031d786bc9af8d894127c899947dfc", 72),
+    characterization("map-the-route", "Map the Route", "Design, SEIT, and implementation-route policy.", "Design an approved plan.", "Bearing enters Map the Route.", "Write design and SEIT, then draft implementation after validation.", "Do not trigger for a request to execute an existing route.", "9464f14694202c0d7c246fff52edf3abfecfcbe6f4aadfbddbf6de19afc4071c", 80),
+    characterization("navigator", "Navigator", "Dependent-wave execution and authority policy.", "Run dependent implementation waves.", "The owner selects Expedition.", "Coordinate independent Explorer lanes by wave.", "Do not trigger for one bounded route with no parallel lanes.", "482388079590c7d4ac21129447e5392ffdf918d91c01fab4b1c91bfe6cbd588b", 80),
+    characterization("explorer", "Explorer", "Bounded route execution and validation policy.", "Execute one approved route.", "The owner selects Explorer or Navigator delegates a lane.", "Apply Crewmate packets, inspect diffs, and validate.", "Do not trigger for unapproved multi-wave planning.", "23c0499becc7cb782dfd47e78bcec51c8278db6678076d0af74b6f1ee9b34c5c", 73),
+    characterization("crewmate", "Crewmate", "Bounded implementation-role and scope policy.", "Make one approved change.", "Explorer or Navigator assigns a settled coding packet.", "Edit only allowed paths and return validation evidence.", "Do not trigger for an unresolved design decision.", "4542e037c725e8b26b2260553a7ec33af545e4929611665da3db61099605eb5a", 86),
+    characterization("validator", "Validator", "Scope-sufficiency verification policy over the deterministic boundary.", "Verify scope sufficiency after per-slice completion.", "Integrated work reaches the verification cadence.", "Wrap FocusCompletion and add the four scope checks, then return a typed verdict.", "Do not trigger to recompute containment or command evidence.", "d5bf1f72d6a444993050502c461a367781085ff5fe279c0288f9b5b61d62d9a6", 51),
+    characterization("grader", "Grader", "Rubric scoring and verdict-arithmetic policy.", "Score a supplied report against the versioned rubric.", "A grader report is submitted for verification.", "Recompute the weighted verdict and reject mismatch or pollution.", "Do not trigger to repair code or decide a transition.", "2bea5b09ac98ea3c409be830825b54a09569cfc634ccafc8e6f902dae891f415", 51),
+    characterization("park-ranger", "Park Ranger", "Reproduction and finding-synthesis policy.", "Adjudicate reproduced findings across lenses.", "Lens reports are ready for synthesis.", "Require reproduction, clamp priority, and synthesize a stable order.", "Do not trigger to promote an unreproduced suspicion.", "100666455e737a5a65522ff0b5f78ec0c7b03a313b8f5b0441c3deb2fc3d7fbc", 51),
+    characterization("surveyor", "Surveyor", "Independent read-only review policy.", "Review completed integrated work.", "The selected harness lacks a native reviewer.", "Review once and report verified actionable findings.", "Do not trigger when a native review is available.", "283145ceac19dac889c008ee8c4271e08b9362fb09d6e7b81640672062b62a9b", 88),
   ] as const,
 } as const;
 
@@ -62,12 +66,16 @@ const cases = (skill: SkillName, positive: string, negative: string, invariant: 
 
 /** Exactly one outcome-graded positive and negative case for every skill. */
 export const NATIVE_SKILL_CHARACTERIZATION_CASES = [
+  ...cases("repository-fit", "Use Repository Fit to propose the account-export repository and plan directory.", "Repository fit is already confirmed; start Set Bearings.", "does not create or confirm the plan directory"),
   ...cases("set-bearings", "Use Set Bearings to start an account-export plan.", "We should eventually plan account export.", "does not draft downstream artifacts"),
   ...cases("gather-supplies", "Use Gather Supplies on the account-export plan stub.", "Summarize the account-export docs for me.", "does not resolve owner decisions without evidence"),
   ...cases("map-the-route", "Use Map the Route on this approved account-export specification.", "Implement the approved account-export design.", "does not execute implementation slices"),
   ...cases("navigator", "Use Navigator for the approved multi-wave account-export route.", "Implement this one bounded account-export test fix.", "does not coordinate waves for standalone work"),
   ...cases("explorer", "Use Explorer to complete this approved account-export route.", "Design a multi-wave account-export program.", "does not expand the approved route"),
   ...cases("crewmate", "Use Crewmate for the approved account-export packet in its allowed paths.", "Choose the account-export architecture before coding.", "does not edit outside allowed paths"),
+  ...cases("validator", "Use the Validator to check scope sufficiency for the completed account-export slice.", "Recompute containment for the account-export focus result.", "does not recompute the deterministic boundary"),
+  ...cases("grader", "Use the Grader to score the submitted account-export grader report.", "Repair the account-export code the report flagged.", "does not repair code or decide transitions"),
+  ...cases("park-ranger", "Use Park Ranger to synthesize the account-export lens findings.", "Promote an unreproduced account-export suspicion to a finding.", "does not promote unreproduced suspicions"),
   ...cases("surveyor", "Use Surveyor to review the completed account-export diff.", "Edit the account-export documentation wording.", "does not modify reviewed work"),
 ] as const;
 

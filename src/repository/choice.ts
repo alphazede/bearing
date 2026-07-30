@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { accessSync, constants, realpathSync } from "node:fs";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, posix, win32 } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
+import { BUILTIN_ROUTES } from "../adapters/adapters.js";
+import { resolveExecutable } from "./executable-path.js";
 
 const PICKER_TIMEOUT_MS = 300_000;
 const MAX_PICKER_OUTPUT = 4 * 1024;
@@ -17,9 +18,11 @@ export type PickerResultClass = "selected" | "cancelled" | "unavailable" | "time
 export interface RepositoryOptions {
   readonly platform: PlatformClass;
   readonly linuxDistro?: string;
-  readonly current: { readonly path: string; readonly source: DiscoverySource };
+  readonly current: { readonly path: string; readonly source: DiscoverySource; readonly isGitRoot: boolean };
   readonly browse: { readonly available: boolean; readonly picker?: PickerKind };
 }
+
+export type RepositoryUnavailable = { readonly unavailable: "launch_cwd_unavailable" };
 
 export type RepositoryChoiceResult =
   | { readonly result: "selected"; readonly candidate: string; readonly source: DiscoverySource | "picker"; readonly picker?: PickerKind }
@@ -47,6 +50,7 @@ export interface RepositoryChoiceDependencies {
   readonly launchCwd?: string;
   readonly runner?: PickerProcessRunner;
   readonly readLinuxRelease?: () => Promise<string | undefined>;
+  readonly agentExecutableRealpaths?: () => readonly string[];
   readonly diagnosticSink?: (diagnostic: RepositoryChoiceDiagnostic) => void;
 }
 
@@ -103,17 +107,6 @@ function distroLabel(body: string | undefined): string | undefined {
     if (value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value)) values.set(match[1], value);
   }
   return values.get("PRETTY_NAME") ?? values.get("NAME");
-}
-
-function resolveExecutable(executable: string): string | undefined {
-  for (const directory of (process.env.PATH ?? "").split(delimiter).filter(isAbsolute)) {
-    try {
-      const candidate = join(directory, executable);
-      accessSync(candidate, constants.X_OK);
-      return realpathSync(candidate);
-    } catch { /* try next absolute PATH entry */ }
-  }
-  return undefined;
 }
 
 /** Fixed-command, no-shell native picker process port. */
@@ -179,6 +172,7 @@ export class RepositoryChoiceService {
   private readonly launchCwd: string;
   private readonly runner: PickerProcessRunner;
   private readonly readLinuxRelease: () => Promise<string | undefined>;
+  private readonly agentExecutableRealpathsSource: () => readonly string[];
   private readonly diagnosticSink: (diagnostic: RepositoryChoiceDiagnostic) => void;
 
   constructor(deps: RepositoryChoiceDependencies = {}) {
@@ -186,19 +180,25 @@ export class RepositoryChoiceService {
     this.launchCwd = deps.launchCwd ?? process.cwd();
     this.runner = deps.runner ?? new NodePickerProcessRunner();
     this.readLinuxRelease = deps.readLinuxRelease ?? defaultLinuxRelease;
+    this.agentExecutableRealpathsSource = deps.agentExecutableRealpaths ?? (() => [...new Set(BUILTIN_ROUTES.flatMap(({ executable }) => resolveExecutable(executable) ?? []))]);
     this.diagnosticSink = deps.diagnosticSink ?? ((diagnostic) => { try { process.stderr.write(`${JSON.stringify(diagnostic)}\n`); } catch { /* diagnostics never block onboarding */ } });
   }
 
-  async options(): Promise<RepositoryOptions> {
-    const current = await currentCandidate(this.launchCwd);
+  agentExecutableRealpaths(): readonly string[] { return this.agentExecutableRealpathsSource(); }
+
+  async options(): Promise<RepositoryOptions | RepositoryUnavailable> {
+    const candidate = await currentCandidate(this.launchCwd).catch(() => undefined);
+    if (!candidate) return { unavailable: "launch_cwd_unavailable" };
+    const current = { ...candidate, isGitRoot: candidate.source === "git-root" };
     const picker = this.command();
     const linuxDistro = this.platform === "linux" ? distroLabel(await this.readLinuxRelease()) : undefined;
     this.emit({ event: "repository_discovery", platform: this.platform, source: current.source });
     return { platform: this.platform, ...(linuxDistro ? { linuxDistro } : {}), current, browse: picker ? { available: true, picker: picker.kind } : { available: false } };
   }
 
-  async resolve(choice: "current" | "browse"): Promise<RepositoryChoiceResult> {
+  async resolve(choice: "current" | "browse"): Promise<RepositoryChoiceResult | RepositoryUnavailable> {
     const options = await this.options();
+    if ("unavailable" in options) return options;
     if (choice === "current") return { result: "selected", candidate: options.current.path, source: options.current.source };
     const started = Date.now();
     const command = this.command();

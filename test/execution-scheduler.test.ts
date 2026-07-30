@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import * as scheduler from "../src/execution/execution-scheduler.js";
 import {
   advanceSchedule,
   type ExecutionMode,
@@ -36,19 +37,30 @@ function explorerGraph(nodes: readonly WorkNode[] = [node("explorer", "explorer"
   return { schemaVersion: 1, executionMode: "explorer", limits: { maxNodes: 8, maxCrewmatesPerExplorer: 4 }, nodes };
 }
 
-function expeditionGraph(): WorkGraph {
+function expeditionGraph(nodes: readonly WorkNode[] = [
+  node("navigator", "navigator", null),
+  node("explorer-a", "explorer", "navigator", ["navigator"]),
+  node("crew-a", "crewmate", "explorer-a", ["explorer-a"]),
+  node("explorer-b", "explorer", "navigator", ["navigator"]),
+  node("crew-b", "crewmate", "explorer-b", ["explorer-b"]),
+]): WorkGraph {
   return {
     schemaVersion: 1,
     executionMode: "expedition",
     limits: { maxNodes: 8, maxCrewmatesPerExplorer: 2 },
-    nodes: [
-      node("navigator", "navigator", null),
-      node("explorer-a", "explorer", "navigator", ["navigator"]),
-      node("crew-a", "crewmate", "explorer-a", ["explorer-a"]),
-      node("explorer-b", "explorer", "navigator", ["navigator"]),
-      node("crew-b", "crewmate", "explorer-b", ["explorer-b"]),
-    ],
+    nodes,
   };
+}
+
+function trailBossGraph(): WorkGraph {
+  return expeditionGraph([
+    node("navigator", "navigator", null),
+    node("trail-boss", "trail-boss", "navigator", ["navigator"]),
+    node("explorer", "explorer", "trail-boss", ["trail-boss"]),
+    node("crew-direct", "crewmate", "explorer", ["explorer"]),
+    node("sub-explorer", "sub-explorer", "explorer", ["explorer"]),
+    node("crew-sub", "crewmate", "sub-explorer", ["sub-explorer"]),
+  ]);
 }
 
 function limits(overrides: Partial<ScheduleLimits> = {}): ScheduleLimits {
@@ -56,6 +68,62 @@ function limits(overrides: Partial<ScheduleLimits> = {}): ScheduleLimits {
 }
 
 describe("execution scheduler", () => {
+  it("keeps schema v1 while accepting the depth-five expedition topology", () => {
+    expect((scheduler as unknown as { WORK_GRAPH_SCHEMA_VERSION: number }).WORK_GRAPH_SCHEMA_VERSION).toBe(1);
+    expect((scheduler as unknown as { MAX_ORCHESTRATION_DEPTH?: number }).MAX_ORCHESTRATION_DEPTH).toBe(5);
+    expect(validateWorkGraph(trailBossGraph())).toMatchObject({ ok: true });
+  });
+
+  it("rejects Trail Boss outside expedition and Explorer bypass around an expected parent", () => {
+    expect(validateWorkGraph({ ...trailBossGraph(), executionMode: "explorer" }))
+      .toEqual({ ok: false, code: "trail_boss_requires_expedition" });
+    expect(validateWorkGraph(expeditionGraph([
+      ...trailBossGraph().nodes,
+      node("explorer-bypass", "explorer", "navigator", ["navigator"]),
+      node("crew-bypass", "crewmate", "explorer-bypass", ["explorer-bypass"]),
+    ]))).toEqual({ ok: false, code: "illegal_role_topology" });
+  });
+
+  it("enforces Trail Boss and Sub-Explorer parent and mode boundaries", () => {
+    expect(validateWorkGraph(expeditionGraph([
+      ...trailBossGraph().nodes,
+      node("crew-under-boss", "crewmate", "trail-boss", ["trail-boss"]),
+    ]))).toEqual({ ok: false, code: "illegal_role_topology" });
+    expect(validateWorkGraph(expeditionGraph(trailBossGraph().nodes.map((entry) =>
+      entry.id === "sub-explorer" ? { ...entry, parentId: "trail-boss" } : entry,
+    )))).toEqual({ ok: false, code: "sub_explorer_requires_explorer_parent", nodeId: "sub-explorer" });
+    expect(validateWorkGraph(explorerGraph([
+      node("explorer", "explorer", null),
+      node("crew-direct", "crewmate", "explorer", ["explorer"]),
+      node("sub-explorer", "sub-explorer", "explorer", ["explorer"]),
+      node("crew-sub", "crewmate", "sub-explorer", ["sub-explorer"]),
+    ]))).toEqual({ ok: false, code: "illegal_role_topology" });
+  });
+
+  it("rejects depth six before authority evaluation or launch", () => {
+    const graph = expeditionGraph([
+      ...trailBossGraph().nodes.filter((entry) => entry.id !== "crew-sub"),
+      node("nested-sub-explorer", "sub-explorer", "sub-explorer", ["sub-explorer"]),
+      node("crew-sub", "crewmate", "nested-sub-explorer", ["nested-sub-explorer"]),
+    ]);
+    const roleConcurrency = { navigator: 1, explorer: 2, crewmate: 4, "trail-boss": 1, "sub-explorer": 2 };
+
+    expect(validateWorkGraph(graph)).toEqual({ ok: false, code: "orchestration_depth_exceeded", nodeId: "crew-sub" });
+    expect(startSchedule({ graph, limits: limits({ roleConcurrency }), nowMs: 0 }))
+      .toEqual({ state: "blocked", code: "orchestration_depth_exceeded", nodes: [], batches: [], transitions: [] });
+  });
+
+  it("requires explicit concurrency caps for every new role present", () => {
+    expect(startSchedule({ graph: trailBossGraph(), evidence: approval("expedition"), limits: limits(), nowMs: 0 }))
+      .toMatchObject({ state: "blocked", code: "graph_invalid" });
+    expect(startSchedule({
+      graph: trailBossGraph(),
+      evidence: approval("expedition"),
+      limits: limits({ roleConcurrency: { navigator: 1, explorer: 2, crewmate: 4, "trail-boss": 1 } }),
+      nowMs: 0,
+    })).toMatchObject({ state: "blocked", code: "graph_invalid" });
+  });
+
   it("validates both legal execution hierarchies and retains direct-to-root ancestry", () => {
     expect(validateWorkGraph(explorerGraph()).ok).toBe(true);
     expect(validateWorkGraph(expeditionGraph()).ok).toBe(true);
@@ -63,6 +131,24 @@ describe("execution scheduler", () => {
     schedule = advanceSchedule(schedule, [{ nodeId: "navigator", outcome: "completed" }], 1);
     expect(schedule.nodes.find((entry) => entry.id === "explorer-a")?.executionAncestry).toEqual(["session-navigator"]);
     expect(schedule.nodes.find((entry) => entry.id === "crew-a")?.executionAncestry).toEqual(["session-explorer-a", "session-navigator"]);
+  });
+
+  it("F2 regression: advisor 11+11 split (explorer delegates all to Sub-Explorers) produces topology scheduler accepts", () => {
+    // Simulates 2 subs, 0 direct crew on the explorer (nothing retained)
+    const delegatedAll = expeditionGraph([
+      node("navigator", "navigator", null),
+      node("explorer", "explorer", "navigator", ["navigator"]),
+      node("sub1", "sub-explorer", "explorer", ["explorer"]),
+      node("sub2", "sub-explorer", "explorer", ["explorer"]),
+      node("c1", "crewmate", "sub1", ["sub1"]),
+      node("c2", "crewmate", "sub1", ["c1"]),
+      node("c3", "crewmate", "sub2", ["sub2"]),
+      node("c4", "crewmate", "sub2", ["c3"]),
+    ]);
+    expect(validateWorkGraph(delegatedAll)).toMatchObject({ ok: true });
+    // Assert directly against legalTopology per F2 requirement (advisor output must satisfy scheduler)
+    const byId = new Map(delegatedAll.nodes.map((n) => [n.id, n] as const));
+    expect(scheduler.legalTopology("expedition", delegatedAll.nodes, byId, 10)).toBe(true);
   });
 
   it("recommends deterministically, estimates cost, and keeps recommendation non-authoritative", () => {

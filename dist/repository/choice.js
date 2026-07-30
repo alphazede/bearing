@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { accessSync, constants, realpathSync } from "node:fs";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, posix, win32 } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
+import { BUILTIN_ROUTES } from "../adapters/adapters.js";
+import { resolveExecutable } from "./executable-path.js";
 const PICKER_TIMEOUT_MS = 300_000;
 const MAX_PICKER_OUTPUT = 4 * 1024;
 const MAX_DISTRO_FILE = 16 * 1024;
@@ -63,17 +64,6 @@ function distroLabel(body) {
             values.set(match[1], value);
     }
     return values.get("PRETTY_NAME") ?? values.get("NAME");
-}
-function resolveExecutable(executable) {
-    for (const directory of (process.env.PATH ?? "").split(delimiter).filter(isAbsolute)) {
-        try {
-            const candidate = join(directory, executable);
-            accessSync(candidate, constants.X_OK);
-            return realpathSync(candidate);
-        }
-        catch { /* try next absolute PATH entry */ }
-    }
-    return undefined;
 }
 /** Fixed-command, no-shell native picker process port. */
 export class NodePickerProcessRunner {
@@ -155,19 +145,25 @@ export class RepositoryChoiceService {
     launchCwd;
     runner;
     readLinuxRelease;
+    agentExecutableRealpathsSource;
     diagnosticSink;
     constructor(deps = {}) {
         this.platform = platformClass(deps.platform ?? process.platform);
         this.launchCwd = deps.launchCwd ?? process.cwd();
         this.runner = deps.runner ?? new NodePickerProcessRunner();
         this.readLinuxRelease = deps.readLinuxRelease ?? defaultLinuxRelease;
+        this.agentExecutableRealpathsSource = deps.agentExecutableRealpaths ?? (() => [...new Set(BUILTIN_ROUTES.flatMap(({ executable }) => resolveExecutable(executable) ?? []))]);
         this.diagnosticSink = deps.diagnosticSink ?? ((diagnostic) => { try {
             process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
         }
         catch { /* diagnostics never block onboarding */ } });
     }
+    agentExecutableRealpaths() { return this.agentExecutableRealpathsSource(); }
     async options() {
-        const current = await currentCandidate(this.launchCwd);
+        const candidate = await currentCandidate(this.launchCwd).catch(() => undefined);
+        if (!candidate)
+            return { unavailable: "launch_cwd_unavailable" };
+        const current = { ...candidate, isGitRoot: candidate.source === "git-root" };
         const picker = this.command();
         const linuxDistro = this.platform === "linux" ? distroLabel(await this.readLinuxRelease()) : undefined;
         this.emit({ event: "repository_discovery", platform: this.platform, source: current.source });
@@ -175,6 +171,8 @@ export class RepositoryChoiceService {
     }
     async resolve(choice) {
         const options = await this.options();
+        if ("unavailable" in options)
+            return options;
         if (choice === "current")
             return { result: "selected", candidate: options.current.path, source: options.current.source };
         const started = Date.now();

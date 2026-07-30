@@ -17,6 +17,13 @@ const MAX_EVENT_TYPE = 128;
 const MAX_VALUE_DEPTH = 8;
 const MAX_COLLECTION_SIZE = 256;
 const MAX_STRING_LENGTH = 512 * 1024;
+const RESUME_FAILURE_SIGNATURES = {
+    codex: [
+        "session not found for thread_id: {sessionId}",
+        "no rollout found for thread id {sessionId}",
+        "state db missing rollout path for thread {sessionId}",
+    ],
+};
 function events(value) {
     if (!Array.isArray(value) || value.length > MAX_EVENTS)
         return undefined;
@@ -36,6 +43,21 @@ function sanitize(value, depth = 0) {
     if (typeof value !== "object" || value === null)
         return value;
     return Object.fromEntries(Object.entries(value).slice(0, MAX_COLLECTION_SIZE).map(([key, entry]) => [key, secretKey.test(key) ? "[redacted]" : sanitize(entry, depth + 1)]));
+}
+function sessionUnavailable(routeId, providerSessionId, result) {
+    if (!providerSessionId || result.exitCode === undefined || result.exitCode === 0 || (events(result.events)?.length ?? 0) > 0)
+        return false;
+    if (typeof result.error !== "object" || result.error === null || Array.isArray(result.error))
+        return false;
+    const stderr = result.error.stderr;
+    if (typeof stderr !== "string" || stderr.length > MAX_STRING_LENGTH)
+        return false;
+    const signatures = RESUME_FAILURE_SIGNATURES[routeId];
+    if (!signatures)
+        return false;
+    const normalized = stderr.toLowerCase();
+    const sessionId = providerSessionId.toLowerCase();
+    return signatures.some((signature) => normalized.includes(signature.replace("{sessionId}", sessionId)));
 }
 class ProcessAgentAdapter {
     route;
@@ -97,7 +119,8 @@ class ProcessAgentAdapter {
         const suppliedSession = request.providerSessionId;
         if (suppliedSession !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(suppliedSession))
             return this.receipt("blocked", requested, this.route.id, isolation, warnings, "unsupported_policy", 0, [], 0);
-        const invocation = buildInvocation(this.route, this.selection, request, suppliedSession ?? (sessionKey ? this.sessions().get(sessionKey) : undefined));
+        const resumeSession = suppliedSession ?? (sessionKey ? this.sessions().get(sessionKey) : undefined);
+        const invocation = buildInvocation(this.route, this.selection, request, resumeSession);
         if (!invocation.ok)
             return this.receipt("blocked", requested, this.route.id, isolation, [...warnings, ...invocation.warnings], "unsupported_policy", 0, [], 0);
         const effectiveWarnings = [...warnings, ...invocation.warnings];
@@ -107,7 +130,7 @@ class ProcessAgentAdapter {
                 return this.receipt("cancelled", requested, this.route.id, isolation, warnings, "cancelled", 0, [], attempts);
             attempts += 1;
             const result = await this.runner.run(invocation.value);
-            const failure = result.unknownSideEffect ? "unknown_side_effect" : result.cancelled || this.cancelled.has(request.runId) ? "cancelled" : result.timedOut ? "timeout" : result.exitCode !== 0 ? "nonzero_exit" : !events(result.events) ? "malformed_output" : result.usage === undefined || !Number.isSafeInteger(result.usage.tokens) || result.usage.tokens < 0 || result.usage.tokens > request.role.limits.tokenBudget ? "token_budget" : undefined;
+            const failure = result.unknownSideEffect ? "unknown_side_effect" : result.cancelled || this.cancelled.has(request.runId) ? "cancelled" : result.timedOut ? "timeout" : result.exitCode !== 0 ? sessionUnavailable(this.route.id, invocation.providerSessionId === resumeSession ? resumeSession : undefined, result) ? "session_unavailable" : "nonzero_exit" : !events(result.events) ? "malformed_output" : result.usage === undefined || !Number.isSafeInteger(result.usage.tokens) || result.usage.tokens < 0 || result.usage.tokens > request.role.limits.tokenBudget ? "token_budget" : undefined;
             if (!failure) {
                 const providerSessionId = result.providerSessionId ?? invocation.providerSessionId;
                 if (sessionKey && providerSessionId)
@@ -140,9 +163,10 @@ class ProcessAgentAdapter {
 }
 function buildInvocation(route, selection, request, providerSessionId) {
     const role = request.role;
+    const reasoning = role.reasoning.providerLevel;
     if (role.authority.externalAction || !role.authority.read || !role.authority.workspace)
         return { ok: false, warnings: ["authority_unsupported"] };
-    if (!route.reasoningLevels.includes(selection.reasoning))
+    if (!route.reasoningLevels.includes(reasoning))
         return { ok: false, warnings: ["reasoning_unsupported"] };
     if (!role.authority.write && role.toolAllow.some((tool) => /write|edit|shell|bash/i.test(tool)))
         return { ok: false, warnings: ["tool_authority_conflict"] };
@@ -156,11 +180,11 @@ function buildInvocation(route, selection, request, providerSessionId) {
         const modelArgs = selection.model === "*" ? [] : ["-m", selection.model];
         const session = role.sessionId === null ? {} : { sessionKey: role.sessionId };
         if (providerSessionId)
-            return { ok: true, value: { ...common, ...session, providerSessionId, args: ["exec", "resume", providerSessionId, "--json", ...modelArgs, "-c", `model_reasoning_effort="${selection.reasoning}"`, "-c", 'approval_policy="never"', "-c", `sandbox_mode="${sandbox}"`, "-"] }, warnings: [], providerSessionId };
-        return { ok: true, value: { ...common, ...session, args: ["exec", "--json", ...modelArgs, "-c", `model_reasoning_effort="${selection.reasoning}"`, "-c", 'approval_policy="never"', "-C", request.repositoryPath, "-s", sandbox, ...(role.sessionId === null ? ["--ephemeral"] : []), "-"] }, warnings: [] };
+            return { ok: true, value: { ...common, ...session, providerSessionId, args: ["exec", "resume", providerSessionId, "--json", ...modelArgs, "-c", `model_reasoning_effort="${reasoning}"`, "-c", 'approval_policy="never"', "-c", `sandbox_mode="${sandbox}"`, "-"] }, warnings: [], providerSessionId };
+        return { ok: true, value: { ...common, ...session, args: ["exec", "--json", ...modelArgs, "-c", `model_reasoning_effort="${reasoning}"`, "-c", 'approval_policy="never"', "-C", request.repositoryPath, "-s", sandbox, ...(role.sessionId === null ? ["--ephemeral"] : []), "-"] }, warnings: [] };
     }
     if (route.provider === "grok") {
-        const args = [...(request.allowSubagents === true ? ["--allow-subagents"] : []), "--", "--output-format", "streaming-json", "--prompt-file", "/dev/stdin", "--cwd", request.repositoryPath, "--model", selection.model, "--reasoning-effort", selection.reasoning, "--max-turns", String(role.limits.maxTurns), "--tools", role.toolAllow.join(","), "--disallowed-tools", role.toolDeny.join(","), "--sandbox", "strict", "--permission-mode", "dontAsk", "--no-memory", ...(request.allowSubagents === true ? [] : ["--no-subagents"]), ...(!role.authority.network ? ["--disable-web-search"] : [])];
+        const args = [...(request.allowSubagents === true ? ["--allow-subagents"] : []), "--", "--output-format", "streaming-json", "--prompt-file", "/dev/stdin", "--cwd", request.repositoryPath, "--model", selection.model, "--reasoning-effort", reasoning, "--max-turns", String(role.limits.maxTurns), "--tools", role.toolAllow.join(","), "--disallowed-tools", role.toolDeny.join(","), "--sandbox", "strict", "--permission-mode", "dontAsk", "--no-memory", ...(request.allowSubagents === true ? [] : ["--no-subagents"]), ...(!role.authority.network ? ["--disable-web-search"] : [])];
         return { ok: true, value: { ...common, args }, warnings: [] };
     }
     if (route.provider === "claude") {
@@ -174,7 +198,7 @@ function buildInvocation(route, selection, request, providerSessionId) {
         const persistent = role.sessionId !== null;
         const sessionId = persistent ? providerSessionId ?? randomUUID() : undefined;
         const sessionArgs = !persistent ? ["--no-session-persistence"] : providerSessionId ? ["--resume", providerSessionId] : ["--session-id", sessionId];
-        return { ok: true, value: { ...common, args: ["--print", "--output-format", "stream-json", "--verbose", ...modelArgs, "--effort", selection.reasoning, "--permission-mode", "dontAsk", "--allowedTools", allowedTools, ...sessionArgs] }, warnings: [], ...(sessionId ? { providerSessionId: sessionId } : {}) };
+        return { ok: true, value: { ...common, args: ["--print", "--output-format", "stream-json", "--verbose", ...modelArgs, "--effort", reasoning, "--permission-mode", "dontAsk", "--allowedTools", allowedTools, ...sessionArgs] }, warnings: [], ...(sessionId ? { providerSessionId: sessionId } : {}) };
     }
     if (route.provider === "agy") {
         if (!role.authority.network)
@@ -187,7 +211,7 @@ function buildInvocation(route, selection, request, providerSessionId) {
     }
     if (route.provider === "opencode") {
         const modelArgs = selection.model === "*" ? [] : ["--model", selection.model];
-        const variantArgs = selection.reasoning === "default" ? [] : ["--variant", selection.reasoning];
+        const variantArgs = reasoning === "default" ? [] : ["--variant", reasoning];
         const requestedTools = new Set(role.toolAllow.map((tool) => tool.toLowerCase()));
         const permissions = {
             "*": "deny",
@@ -208,7 +232,7 @@ function buildInvocation(route, selection, request, providerSessionId) {
     if (route.provider === "pi") {
         const modelArgs = selection.model === "*" ? [] : ["--model", selection.model];
         const sessionId = role.sessionId === null ? undefined : providerSessionId ?? randomUUID();
-        const args = ["--mode", "json", "--print", ...modelArgs, "--thinking", selection.reasoning, "--tools", role.toolAllow.join(","), "--exclude-tools", role.toolDeny.join(","), ...(sessionId ? ["--session-id", sessionId] : ["--no-session"]), ...(!role.authority.network ? ["--offline"] : [])];
+        const args = ["--mode", "json", "--print", ...modelArgs, "--thinking", reasoning, "--tools", role.toolAllow.join(","), "--exclude-tools", role.toolDeny.join(","), ...(sessionId ? ["--session-id", sessionId] : ["--no-session"]), ...(!role.authority.network ? ["--offline"] : [])];
         return { ok: true, value: { ...common, args }, warnings: [], ...(sessionId ? { providerSessionId: sessionId } : {}) };
     }
     return { ok: false, warnings: ["route_unsupported"] };

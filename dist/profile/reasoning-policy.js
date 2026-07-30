@@ -1,0 +1,55 @@
+/** Pure, fail-closed per-role reasoning policy resolution. */
+export const REASONING_TIERS = ["minimal", "low", "medium", "high", "very-high", "max"];
+/** Approved abstract-tier to provider-level policy table. */
+export const REASONING_PROVIDER_MAP = {
+    minimal: { codex: "low", claude: "low", grok: "low", agy: "low", pi: "minimal", opencode: "minimal" },
+    low: { codex: "low", claude: "low", grok: "low", agy: "low", pi: "low", opencode: "low" },
+    medium: { codex: "medium", claude: "medium", grok: "medium", agy: "medium", pi: "medium", opencode: "medium" },
+    high: { codex: "high", claude: "high", grok: "high", agy: "high", pi: "high", opencode: "high" },
+    "very-high": { codex: "xhigh", claude: "xhigh", grok: "xhigh", agy: "thinking", pi: "xhigh", opencode: "xhigh" },
+    max: { codex: "max", claude: "max", grok: "xhigh", agy: "thinking", pi: "xhigh", opencode: "max" },
+};
+export const DEFAULT_REASONING_TIERS = {
+    navigator: "high",
+    explorer: "medium",
+    "sub-explorer": "medium",
+    crewmate: "medium",
+    validator: "high",
+    grader: "high",
+    "park-ranger": "high",
+    surveyor: "medium",
+    "trail-boss": "medium",
+};
+export const GLOBAL_DEFAULT_REASONING_TIER = "medium";
+function isReasoningTier(value) {
+    return typeof value === "string" && REASONING_TIERS.includes(value);
+}
+function provider(provider) {
+    return Object.hasOwn(REASONING_PROVIDER_MAP.minimal, provider);
+}
+function providerCeiling(providerName) {
+    let ceiling = REASONING_TIERS.length - 1;
+    const topLevel = REASONING_PROVIDER_MAP.max[providerName];
+    while (ceiling > 0 && REASONING_PROVIDER_MAP[REASONING_TIERS[ceiling - 1]][providerName] === topLevel)
+        ceiling -= 1;
+    return ceiling;
+}
+export function resolveReasoning(input) {
+    if (!provider(input.provider))
+        return { ok: false, code: "reasoning_unmappable" };
+    if (input.escalationStep !== undefined && !Number.isFinite(input.escalationStep))
+        return { ok: false, code: "reasoning_unmappable" };
+    const baseTier = input.policy.defaults[input.role] ?? GLOBAL_DEFAULT_REASONING_TIER;
+    if (!isReasoningTier(baseTier) || input.globalOverride !== undefined && !isReasoningTier(input.globalOverride))
+        return { ok: false, code: "reasoning_unmappable" };
+    const baseIndex = REASONING_TIERS.indexOf(baseTier);
+    const requestedSteps = Math.max(0, Math.trunc(input.escalationStep ?? 0));
+    const allowedSteps = Math.max(0, Math.trunc(input.policy.escalation.maxSteps));
+    const escalationSteps = Math.min(requestedSteps, allowedSteps);
+    const requestedIndex = Math.min(baseIndex + escalationSteps, REASONING_TIERS.length - 1);
+    const ceiling = Math.min(providerCeiling(input.provider), input.globalOverride === undefined ? REASONING_TIERS.length - 1 : REASONING_TIERS.indexOf(input.globalOverride));
+    const clamped = requestedIndex > ceiling;
+    const tier = REASONING_TIERS[Math.min(requestedIndex, ceiling)];
+    const reason = clamped ? "clamped" : escalationSteps > 0 ? "escalated" : "default";
+    return { ok: true, tier, providerLevel: REASONING_PROVIDER_MAP[tier][input.provider], clamped, reason };
+}

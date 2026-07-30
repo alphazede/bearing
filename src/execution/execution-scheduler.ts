@@ -8,7 +8,10 @@ import type { DurableOwnerEvidence } from "../workflow/aggregate.js";
 export { EXECUTION_MODES, recommendExecutionMode, type ExecutionMode, type ModeRecommendationInput, type ModeRecommendation } from "./execution-mode.js";
 
 export const WORK_GRAPH_SCHEMA_VERSION = 1 as const;
-export type ExecutorRole = "navigator" | "explorer" | "crewmate";
+export const MAX_ORCHESTRATION_DEPTH = 5;
+export type ExecutorRole = "navigator" | "explorer" | "trail-boss" | "sub-explorer" | "crewmate";
+type ExistingExecutorRole = "navigator" | "explorer" | "crewmate";
+type NewExecutorRole = "trail-boss" | "sub-explorer";
 
 export interface WorkNode {
   readonly id: string;
@@ -37,6 +40,9 @@ export type GraphErrorCode =
   | "missing_dependency"
   | "self_dependency"
   | "illegal_role_topology"
+  | "orchestration_depth_exceeded"
+  | "trail_boss_requires_expedition"
+  | "sub_explorer_requires_explorer_parent"
   | "dependency_cycle"
   | "surveyor_not_executor";
 
@@ -54,7 +60,9 @@ export interface ConcurrencyCaps {
 
 export interface ScheduleLimits {
   readonly globalConcurrency: number;
-  readonly roleConcurrency: Readonly<Record<ExecutorRole, number>>;
+  readonly roleConcurrency: Readonly<
+    Record<ExistingExecutorRole, number> & Partial<Record<NewExecutorRole, number>>
+  >;
   readonly remainingTokenBudget: number;
   readonly perAgentTokenEstimate: number;
   readonly timeoutMs: number;
@@ -102,7 +110,7 @@ export interface NodeFact {
 const MAX_NODES = 64;
 const MAX_CREWMATES = 16;
 const MAX_TEXT = 128;
-const roles = new Set<string>(["navigator", "explorer", "crewmate"]);
+const roles = new Set<string>(["navigator", "explorer", "trail-boss", "sub-explorer", "crewmate"]);
 
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -160,23 +168,53 @@ export function validateWorkGraph(input: unknown): GraphValidation {
     if (node.dependencies.includes(node.id)) return error("self_dependency", node.id);
     if (node.dependencies.some((dependency) => !byId.has(dependency))) return error("missing_dependency", node.id);
   }
+  const graph: WorkGraph = {
+    schemaVersion: 1,
+    executionMode: input.executionMode as ExecutionMode,
+    limits: {
+      maxNodes: input.limits.maxNodes as number,
+      maxCrewmatesPerExplorer: input.limits.maxCrewmatesPerExplorer as number,
+    },
+    nodes,
+  };
+  const ancestry = ancestryFor(graph);
+  const tooDeep = nodes.find((node) => (ancestry.get(node.id)?.length ?? 0) + 1 > MAX_ORCHESTRATION_DEPTH);
+  if (tooDeep) return error("orchestration_depth_exceeded", tooDeep.id);
+  if (input.executionMode !== "expedition" && nodes.some((node) => node.role === "trail-boss")) {
+    return error("trail_boss_requires_expedition");
+  }
+  const invalidSubExplorer = nodes.find((node) =>
+    node.role === "sub-explorer" && byId.get(node.parentId ?? "")?.role !== "explorer");
+  if (invalidSubExplorer) return error("sub_explorer_requires_explorer_parent", invalidSubExplorer.id);
   if (!legalTopology(input.executionMode as ExecutionMode, nodes, byId, input.limits.maxCrewmatesPerExplorer as number)) return error("illegal_role_topology");
   if (hasCycle(nodes)) return error("dependency_cycle");
-  return { ok: true, graph: { schemaVersion: 1, executionMode: input.executionMode as ExecutionMode, limits: { maxNodes: input.limits.maxNodes as number, maxCrewmatesPerExplorer: input.limits.maxCrewmatesPerExplorer as number }, nodes } };
+  return { ok: true, graph };
 }
 
-function legalTopology(mode: ExecutionMode, nodes: readonly WorkNode[], byId: ReadonlyMap<string, WorkNode>, crewLimit: number): boolean {
+export function legalTopology(mode: ExecutionMode, nodes: readonly WorkNode[], byId: ReadonlyMap<string, WorkNode>, crewLimit: number): boolean {
   const navigators = nodes.filter((node) => node.role === "navigator");
+  const trailBosses = nodes.filter((node) => node.role === "trail-boss");
   const explorers = nodes.filter((node) => node.role === "explorer");
+  const subExplorers = nodes.filter((node) => node.role === "sub-explorer");
   const crewmates = nodes.filter((node) => node.role === "crewmate");
   if (mode === "explorer") {
-    if (navigators.length !== 0 || explorers.length !== 1 || explorers[0]?.parentId !== null) return false;
+    if (navigators.length !== 0 || trailBosses.length !== 0 || subExplorers.length !== 0
+      || explorers.length !== 1 || explorers[0]?.parentId !== null) return false;
   } else {
-    if (navigators.length !== 1 || navigators[0]?.parentId !== null || explorers.length === 0 || explorers.some((node) => byId.get(node.parentId ?? "")?.role !== "navigator")) return false;
+    if (navigators.length !== 1 || navigators[0]?.parentId !== null || trailBosses.length > 1
+      || trailBosses.some((node) => node.parentId !== navigators[0]?.id) || explorers.length === 0) return false;
+    const explorerParentId = trailBosses[0]?.id ?? navigators[0]?.id;
+    if (explorers.some((node) => node.parentId !== explorerParentId)) return false;
   }
-  if (crewmates.some((node) => byId.get(node.parentId ?? "")?.role !== "explorer")) return false;
-  return explorers.every((explorer) => {
-    const count = crewmates.filter((node) => node.parentId === explorer.id).length;
+  if (subExplorers.some((node) => byId.get(node.parentId ?? "")?.role !== "explorer")) return false;
+  if (crewmates.some((node) => !["explorer", "sub-explorer"].includes(byId.get(node.parentId ?? "")?.role ?? ""))) return false;
+  // Explorers may delegate every slice to Sub-Explorers (0 direct crewmates); subs must have direct crew.
+  return explorers.every((exp) => {
+    const count = crewmates.filter((c) => c.parentId === exp.id).length;
+    const hasSub = subExplorers.some((s) => s.parentId === exp.id);
+    return (count > 0 || hasSub) && count <= crewLimit;
+  }) && subExplorers.every((sub) => {
+    const count = crewmates.filter((c) => c.parentId === sub.id).length;
     return count > 0 && count <= crewLimit;
   });
 }
@@ -207,9 +245,9 @@ export function effectiveConcurrency(caps: ConcurrencyCaps): number {
 export function startSchedule(input: StartScheduleInput): ScheduleProjection {
   const validated = validateWorkGraph(input.graph);
   if (!validated.ok) return blocked(validated.code);
-  if (!validLimits(input.limits) || !integer(input.nowMs)) return blocked("graph_invalid");
   const graph = validated.graph;
-  if (input.limits.globalConcurrency === 0 || graph.nodes.some((node) => input.limits.roleConcurrency[node.role] === 0 || node.profileConcurrency === 0)) return blocked("zero_cap", graph, input.limits);
+  if (!validLimits(input.limits, graph) || !integer(input.nowMs)) return blocked("graph_invalid");
+  if (input.limits.globalConcurrency === 0 || graph.nodes.some((node) => input.limits.roleConcurrency[node.role]! === 0 || node.profileConcurrency === 0)) return blocked("zero_cap", graph, input.limits);
   if (input.limits.remainingTokenBudget < input.limits.perAgentTokenEstimate) return blocked("budget_exhausted", graph, input.limits);
 
   const policy = new AuthorityPolicy();
@@ -267,7 +305,13 @@ function launchReady(projection: ScheduleProjection, nowMs: number): SchedulePro
   const limits = projection.limits!;
   const status = new Map(projection.nodes.map((node) => [node.id, node.status]));
   const running = projection.nodes.filter((node) => node.status === "running");
-  const roleRunning = new Map<ExecutorRole, number>([["navigator", 0], ["explorer", 0], ["crewmate", 0]]);
+  const roleRunning = new Map<ExecutorRole, number>([
+    ["navigator", 0],
+    ["explorer", 0],
+    ["trail-boss", 0],
+    ["sub-explorer", 0],
+    ["crewmate", 0],
+  ]);
   const profileRunning = new Map<string, number>();
   const graphById = new Map(graph.nodes.map((node) => [node.id, node]));
   for (const node of running) {
@@ -280,7 +324,7 @@ function launchReady(projection: ScheduleProjection, nowMs: number): SchedulePro
   const launched = new Set<string>();
   for (const node of graph.nodes) {
     if (status.get(node.id) !== "pending" || !node.dependencies.every((id) => status.get(id) === "completed")) continue;
-    const cap = effectiveConcurrency({ global: Math.max(0, globalSlots), role: Math.max(0, limits.roleConcurrency[node.role] - (roleRunning.get(node.role) ?? 0)), profile: Math.max(0, node.profileConcurrency - (profileRunning.get(node.profileId) ?? 0)), remainingTokenBudget: Math.max(0, remaining), perAgentTokenEstimate: limits.perAgentTokenEstimate });
+    const cap = effectiveConcurrency({ global: Math.max(0, globalSlots), role: Math.max(0, limits.roleConcurrency[node.role]! - (roleRunning.get(node.role) ?? 0)), profile: Math.max(0, node.profileConcurrency - (profileRunning.get(node.profileId) ?? 0)), remainingTokenBudget: Math.max(0, remaining), perAgentTokenEstimate: limits.perAgentTokenEstimate });
     if (cap === 0) continue;
     launched.add(node.id);
     globalSlots -= 1;
@@ -304,8 +348,10 @@ function ancestryFor(graph: WorkGraph): ReadonlyMap<string, readonly string[]> {
   const byId = new Map(graph.nodes.map((node) => [node.id, node]));
   return new Map(graph.nodes.map((node) => {
     const ancestry: string[] = [];
+    const seen = new Set<string>();
     let parent = node.parentId === null ? undefined : byId.get(node.parentId);
-    while (parent) {
+    while (parent && !seen.has(parent.id)) {
+      seen.add(parent.id);
       ancestry.push(parent.sessionId);
       parent = parent.parentId === null ? undefined : byId.get(parent.parentId);
     }
@@ -313,10 +359,15 @@ function ancestryFor(graph: WorkGraph): ReadonlyMap<string, readonly string[]> {
   }));
 }
 
-function validLimits(limits: ScheduleLimits): boolean {
+function validLimits(limits: ScheduleLimits, graph: WorkGraph): boolean {
+  const required = ["navigator", "explorer", "crewmate"];
+  const allowed = new Set([...required, "trail-boss", "sub-explorer"]);
   return integer(limits.globalConcurrency) && integer(limits.remainingTokenBudget) && integer(limits.perAgentTokenEstimate, 1) && integer(limits.timeoutMs, 1)
-    && object(limits.roleConcurrency) && exact(limits.roleConcurrency, ["navigator", "explorer", "crewmate"])
-    && Object.values(limits.roleConcurrency).every((value) => integer(value));
+    && object(limits.roleConcurrency)
+    && required.every((role) => Object.hasOwn(limits.roleConcurrency, role))
+    && Object.keys(limits.roleConcurrency).every((role) => allowed.has(role))
+    && Object.values(limits.roleConcurrency).every((value) => integer(value))
+    && graph.nodes.every((node) => Object.hasOwn(limits.roleConcurrency, node.role));
 }
 
 function blocked(code: ScheduleProjection["code"], graph?: WorkGraph, limits?: ScheduleLimits): ScheduleProjection {
