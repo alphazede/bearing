@@ -3231,7 +3231,7 @@ async function handleVerificationReportPost(
   }
 
   let verification: VerificationCheckpointPayload;
-  let reportIdentity: unknown = body;
+  let reportIdentity: unknown;
   // Implementer sessions are read from the ledger, so self_certification is enforced against
   // recorded fact rather than anything the caller asserts.
   //

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { access, lstat, mkdir, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
+import { access, lstat, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { BUILTIN_ROUTES } from "../adapters/adapters.js";
@@ -471,9 +471,27 @@ async function byteSize(path) {
 // never contradict it with a narrower list of its own.
 async function ignoresBearing(repository) {
     const path = join(repository, ".gitignore");
-    if (!await lstat(path).then((entry) => entry.isFile() && !entry.isSymbolicLink()).catch(() => false))
-        return false;
-    return ignoresBearingDirectory(await readFile(path, "utf8"));
+    let handle;
+    try {
+        handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+        const opened = await handle.stat();
+        const linked = await lstat(path);
+        if (!opened.isFile()
+            || !linked.isFile()
+            || linked.isSymbolicLink()
+            || opened.dev !== linked.dev
+            || opened.ino !== linked.ino)
+            return false;
+        return ignoresBearingDirectory(await handle.readFile("utf8"));
+    }
+    catch (error) {
+        if (isNodeError(error, "ENOENT") || isNodeError(error, "ELOOP"))
+            return false;
+        throw error;
+    }
+    finally {
+        await handle?.close();
+    }
 }
 async function knownAgentRealpaths(pathEnv) {
     const found = [];

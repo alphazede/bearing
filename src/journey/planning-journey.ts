@@ -6,7 +6,6 @@ import { isAbsolute, posix, relative, resolve } from "node:path";
 import { BUILTIN_ROUTES, createAgentAdapter, type ProcessActivity, type ProcessRunner, type RouteDescriptor } from "../adapters/adapters.js";
 import type { ResolvedRun, Selection } from "../profile/profile.js";
 import { createFocusContext, snapshotGitState, validateFocusCompletion, type CommandEvidence, type FocusContext, type FocusContextResult } from "./focus-mode.js";
-import { planDirectoryValid } from "./plan-directory.js";
 import { resolvePlanDirectory } from "./plan-resolution.js";
 import { artifactComplete, parsePlanDocuments, structuralFindings, type PlanDocuments, type StructuralFindingCode } from "./plan-structure.js";
 import { advancePlanning, next, planningValidationSignal, type PlanningSignal, type PlanningState, type PlanningValidationRecord } from "./planning-state.js";

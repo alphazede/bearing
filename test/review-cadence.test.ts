@@ -10,7 +10,6 @@ import {
 
 const ALL_CADENCES: ReviewCadence[] = ["per-slice", "per-phase", "completion-only"];
 const FORCE_PER_SLICE: CadenceTrigger[] = ["high-risk", "unclear-requirements", "new-architecture", "security-sensitive"];
-const FORCE_PER_PHASE: CadenceTrigger[] = ["substantial-work"];
 
 function strength(c: ReviewCadence): number {
   return c === "per-slice" ? 3 : c === "per-phase" ? 2 : 1;

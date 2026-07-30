@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,6 +18,11 @@ import {
   type StoredRunState,
   type StoredRunSummary,
 } from "../src/store/bearing-store.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...original, stat: vi.fn(original.stat) };
+});
 
 const roots: string[] = [];
 const RECORDED_AT = "2026-07-26T12:00:00.000Z";
@@ -113,11 +118,39 @@ async function treeSnapshot(root: string): Promise<readonly unknown[]> {
   const names = (await readdir(root, { recursive: true })).sort();
   return await Promise.all(names.map(async (name) => {
     const path = join(root, name);
-    const metadata = await stat(path);
-    return metadata.isFile()
-      ? Object.freeze({ name, contents: await readFile(path, "utf8") })
-      : Object.freeze({ name, directory: true });
+    try {
+      return Object.freeze({ name, contents: await readFile(path, "utf8") });
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "EISDIR") {
+        return Object.freeze({ name, directory: true });
+      }
+      throw error;
+    }
   }));
+}
+
+async function withStatPathSwap<T>(
+  targetPath: string,
+  replacementPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const original = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  let swapped = false;
+  const injectedStat = async (...args: Parameters<typeof stat>) => {
+    const metadata = await Reflect.apply(original.stat, undefined, args);
+    if (String(args[0]) === targetPath && !swapped) {
+      swapped = true;
+      await original.rename(replacementPath, targetPath);
+    }
+    return metadata;
+  };
+  const mockedStat = vi.mocked(stat);
+  mockedStat.mockImplementation(injectedStat as typeof stat);
+  try {
+    return await operation();
+  } finally {
+    mockedStat.mockImplementation(original.stat);
+  }
 }
 
 function summary(runId: string): StoredRunSummary {
@@ -150,6 +183,20 @@ function settledState(runId: string): StoredRunState {
 }
 
 describe("improvement service", () => {
+  it("snapshots the file it selected even if the path is replaced during inspection", async () => {
+    const root = await temporaryRoot();
+    const tree = join(root, "tree");
+    const targetPath = join(tree, "entry.txt");
+    const replacementPath = join(root, "replacement.txt");
+    await mkdir(tree);
+    await writeFile(targetPath, "original\n");
+    await writeFile(replacementPath, "replacement\n");
+
+    const snapshot = await withStatPathSwap(targetPath, replacementPath, () => treeSnapshot(tree));
+
+    expect(snapshot).toEqual([{ name: "entry.txt", contents: "original\n" }]);
+  });
+
   it("composes injected stages over a real store without changing the run directory", async () => {
     const root = await temporaryRoot();
     let event = 0;
