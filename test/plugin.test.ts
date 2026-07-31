@@ -20,10 +20,10 @@ describe("Bearing plugin contract", () => {
       author: { name: "William Rumph / AlphaZede" },
       interface: { developerName: "William Rumph / AlphaZede" },
     });
-    expect(codexManifest.version).toBe("0.1.5");
+    expect(codexManifest.version).toBe("0.1.6");
     expect(claudeManifest).toMatchObject({
       name: "bearing",
-      version: "0.1.5",
+      version: "0.1.6",
       skills: "./plugin-skills/",
       hooks: "./hooks/claude-codex-hooks.json",
       author: { name: "William Rumph / AlphaZede" },
@@ -33,6 +33,9 @@ describe("Bearing plugin contract", () => {
       plugins: [{ name: "bearing", source: "./" }],
     });
     const packageJson = JSON.parse(await read("../package.json"));
+    expect(packageJson.version).toBe("0.1.6");
+    expect(codexManifest.version).toBe(packageJson.version);
+    expect(claudeManifest.version).toBe(packageJson.version);
     expect(packageJson.author).toBe("William Rumph / AlphaZede");
     expect(packageJson.license).toBe("MIT OR Apache-2.0");
     expect(packageJson.files).toEqual(expect.arrayContaining([
@@ -155,7 +158,15 @@ describe("Bearing plugin contract", () => {
     const rawReadme = await read("../README.md");
     const rawHeadlessJourney = rawReadme.split("## Headless journey", 2)[1]!.split("## Real browser journey", 1)[0]!;
     const readme = prose(rawHeadlessJourney);
-    const skill = prose(await read("../plugin-skills/bearing/SKILL.md"));
+    const rawSkill = await read("../plugin-skills/bearing/SKILL.md");
+    expect(rawSkill).toContain("## Browser request");
+    expect(rawSkill).toContain("## Explicit CLI or headless request");
+    const rawBrowserSkill = rawSkill.split("## Browser request", 2)[1]!.split("## Explicit CLI or headless request", 1)[0]!;
+    const rawHeadlessSkill = rawSkill.split("## Explicit CLI or headless request", 2)[1]!;
+    const skill = prose(rawHeadlessSkill);
+    expect(rawBrowserSkill).toContain("start --detach");
+    expect(rawHeadlessSkill).not.toContain("start --detach");
+    expect(rawHeadlessSkill).not.toMatch(/start a listener|open(?:ing)? a browser/i);
     for (const surface of [readme, skill]) {
       expect(surface).toContain("journey create --repo");
       expect(surface).toContain("journey status");
@@ -163,13 +174,32 @@ describe("Bearing plugin contract", () => {
       expect(surface).toContain("journey decide");
       expect(surface).toContain("journey progress --stage");
       expect(surface).toContain("journey approve-route");
+      expect(surface).toContain("journey confirm-amendment");
+      expect(surface).toContain("journey select-execution");
       expect(surface).toContain("journey select-explorer");
       expect(surface).toContain("allowedActions");
+      expect(surface).toContain("requiredOwnerAction");
+      expect(surface).toContain("outcome");
       expect(surface).toContain("runId");
       expect(surface).toContain("revision");
       expect(surface).toContain("ok: false");
+      expect(surface).toMatch(/same (?:user )?conversation|current conversation/i);
+      expect(surface).toMatch(/Explorer.*Expedition|Expedition.*Explorer/i);
+      expect(surface).toMatch(/failed.*stopped|stopped.*failed/i);
+      expect(surface).toMatch(/review/i);
+      expect(surface).toMatch(/status: complete/i);
+      expect(surface).toMatch(/final (?:summary|artifacts|evidence)/i);
+      expect(surface).toMatch(/takes no action-specific flags/i);
+      expect(surface).toContain("`requiredOwnerAction.type: confirm-amendment`");
+      expect(surface).toContain("`requiredOwnerAction.prompt`");
+      expect(surface).toMatch(/failed or stopped same-stage Focus amendment/i);
+      expect(surface).toMatch(/never infer or auto-issue/i);
+      expect(surface).toContain("`readiness: unavailable`");
+      expect(surface).toMatch(/only `status` and `resume`/i);
+      expect(surface).toMatch(/no mutating `requiredOwnerAction`/i);
       expect(surface).not.toMatch(/okf_status|BRAN|bearer\s+[A-Za-z0-9._-]+/i);
     }
+    expect(skill).toMatch(/explicit.*(?:via CLI|headless)/i);
     expect(rawHeadlessJourney).not.toContain("--stage repository-fit");
     expect(rawHeadlessJourney).toContain("--stage set-bearings");
     expect(rawHeadlessJourney.indexOf("journey decide")).toBeLessThan(

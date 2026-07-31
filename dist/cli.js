@@ -23,8 +23,9 @@ const USAGE = [
     "       bearing focus begin --request <relative-json>",
     "       bearing focus validate --run <opaque-run-id> --receipt <relative-json>",
     "       bearing journey create --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --goal <text>",
-    "       bearing journey (resume|status|approve-route) --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id>",
+    "       bearing journey (resume|status|approve-route|confirm-amendment) --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id>",
     "       bearing journey decide --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --answer <text>",
+    "       bearing journey select-execution --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --mode <explorer|expedition> --review-cadence <slice|phase|end>",
     "       bearing journey select-explorer --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --review-cadence <slice|phase|end>",
     "       bearing journey progress --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --stage <stage>",
     "       bearing plan validate <plan-directory>",
@@ -90,7 +91,7 @@ export function parseImproveArgs(args) {
     }
     return { ok: false };
 }
-const JOURNEY_ACTIONS = new Set(["create", "resume", "status", "decide", "approve-route", "select-explorer", "progress"]);
+const JOURNEY_ACTIONS = new Set(["create", "resume", "status", "decide", "approve-route", "confirm-amendment", "select-execution", "select-explorer", "progress"]);
 const JOURNEY_STAGES = new Set(RECORD_JOURNEY_CHECKPOINT_STAGES);
 const JOURNEY_REASONING = new Set(REASONING_VALUES);
 function safeJourneyText(value) {
@@ -103,7 +104,7 @@ export function parseJourneyArgs(args) {
     const values = new Map();
     for (let index = 2; index < args.length; index += 2) {
         const name = args[index], value = args[index + 1];
-        if (!/^--(?:repo|provider|model|reasoning|run|goal|answer|review-cadence|stage)$/.test(name ?? "") || value === undefined || value.startsWith("--") || values.has(name))
+        if (!/^--(?:repo|provider|model|reasoning|run|goal|answer|mode|review-cadence|stage)$/.test(name ?? "") || value === undefined || value.startsWith("--") || values.has(name))
             return { ok: false };
         values.set(name, value);
     }
@@ -123,6 +124,14 @@ export function parseJourneyArgs(args) {
     if (action === "select-explorer") {
         const reviewCadence = values.get("--review-cadence");
         return values.size === 6 && (reviewCadence === "slice" || reviewCadence === "phase" || reviewCadence === "end") ? { ok: true, ...common, reviewCadence } : { ok: false };
+    }
+    if (action === "select-execution") {
+        const executionMode = values.get("--mode"), reviewCadence = values.get("--review-cadence");
+        return values.size === 7
+            && (executionMode === "explorer" || executionMode === "expedition")
+            && (reviewCadence === "slice" || reviewCadence === "phase" || reviewCadence === "end")
+            ? { ok: true, ...common, executionMode, reviewCadence }
+            : { ok: false };
     }
     if (action === "progress") {
         const stage = values.get("--stage");

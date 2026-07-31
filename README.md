@@ -150,10 +150,11 @@ validation, which remains the completion boundary.
 
 ## Headless journey
 
-An installed agent can use the same authenticated transition layer without
-starting Bearing or opening a browser. Set `REPOSITORY` to the absolute path of
-the target Git repository and choose one stable `RUN_ID`; retain stdout from
-each command as one JSON receipt.
+When a user explicitly asks to run Bearing `via CLI` or headless, the host model
+uses the browser-free journey in the same user conversation; it does not run
+`start --detach`. Set `REPOSITORY` to the absolute path of the target Git
+repository and choose one stable `RUN_ID`. Keep both for the whole journey and
+parse stdout from each command as exactly one JSON receipt before acting again.
 
 ```sh
 bearing journey create --repo "$REPOSITORY" --provider codex --model <model> --reasoning medium --run "$RUN_ID" --goal "<goal>" > 01-create.json
@@ -166,15 +167,38 @@ bearing journey progress --repo "$REPOSITORY" --provider codex --model <model> -
 Continue only with an action listed in the preceding receipt:
 `set-bearings`, `gather-supplies`, `map-route`, `recon`, and
 `draft-implementation` advance with `journey progress --stage <stage>`.
-Record every owner answer with `journey decide`. Route approval is a distinct
-owner boundary: after the receipt offers `approve-route`, run
-`journey approve-route`; only then may `journey select-explorer` with a
-`--review-cadence` of `slice`, `phase`, or `end` record Explorer execution.
-Use `journey resume` or `journey status` with the same repository and run ID
-after interruption. Each accepted command writes exactly one JSON receipt with
-`ok`, `runId`, `revision`, optional `stage` and `status`, and
-`allowedActions`; a rejected or out-of-order command writes one typed receipt
-with `ok: false` and a deterministic `code`, and does not advance the run.
+Only when `requiredOwnerAction` is present, show its bounded question, prompt,
+modes, or artifacts and wait for the owner. Record an answer with `journey
+decide`; use `journey approve-route` only for route approval. Do not infer an
+answer or treat `allowedActions` as owner authorization.
+
+For a failed or stopped same-stage Focus amendment, the receipt advertises
+`journey confirm-amendment`, sets `requiredOwnerAction.type: confirm-amendment`,
+and supplies `requiredOwnerAction.prompt`. Show that prompt and wait. Only after
+the owner explicitly approves it may the host run `bearing journey
+confirm-amendment --repo "$REPOSITORY" --provider codex --model <model>
+--reasoning medium --run "$RUN_ID"`. It takes no action-specific flags and
+retries the same Explorer or Expedition execution stage. Never infer or
+auto-issue this owner action.
+
+After approval, prefer `journey select-execution --mode
+<explorer|expedition> --review-cadence <slice|phase|end>` for Explorer or
+Expedition. `journey select-explorer --review-cadence <slice|phase|end>` remains
+the legacy Explorer compatibility form. Continue through execution and the
+advertised `journey progress --stage review` transition. Use `journey resume`
+or `journey status` with the same repository and run ID after interruption.
+When a read receipt reports `readiness: unavailable`, it advertises only
+`status` and `resume`, with no mutating `requiredOwnerAction`; repair or select
+an available provider route before attempting another transition.
+
+Each receipt contains `ok`, `runId`, `revision`, and `allowedActions`, plus
+applicable bounded `stage`, `status`, `question`, `summary`, `artifacts`,
+`requiredOwnerAction`, and typed `outcome` fields. A rejected or out-of-order
+command writes one typed receipt with `ok: false` and a deterministic `code`;
+it does not prove progress. Report failed and stopped outcomes honestly and
+attempt only an advertised recovery action. End the loop only at `status:
+complete` with a complete outcome and final summary or artifacts, at owner
+cancellation, or at a reported blocker.
 
 ## Real browser journey
 

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { execFile } from "node:child_process";
 import { get } from "node:http";
 import type { Server } from "node:http";
 import { EventEmitter } from "node:events";
@@ -12,7 +13,8 @@ import { defaultOpenBrowser, isDirectInvocation, parseFocusArgs, parseImproveArg
 import { executeHeadlessJourney } from "../src/server/local-session.js";
 import type { ProcessRunner } from "../src/adapters/adapters.js";
 import { BearingStore } from "../src/store/bearing-store.js";
-import { currentPlanningVerdict } from "../src/journey/planning-journey.js";
+import { currentPlanningVerdict, renderPlanningReview } from "../src/journey/planning-journey.js";
+import { parseRuntimeState } from "../src/contracts/runtime-state.js";
 
 function newCtx() {
   const out: string[] = [];
@@ -102,6 +104,130 @@ async function seedPlanReviewBoundary(root: string, runId: string, directory = "
   });
   if (!drafted.ok) throw new Error(drafted.reason);
   return store;
+}
+
+async function disposableGitRepository(prefix: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  roots.push(root);
+  await new Promise<void>((resolve, reject) => {
+    execFile("git", ["init", "-q"], { cwd: root }, (error) => (error ? reject(error) : resolve()));
+  });
+  await writeFile(join(root, "package.json"), '{"name":"bearing-disposable-journey","private":true}\n');
+  return root;
+}
+
+function modelOperatedJourneyRunner(planDirectory: string): ProcessRunner & { readonly stages: string[] } {
+  const stages: string[] = [];
+  return {
+    stages,
+    executableAvailable: () => true,
+    verify: async () => true,
+    run: async (invocation) => {
+      if (invocation.stdin.includes("Return a short structured completion confirming readiness.")) {
+        return {
+          exitCode: 0,
+          events: [{ type: "completed", data: { content: "ready" } }],
+          usage: { tokens: 1 },
+        };
+      }
+      if (invocation.args.includes("review")) {
+        stages.push("review");
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: "Review passed with final evidence." } }],
+          usage: { tokens: 1 },
+        };
+      }
+      const stage = [
+        "repository-fit",
+        "gather-supplies",
+        "map-route",
+        "recon",
+        "draft-implementation",
+        "execute-explorer",
+        "execute-expedition",
+      ].find((candidate) => invocation.stdin.includes(`Stage: ${candidate}`));
+      if (!stage) throw new Error("scripted journey stage missing");
+      stages.push(stage);
+      if (stage === "repository-fit") {
+        const question = "Use this repository and plan directory?";
+        const content = `BEARING_RESULT ${JSON.stringify({
+          kind: "fit",
+          ok: true,
+          assumption: {
+            repository: invocation.cwd,
+            planDirectory,
+            rationale: "The disposable repository is the selected bounded workspace.",
+            evidence: [{ kind: "manifest", path: "package.json", detail: "The selected workspace owns the test plan." }],
+          },
+          question,
+        })}`;
+        return { exitCode: 0, events: [{ type: "item.completed", data: { content } }], usage: { tokens: 1 } };
+      }
+      if (stage === "gather-supplies" && invocation.stdin.includes("Stage boundary: Read and inspect only.")) {
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: 'BEARING_RESULT {"kind":"questions","questions":[]}' } }],
+          usage: { tokens: 1 },
+        };
+      }
+      await mkdir(join(invocation.cwd, planDirectory), { recursive: true });
+      if (stage === "gather-supplies") {
+        await writeFile(join(invocation.cwd, planDirectory, "plan-spec.md"), validPlan);
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: `BEARING_RESULT {"kind":"action","summary":"Requirements ready.","artifacts":["${planDirectory}/plan-spec.md"]}` } }],
+          usage: { tokens: 1 },
+        };
+      }
+      if (stage === "map-route") {
+        await Promise.all([
+          writeFile(join(invocation.cwd, planDirectory, "design.md"), validDesign),
+          writeFile(join(invocation.cwd, planDirectory, "seit.md"), validSeit),
+        ]);
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: `BEARING_RESULT {"kind":"action","summary":"Route mapped.","artifacts":["${planDirectory}/design.md","${planDirectory}/seit.md"]}` } }],
+          usage: { tokens: 1 },
+        };
+      }
+      if (stage === "recon") {
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: 'BEARING_RESULT {"kind":"recon","summary":"No material assumption requires Recon.","artifacts":[]}' } }],
+          usage: { tokens: 1 },
+        };
+      }
+      if (stage === "draft-implementation") {
+        await writeFile(join(invocation.cwd, planDirectory, "implementation.md"), validImplementation);
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: `BEARING_RESULT {"kind":"action","summary":"Implementation route drafted.","artifacts":["${planDirectory}/implementation.md"]}` } }],
+          usage: { tokens: 1 },
+        };
+      }
+      const reviewPath = join(invocation.cwd, planDirectory, "review.html");
+      const review = await readFile(reviewPath, "utf8");
+      await mkdir(join(invocation.cwd, "src"), { recursive: true });
+      await Promise.all([
+        writeFile(join(invocation.cwd, "src/import.ts"), "export const imported = true;\n"),
+        writeFile(
+          reviewPath,
+          review.replace(
+            '<section id="bearing-final-qa" data-status="pending"><h2>Actual implementation and QA</h2><p>Pending implementation and validation.</p></section>',
+            '<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: src/import.ts changed exactly as planned.</p><p>Validation evidence: CMD-UNIT passed.</p></section>',
+          ),
+        ),
+      ]);
+      const content = `BEARING_RESULT ${JSON.stringify({
+        kind: "action",
+        summary: `${stage === "execute-explorer" ? "Explorer" : "Expedition"} execution complete.`,
+        artifacts: ["src/import.ts", `${planDirectory}/review.html`],
+        evidence: [{ commandId: "CMD-UNIT", status: "passed", summary: "focused tests passed" }],
+      })}`;
+      return { exitCode: 0, events: [{ type: "item.completed", data: { content } }], usage: { tokens: 1 } };
+    },
+  };
 }
 
 async function planTree(directory: string): Promise<readonly string[]> {
@@ -248,13 +374,28 @@ describe("headless journey commands", () => {
     expect(parseJourneyArgs(["journey", "status", ...route, "--run", "journey_1"])).toMatchObject({ ok: true, action: "status", runId: "journey_1" });
     expect(parseJourneyArgs(["journey", "decide", ...route, "--run", "journey_1", "--answer", "Use the existing contract"])).toMatchObject({ ok: true, action: "decide" });
     expect(parseJourneyArgs(["journey", "approve-route", ...route, "--run", "journey_1"])).toMatchObject({ ok: true, action: "approve-route" });
+    expect(parseJourneyArgs(["journey", "confirm-amendment", ...route, "--run", "journey_1"])).toMatchObject({ ok: true, action: "confirm-amendment" });
     expect(parseJourneyArgs(["journey", "select-explorer", ...route, "--run", "journey_1", "--review-cadence", "slice"])).toMatchObject({ ok: true, action: "select-explorer" });
+    for (const mode of ["explorer", "expedition"] as const) {
+      for (const reviewCadence of ["slice", "phase", "end"] as const) {
+        expect(parseJourneyArgs(["journey", "select-execution", ...route, "--run", "journey_1", "--mode", mode, "--review-cadence", reviewCadence])).toMatchObject({
+          ok: true,
+          action: "select-execution",
+          executionMode: mode,
+          reviewCadence,
+        });
+      }
+    }
     expect(parseJourneyArgs(["journey", "progress", ...route, "--run", "journey_1", "--stage", "gather-supplies"])).toMatchObject({ ok: true, action: "progress", stage: "gather-supplies" });
     for (const args of [
       ["journey", "create", ...route, "--run", "journey_1"],
       ["journey", "progress", ...route, "--run", "journey_1", "--stage", "not-a-stage"],
       ["journey", "status", ...route, "--run", "journey_1", "--answer", "nope"],
+      ["journey", "confirm-amendment", ...route, "--run", "journey_1", "--stage", "execute-explorer"],
       ["journey", "decide", ...route, "--run", "journey_1", "--answer", "  "],
+      ["journey", "select-execution", ...route, "--run", "journey_1", "--mode", "unknown", "--review-cadence", "slice"],
+      ["journey", "select-execution", ...route, "--run", "journey_1", "--mode", "explorer", "--review-cadence", "never"],
+      ["journey", "select-execution", ...route, "--run", "journey_1", "--mode", "explorer", "--mode", "expedition", "--review-cadence", "slice"],
       ["journey", "unknown", ...route, "--run", "journey_1"],
     ]) expect(parseJourneyArgs(args).ok).toBe(false);
   });
@@ -265,7 +406,9 @@ describe("headless journey commands", () => {
     ["status", ["journey", "status", ...route, "--run", "journey_1"]],
     ["decide", ["journey", "decide", ...route, "--run", "journey_1", "--answer", "Use the existing contract"]],
     ["approve-route", ["journey", "approve-route", ...route, "--run", "journey_1"]],
+    ["confirm-amendment", ["journey", "confirm-amendment", ...route, "--run", "journey_1"]],
     ["select-explorer", ["journey", "select-explorer", ...route, "--run", "journey_1", "--review-cadence", "slice"]],
+    ["select-execution", ["journey", "select-execution", ...route, "--run", "journey_1", "--mode", "expedition", "--review-cadence", "phase"]],
     ["progress", ["journey", "progress", ...route, "--run", "journey_1", "--stage", "gather-supplies"]],
   ] as const)("dispatches %s through the local-session seam and emits one success receipt", async (action, args) => {
     const ctx = newCtx();
@@ -279,6 +422,7 @@ describe("headless journey commands", () => {
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ action, runId: "journey_1" });
+    if (action === "select-execution") expect(calls[0]).toMatchObject({ executionMode: "expedition", reviewCadence: "phase" });
     expect(ctx.getExitCode()).toBeUndefined();
     expect(ctx.out).toHaveLength(1);
     expect(JSON.parse(ctx.out[0]!)).toEqual({ ok: true, runId: "journey_1", revision: 3, stage: "gather-supplies", status: "waiting", allowedActions: ["status", "progress"] });
@@ -376,7 +520,15 @@ describe("headless journey commands", () => {
     };
     const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "headless_decision_1" } as const;
     const created = await executeHeadlessJourney({ action: "create", ...base, goal: "Advance the accepted repository-fit decision." }, { processRunner: runner });
-    expect(created).toMatchObject({ ok: true, stage: "repository-fit", status: "waiting", allowedActions: ["status", "resume", "decide"] });
+    expect(created).toMatchObject({
+      ok: true,
+      stage: "repository-fit",
+      status: "waiting",
+      question,
+      requiredOwnerAction: { type: "answer", question },
+      outcome: { type: "waiting" },
+      allowedActions: ["status", "resume", "decide"],
+    });
 
     const store = new BearingStore(root);
     const before = await store.load(base.runId);
@@ -392,6 +544,8 @@ describe("headless journey commands", () => {
       revision: before.revision + 2,
       stage: "repository-fit",
       status: "waiting",
+      summary: "Repository fit confirmed for docs/plans/headless-decision.",
+      outcome: { type: "waiting" },
       allowedActions: ["status", "resume", "progress"],
     });
     expect(after.revision).toBe(before.revision + 2);
@@ -407,6 +561,52 @@ describe("headless journey commands", () => {
     expect(after.events.slice(before.events.length).filter((event) => event.type === "ownerAnswered")).toEqual([
       expect.objectContaining({ payload: expect.objectContaining({ decisionId, answer }) }),
     ]);
+  });
+
+  it("projects a typed failed outcome without unsafe artifacts or arbitrary diagnostics", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bearing-headless-failure-receipt-"));
+    roots.push(root);
+    await mkdir(join(root, ".git"));
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async () => ({ exitCode: 0, events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }], usage: { tokens: 1 } }),
+    };
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "failure_receipt_1" } as const;
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Project only bounded failure context." }, { processRunner: runner })).ok).toBe(true);
+    const store = new BearingStore(root);
+    const before = await store.load(base.runId);
+    const recorded = await store.apply({
+      schemaVersion: 1, commandId: "failure-receipt", correlationId: "failure-receipt", runId: base.runId, expectedRevision: before.revision,
+      session: { sessionId: "bearing", actor: "bearing" }, type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "gather-supplies",
+        status: "failed",
+        artifacts: ["docs/plans/safe.md", `${root}/private.md`, "../escape.md"],
+        lastResultJson: JSON.stringify({
+          status: "failure",
+          code: "adapter_failed",
+          tokens: 1,
+          providerText: "Bearer private-provider-token",
+          arbitraryDiagnostic: { repository: root },
+        }),
+        qaJson: "[]",
+        selectionProvider: "codex",
+        selectionModel: "gpt-5.6-terra",
+        selectionReasoning: "medium",
+      },
+    });
+    expect(recorded.ok).toBe(true);
+
+    const receipt = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner });
+    expect(receipt).toMatchObject({
+      ok: true,
+      status: "failed",
+      artifacts: ["docs/plans/safe.md"],
+      outcome: { type: "failed", code: "adapter_failed" },
+    });
+    expect(JSON.stringify(receipt)).not.toMatch(/private-provider-token|providerText|arbitraryDiagnostic/);
+    expect(JSON.stringify(receipt)).not.toContain(root);
   });
 
   it("rejects review before a completed execution checkpoint without changing the journey", async () => {
@@ -525,6 +725,26 @@ describe("headless journey commands", () => {
     expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Record the route review." }, { processRunner: runner })).ok).toBe(true);
     await seedPlanReviewBoundary(root, base.runId);
     const reviewStatus = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner });
+    expect(reviewStatus).toMatchObject({
+      summary: "Implementation route is ready for owner review.",
+      artifacts: [
+        "docs/plans/headless-review/plan-spec.md",
+        "docs/plans/headless-review/design.md",
+        "docs/plans/headless-review/seit.md",
+        "docs/plans/headless-review/implementation.md",
+      ],
+      requiredOwnerAction: {
+        type: "approve-route",
+        prompt: "Approve the complete planning package before implementation?",
+        artifacts: [
+          "docs/plans/headless-review/plan-spec.md",
+          "docs/plans/headless-review/design.md",
+          "docs/plans/headless-review/seit.md",
+          "docs/plans/headless-review/implementation.md",
+        ],
+      },
+      outcome: { type: "waiting" },
+    });
     expect(reviewStatus.allowedActions).toContain("approve-route");
     expect(reviewStatus.allowedActions).not.toContain("select-explorer");
     expect(await executeHeadlessJourney({ action: "approve-route", ...base }, { processRunner: runner })).toMatchObject({ ok: true, runId: base.runId });
@@ -532,7 +752,212 @@ describe("headless journey commands", () => {
     const decision = events.find((event) => event.type === "decisionRequired");
     expect(decision?.payload.question).toBe("Approve the complete planning package before implementation?");
     expect(events.some((event) => event.type === "ownerAnswered" && event.payload.decisionId === decision?.payload.decisionId && event.payload.answer === "Approved for execution-mode selection")).toBe(true);
-    expect((await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner })).allowedActions).toContain("select-explorer");
+    expect(await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner })).toMatchObject({
+      allowedActions: ["status", "resume", "select-execution", "select-explorer"],
+      requiredOwnerAction: {
+        type: "select-execution",
+        modes: ["explorer", "expedition"],
+        reviewCadences: ["slice", "phase", "end"],
+      },
+    });
+  });
+
+  it.each([
+    ["explorer", "slice", "execute-explorer"],
+    ["expedition", "end", "execute-expedition"],
+  ] as const)("selects %s execution only after durable route approval", async (executionMode, reviewCadence, stage) => {
+    const root = await mkdtemp(join(tmpdir(), `bearing-headless-${executionMode}-`));
+    roots.push(root);
+    await mkdir(join(root, ".git"));
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async () => ({ exitCode: 0, events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }], usage: { tokens: 1 } }),
+    };
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: `${executionMode}_selection_1` } as const;
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: `Select ${executionMode}.` }, { processRunner: runner })).ok).toBe(true);
+    await seedPlanReviewBoundary(root, base.runId);
+    const beforeApproval = await new BearingStore(root).load(base.runId);
+    expect(await executeHeadlessJourney({ action: "select-execution", ...base, executionMode, reviewCadence }, { processRunner: runner })).toEqual({
+      ok: false,
+      code: "illegal_transition",
+      runId: base.runId,
+      revision: beforeApproval.revision,
+    });
+    expect((await new BearingStore(root).load(base.runId)).revision).toBe(beforeApproval.revision);
+    expect((await executeHeadlessJourney({ action: "approve-route", ...base }, { processRunner: runner })).ok).toBe(true);
+    expect(await executeHeadlessJourney({ action: "select-execution", ...base, executionMode, reviewCadence }, { processRunner: runner })).toMatchObject({
+      ok: true,
+      stage,
+    });
+    expect(JSON.parse((await new BearingStore(root).load(base.runId)).journeyCheckpoint?.qaJson ?? "null")).toEqual(expect.arrayContaining([
+      { question: "Execution mode", answer: executionMode },
+      { question: "Review cadence", answer: reviewCadence },
+    ]));
+  });
+
+  it.each([
+    ["complete", ["status"]],
+    ["failed", ["status", "resume", "progress"]],
+    ["stopped", ["status", "resume", "progress"]],
+  ] as const)("advertises exact %s actions", async (status, allowedActions) => {
+    const root = await mkdtemp(join(tmpdir(), `bearing-headless-${status}-actions-`));
+    roots.push(root);
+    await mkdir(join(root, ".git"));
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async () => ({ exitCode: 0, events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }], usage: { tokens: 1 } }),
+    };
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: `${status}_actions_1` } as const;
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: `Project ${status} actions.` }, { processRunner: runner })).ok).toBe(true);
+    const store = new BearingStore(root);
+    const before = await store.load(base.runId);
+    const recorded = await store.apply({
+      schemaVersion: 1, commandId: `${status}-actions`, correlationId: `${status}-actions`, runId: base.runId, expectedRevision: before.revision,
+      session: { sessionId: "bearing", actor: "bearing" }, type: "recordJourneyCheckpoint",
+      payload: {
+        stage: status === "complete" ? "review" : "repository-fit",
+        status,
+        artifacts: [],
+        lastResultJson: JSON.stringify(status === "complete"
+          ? { status: "action", summary: "Complete.", artifacts: [], tokens: 1 }
+          : { status: "failure", code: "adapter_failed", tokens: 1 }),
+        qaJson: "[]",
+        selectionProvider: "codex",
+        selectionModel: "gpt-5.6-terra",
+        selectionReasoning: "medium",
+      },
+    });
+    expect(recorded.ok).toBe(true);
+    expect(await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner })).toMatchObject({ status, allowedActions });
+    const revision = (await store.load(base.runId)).revision;
+    const progress = await executeHeadlessJourney({ action: "progress", ...base, stage: status === "complete" ? "review" : "repository-fit" }, { processRunner: runner });
+    if (status === "complete") {
+      expect(progress).toEqual({ ok: false, code: "illegal_transition", runId: base.runId, revision });
+      expect((await store.load(base.runId)).revision).toBe(revision);
+    } else {
+      expect(progress).toMatchObject({ ok: true, runId: base.runId, stage: "repository-fit" });
+    }
+  });
+
+  it("requires explicit owner confirmation to retry a Focus amendment and persists the admitted warrant", async () => {
+    const root = await disposableGitRepository("bearing-headless-focus-amendment-");
+    const directory = "docs/plans/headless-focus-amendment";
+    const available: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async () => ({ exitCode: 0, events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }], usage: { tokens: 1 } }),
+    };
+    const recovery = modelOperatedJourneyRunner(directory);
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "focus_amendment_1" } as const;
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Confirm the amended Focus contract." }, { processRunner: available })).ok).toBe(true);
+    const store = await seedPlanReviewBoundary(root, base.runId, directory);
+    const sourceNames = ["plan-spec.md", "design.md", "seit.md", "implementation.md"] as const;
+    const sourceContents = await Promise.all(sourceNames.map((name) => readFile(join(root, directory, name), "utf8")));
+    await writeFile(join(root, directory, "review.html"), renderPlanningReview(sourceNames.map((name, index) => [name, sourceContents[index]!] as [string, string])));
+    expect((await executeHeadlessJourney({ action: "approve-route", ...base }, { processRunner: available })).ok).toBe(true);
+
+    const current = await store.load(base.runId);
+    const checkpoint = current.journeyCheckpoint!;
+    const failed = await store.apply({
+      schemaVersion: 1, commandId: "focus-amendment-failed", correlationId: "focus-amendment-failed", runId: base.runId, expectedRevision: current.revision,
+      session: { sessionId: "bearing", actor: "bearing" }, type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "execute-explorer",
+        status: "failed",
+        artifacts: [...checkpoint.artifacts, `${directory}/review.html`],
+        qaJson: JSON.stringify([{ question: "Execution mode", answer: "explorer" }, { question: "Review cadence", answer: "phase" }]),
+        planDirectory: directory,
+        resolvedPlanDirectory: directory,
+        repositoryFitDecision: checkpoint.repositoryFitDecision,
+        reviewBaselineRevision: checkpoint.reviewBaselineRevision,
+        lastResultJson: JSON.stringify({
+          status: "failure",
+          code: "focus_amendment_required",
+          focusDrift: { changedPlanSources: ["implementation.md"] },
+          tokens: 1,
+        }),
+        selectionProvider: "codex",
+        selectionModel: "gpt-5.6-terra",
+        selectionReasoning: "medium",
+      },
+    });
+    expect(failed.ok).toBe(true);
+
+    expect(await executeHeadlessJourney({ action: "status", ...base }, { processRunner: recovery })).toMatchObject({
+      status: "failed",
+      allowedActions: ["status", "resume", "confirm-amendment"],
+      requiredOwnerAction: {
+        type: "confirm-amendment",
+        prompt: expect.stringContaining("Confirm the Focus amendment"),
+      },
+    });
+    const decisionSource = await store.load(base.runId);
+    const required = await store.apply({
+      schemaVersion: 1, commandId: "focus-amendment-unrelated", correlationId: "focus-amendment-unrelated", runId: base.runId, expectedRevision: decisionSource.revision,
+      session: { sessionId: "owner", actor: "owner" }, type: "requireDecision",
+      payload: { decisionId: "focus-amendment-unrelated", question: "Choose the unrelated migration owner.", consequential: true },
+    });
+    expect(required.ok).toBe(true);
+    const blocked = await store.load(base.runId);
+    const providerStages = [...recovery.stages];
+    expect(await executeHeadlessJourney({ action: "confirm-amendment", ...base }, { processRunner: recovery })).toEqual({
+      ok: false,
+      code: "illegal_transition",
+      runId: base.runId,
+      revision: blocked.revision,
+    });
+    const unchanged = await store.load(base.runId);
+    expect(unchanged.revision).toBe(blocked.revision);
+    expect(unchanged.events).toEqual(blocked.events);
+    expect(unchanged.pendingDecision).toEqual(blocked.pendingDecision);
+    expect(recovery.stages).toEqual(providerStages);
+    const answered = await store.apply({
+      schemaVersion: 1, commandId: "focus-amendment-unrelated-answer", correlationId: "focus-amendment-unrelated-answer", runId: base.runId, expectedRevision: unchanged.revision,
+      session: { sessionId: "owner", actor: "owner" }, type: "recordOwnerAnswer",
+      payload: { decisionId: "focus-amendment-unrelated", answer: "Alice owns the migration." },
+    });
+    expect(answered.ok).toBe(true);
+    const before = await store.load(base.runId);
+    expect(await executeHeadlessJourney({ action: "progress", ...base, stage: "execute-explorer" }, { processRunner: recovery })).toEqual({
+      ok: false,
+      code: "illegal_transition",
+      runId: base.runId,
+      revision: before.revision,
+    });
+    expect(await store.load(base.runId)).toMatchObject({ revision: before.revision, events: before.events });
+
+    expect(await executeHeadlessJourney({ action: "confirm-amendment", ...base }, { processRunner: recovery })).toMatchObject({
+      ok: true,
+      stage: "execute-explorer",
+      status: "waiting",
+      summary: "Explorer execution complete.",
+    });
+    const confirmed = await store.load(base.runId);
+    const amendmentDecision = confirmed.events.find((event) => event.type === "decisionRequired"
+      && event.payload.question === "The approved Focus contract changed. Review the drift summary. Confirm the Focus amendment to adopt the updated plan and recapture the Git baseline.");
+    expect(amendmentDecision).toMatchObject({ actor: "owner", payload: { consequential: true } });
+    expect(confirmed.events).toContainEqual(expect.objectContaining({
+      type: "ownerAnswered",
+      actor: "owner",
+      payload: expect.objectContaining({
+        decisionId: amendmentDecision?.payload.decisionId,
+        answer: "Confirmed Focus amendment for execution retry",
+      }),
+    }));
+    const runtime = parseRuntimeState(confirmed.journeyCheckpoint!.runtimeStateJson!);
+    expect(runtime).toMatchObject({ ok: true, value: { retry: expect.arrayContaining([expect.objectContaining({ warrant: "approved_amendment", outcome: "admitted" })]) } });
+    expect(recovery.stages).toContain("execute-explorer");
+
+    const after = await store.load(base.runId);
+    expect(await executeHeadlessJourney({ action: "confirm-amendment", ...base }, { processRunner: recovery })).toEqual({
+      ok: false,
+      code: "illegal_transition",
+      runId: base.runId,
+      revision: after.revision,
+    });
+    expect(await store.load(base.runId)).toMatchObject({ revision: after.revision, events: after.events });
   });
 
   it("rejects route approval behind an unrelated owner decision without mutating it", async () => {
@@ -618,7 +1043,7 @@ describe("headless journey commands", () => {
     await expect(access(join(root, ".bearing", "workspace.json"))).resolves.toBeUndefined();
   });
 
-  it("reads durable route-review state when provider readiness is unavailable", async () => {
+  it("reads durable route-review state without advertising provider-dependent actions when readiness is unavailable", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-headless-unavailable-read-"));
     roots.push(root);
     await mkdir(join(root, ".git"));
@@ -645,7 +1070,8 @@ describe("headless journey commands", () => {
         status: "waiting",
         readiness: "unavailable",
       });
-      expect(receipt.allowedActions).toContain("approve-route");
+      expect(receipt.allowedActions).toEqual(["status", "resume"]);
+      expect(receipt.requiredOwnerAction).toBeUndefined();
     }
   });
 
@@ -677,6 +1103,179 @@ describe("headless journey commands", () => {
     expect(status.allowedActions).not.toContain("select-explorer");
     expect(await executeHeadlessJourney({ action: "select-explorer", ...base, reviewCadence: "slice" }, { processRunner: runner })).toEqual({ ok: false, code: "illegal_transition", runId: base.runId, revision });
     expect((await store.load(base.runId)).revision).toBe(revision);
+  });
+
+  it.each([
+    ["explorer", "slice", "execute-explorer"],
+    ["expedition", "end", "execute-expedition"],
+  ] as const)("completes one stable %s journey and reconstructs it across replacement adapters", async (executionMode, reviewCadence, executionStage) => {
+    const root = await disposableGitRepository(`bearing-headless-e2e-${executionMode}-`);
+    const planDirectory = `docs/plans/${executionMode}-journey`;
+    const firstRunner = modelOperatedJourneyRunner(planDirectory);
+    const replacementRunner = modelOperatedJourneyRunner(planDirectory);
+    const finalRunner = modelOperatedJourneyRunner(planDirectory);
+    const base = {
+      repository: root,
+      provider: "codex",
+      model: "gpt-5.6-terra",
+      reasoning: "medium",
+      runId: `${executionMode}_e2e_1`,
+    } as const;
+
+    const created = await executeHeadlessJourney(
+      { action: "create", ...base, goal: `Complete the ${executionMode} journey.` },
+      { processRunner: firstRunner },
+    );
+    expect(created).toMatchObject({
+      ok: true,
+      runId: base.runId,
+      stage: "repository-fit",
+      status: "waiting",
+      requiredOwnerAction: { type: "answer", question: "Use this repository and plan directory?" },
+      allowedActions: ["status", "resume", "decide"],
+    });
+    const store = new BearingStore(root);
+    const pendingFit = await store.load(base.runId);
+
+    for (const action of ["status", "resume"] as const) {
+      expect(await executeHeadlessJourney({ action, ...base }, { processRunner: replacementRunner })).toMatchObject({
+        ok: true,
+        runId: base.runId,
+        revision: pendingFit.revision,
+        stage: "repository-fit",
+        status: "waiting",
+        requiredOwnerAction: { type: "answer", question: "Use this repository and plan directory?" },
+      });
+      const unchanged = await store.load(base.runId);
+      expect(unchanged.revision).toBe(pendingFit.revision);
+      expect(unchanged.events).toEqual(pendingFit.events);
+    }
+
+    expect(await executeHeadlessJourney(
+      { action: "decide", ...base, answer: "Approved" },
+      { processRunner: replacementRunner },
+    )).toMatchObject({
+      ok: true,
+      runId: base.runId,
+      stage: "repository-fit",
+      status: "waiting",
+      summary: `Repository fit confirmed for ${planDirectory}.`,
+    });
+
+    const planningStages = ["set-bearings", "gather-supplies", "map-route", "recon", "draft-implementation"] as const;
+    const revisions: number[] = [];
+    for (const stage of planningStages) {
+      const receipt = await executeHeadlessJourney(
+        { action: "progress", ...base, stage },
+        { processRunner: replacementRunner },
+      );
+      expect(receipt).toMatchObject({ ok: true, runId: base.runId, stage, status: "waiting" });
+      revisions.push(receipt.revision);
+    }
+    expect(revisions).toEqual([...revisions].sort((left, right) => left - right));
+    expect(new Set(revisions).size).toBe(revisions.length);
+
+    const routeReview = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: replacementRunner });
+    expect(routeReview).toMatchObject({
+      ok: true,
+      runId: base.runId,
+      stage: "draft-implementation",
+      status: "waiting",
+      requiredOwnerAction: {
+        type: "approve-route",
+        artifacts: [
+          `${planDirectory}/prompts/repository-map.md`,
+          `${planDirectory}/plan-spec.md`,
+          `${planDirectory}/design.md`,
+          `${planDirectory}/seit.md`,
+          `${planDirectory}/implementation.md`,
+          `${planDirectory}/review.html`,
+        ],
+      },
+    });
+    const beforeApproval = await store.load(base.runId);
+    expect(await executeHeadlessJourney(
+      { action: "select-execution", ...base, executionMode, reviewCadence },
+      { processRunner: replacementRunner },
+    )).toEqual({
+      ok: false,
+      code: "illegal_transition",
+      runId: base.runId,
+      revision: beforeApproval.revision,
+    });
+    expect(await store.load(base.runId)).toMatchObject({ revision: beforeApproval.revision, events: beforeApproval.events });
+
+    expect((await executeHeadlessJourney({ action: "approve-route", ...base }, { processRunner: replacementRunner })).ok).toBe(true);
+    expect(await executeHeadlessJourney({ action: "status", ...base }, { processRunner: replacementRunner })).toMatchObject({
+      requiredOwnerAction: {
+        type: "select-execution",
+        modes: ["explorer", "expedition"],
+        reviewCadences: ["slice", "phase", "end"],
+      },
+    });
+    const executed = await executeHeadlessJourney(
+      { action: "select-execution", ...base, executionMode, reviewCadence },
+      { processRunner: replacementRunner },
+    );
+    expect(executed).toMatchObject({
+      ok: true,
+      runId: base.runId,
+      stage: executionStage,
+      status: "waiting",
+      summary: `${executionMode === "explorer" ? "Explorer" : "Expedition"} execution complete.`,
+      allowedActions: ["status", "resume", "progress"],
+    });
+
+    const afterExecution = await store.load(base.runId);
+    for (const action of ["status", "resume"] as const) {
+      expect(await executeHeadlessJourney({ action, ...base }, { processRunner: finalRunner })).toMatchObject({
+        ok: true,
+        runId: base.runId,
+        revision: afterExecution.revision,
+        stage: executionStage,
+        status: "waiting",
+        allowedActions: ["status", "resume", "progress"],
+      });
+      expect(await store.load(base.runId)).toMatchObject({ revision: afterExecution.revision, events: afterExecution.events });
+    }
+
+    const completed = await executeHeadlessJourney(
+      { action: "progress", ...base, stage: "review" },
+      { processRunner: finalRunner },
+    );
+    expect(completed).toMatchObject({
+      ok: true,
+      runId: base.runId,
+      stage: "review",
+      status: "complete",
+      summary: "Review passed with final evidence.",
+      artifacts: expect.arrayContaining(["src/import.ts", `${planDirectory}/review.html`]),
+      outcome: { type: "complete" },
+      allowedActions: ["status"],
+    });
+    const terminal = await store.load(base.runId);
+    expect(terminal.journeyCheckpoint).toMatchObject({ stage: "review", status: "complete" });
+    expect(terminal.events.every((event) => event.runId === base.runId)).toBe(true);
+    expect(await executeHeadlessJourney(
+      { action: "progress", ...base, stage: "review" },
+      { processRunner: finalRunner },
+    )).toEqual({
+      ok: false,
+      code: "illegal_transition",
+      runId: base.runId,
+      revision: terminal.revision,
+    });
+    expect(await store.load(base.runId)).toMatchObject({ revision: terminal.revision, events: terminal.events });
+    expect([...firstRunner.stages, ...replacementRunner.stages, ...finalRunner.stages]).toEqual([
+      "repository-fit",
+      "gather-supplies",
+      "gather-supplies",
+      "map-route",
+      "recon",
+      "draft-implementation",
+      executionStage,
+      "review",
+    ]);
   });
 });
 
