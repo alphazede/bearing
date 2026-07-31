@@ -196,8 +196,13 @@ async function selectRepository(port: string, cookie: string, root: string): Pro
   expect(selected.status).toBe(200);
 }
 
-async function readyJourneyHandler(root: string, runner: ProcessRunner): Promise<{ port: string; cookie: string }> {
+async function readyJourneyHandler(
+  root: string,
+  runner: ProcessRunner,
+  options: Omit<Parameters<typeof createRequestHandler>[2], "processRunner" | "verification"> = {},
+): Promise<{ port: string; cookie: string }> {
   const { port, cap } = await launchHandler(new RepositoryBootstrap(), {
+    ...options,
     processRunner: runner,
     verification: { verify: async () => true },
   });
@@ -314,6 +319,39 @@ async function recordPlanningApproval(store: BearingStore, runId: string, suffix
     correlationId: `approve-plan-review-${runId}${idSuffix}`,
   });
   if (!approved.ok) throw new Error(approved.reason);
+}
+
+async function recordFocusAmendmentApproval(
+  store: BearingStore,
+  runId: string,
+  suffix = "",
+): Promise<{ decisionId: string; expectedRevision: number }> {
+  let durable = await store.load(runId);
+  const decisionId = `focus-amendment-${runId}${suffix ? `-${suffix}` : ""}`;
+  const required = await store.apply({
+    schemaVersion: 1,
+    commandId: `require-${decisionId}`,
+    runId,
+    expectedRevision: durable.revision,
+    type: "requireDecision",
+    payload: { decisionId, question: "The approved Focus contract changed. Review the drift summary. Confirm the Focus amendment to adopt the updated plan and recapture the Git baseline.", consequential: true },
+    session: { sessionId: "test-owner", actor: "owner" },
+    correlationId: `require-${decisionId}`,
+  });
+  if (!required.ok) throw new Error(required.reason);
+  durable = await store.load(runId);
+  const approved = await store.apply({
+    schemaVersion: 1,
+    commandId: `approve-${decisionId}`,
+    runId,
+    expectedRevision: durable.revision,
+    type: "recordOwnerAnswer",
+    payload: { decisionId, answer: "Confirmed Focus amendment for execution retry" },
+    session: { sessionId: "test-owner", actor: "owner" },
+    correlationId: `approve-${decisionId}`,
+  });
+  if (!approved.ok) throw new Error(approved.reason);
+  return { decisionId, expectedRevision: approved.state.revision };
 }
 
 async function seedRun(root: string, runId: string, planDirectory?: string): Promise<BearingStore> {
@@ -1348,7 +1386,9 @@ describe("GET / native page and fragment secrecy", () => {
     expect(r.body).toContain('then(renderJourney, reconcileJourney)');
     expect(r.body).toContain('function renderSavedExecution(body)');
     expect(r.body).toContain('The follow-on review request disconnected. Your implementation success is saved; choose Retry to start Surveyor review.');
-    expect(r.body).toContain('var stage = retryStage || currentStage; retryStage = ""; var extra = focusAmendmentPending ? { focusAmendmentConfirmed: true } : undefined');
+    expect(r.body).toContain('function confirmFocusAmendment(stage)');
+    expect(r.body).toContain('focusAmendmentDecisionId: decisionId, focusAmendmentExpectedRevision: state.revision');
+    expect(r.body).toContain('focusAmendmentPending ? confirmFocusAmendment(stage) : invokeJourney(stage)');
     expect(r.body).toContain('retry.textContent = focusAmendmentPending ? "Confirm amendment" : "Retry"');
     expect(r.body).toContain('run.stage === "execute-explorer" || run.stage === "execute-expedition"');
     expect(r.body).toContain('For more information about lenses, use Glossary in the bottom-left.');
@@ -1574,7 +1614,7 @@ describe("GET / native page and fragment secrecy", () => {
       failureClass: "agent_receipt_or_artifact_validation",
       code: "fit_malformed",
       retryLevel: "simplify",
-      version: "0.1.5",
+      version: "0.1.6",
       fitDiagnostic: { check: "receipt_ok", field: "detail", repository: root, payload: secret },
     };
     renderRecoveryReport(invalid);
@@ -2919,6 +2959,7 @@ describe("Phase 5 local runtime wiring", () => {
       recovery: {
         status: "stopped",
         code: "fit_malformed",
+        version: "0.1.6",
         fitDiagnostic: { check: "assumption_repository", field: "repository" },
       },
     });
@@ -3249,6 +3290,58 @@ describe("Phase 5 local runtime wiring", () => {
     await recordPlanningApproval(store, runId, "amendment");
     expect((await currentPlanningVerdict(root, planDirectory))?.checkedContentHash).toBe(verdict?.checkedContentHash);
 
+    const missingBinding = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "execute-explorer",
+        workGoal: "Complete the approved work",
+        executionMode: "explorer",
+        reviewCadence: "phase",
+        focusAmendmentConfirmed: true,
+      }),
+    });
+
+    expect(missingBinding.status).toBe(400);
+    expect(runner.executionCalls).toBe(1);
+    const approval = await recordFocusAmendmentApproval(store, runId);
+    const mismatchedBinding = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "execute-explorer",
+        workGoal: "Complete the approved work",
+        executionMode: "explorer",
+        reviewCadence: "phase",
+        focusAmendmentConfirmed: true,
+        focusAmendmentDecisionId: approval.decisionId,
+        focusAmendmentExpectedRevision: approval.expectedRevision - 1,
+      }),
+    });
+    expect(mismatchedBinding.status).toBe(409);
+    expect(runner.executionCalls).toBe(1);
+    const mismatchedDecision = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "execute-explorer",
+        workGoal: "Complete the approved work",
+        executionMode: "explorer",
+        reviewCadence: "phase",
+        focusAmendmentConfirmed: true,
+        focusAmendmentDecisionId: "another-focus-amendment-decision",
+        focusAmendmentExpectedRevision: approval.expectedRevision,
+      }),
+    });
+    expect(mismatchedDecision.status).toBe(409);
+    expect(runner.executionCalls).toBe(1);
+
     const confirmed = await call(port, {
       method: "POST",
       path: "/api/v1/journey",
@@ -3260,6 +3353,8 @@ describe("Phase 5 local runtime wiring", () => {
         executionMode: "explorer",
         reviewCadence: "phase",
         focusAmendmentConfirmed: true,
+        focusAmendmentDecisionId: approval.decisionId,
+        focusAmendmentExpectedRevision: approval.expectedRevision,
       }),
     });
 
@@ -3274,6 +3369,98 @@ describe("Phase 5 local runtime wiring", () => {
     expect(runtime.value.retry).toEqual(expect.arrayContaining([
       expect.objectContaining({ warrant: "approved_amendment", outcome: "admitted" }),
     ]));
+  });
+
+  it("rejects a decision inserted after amendment preflight before provider execution or an execution checkpoint", async () => {
+    const root = await tempRepo();
+    await new Promise<void>((resolve, reject) => execFile("git", ["init", "-q"], { cwd: root }, (error) => error ? reject(error) : resolve()));
+    const runner = new FocusAmendmentRunner();
+    let store!: BearingStore;
+    let interleave = false;
+    const { port, cookie } = await readyJourneyHandler(root, runner, {
+      beforeJourneyExecutionCheckpoint: async ({ runId, expectedRevision }: { readonly runId: string; readonly expectedRevision: number }) => {
+        if (!interleave) return;
+        interleave = false;
+        const inserted = await store.apply({
+          schemaVersion: 1,
+          commandId: "insert-consequential-decision",
+          runId,
+          expectedRevision,
+          type: "requireDecision",
+          payload: { decisionId: "inserted-consequential-decision", question: "Choose the migration owner.", consequential: true },
+          session: { sessionId: "other-owner", actor: "owner" },
+          correlationId: "insert-consequential-decision",
+        });
+        if (!inserted.ok) throw new Error(inserted.reason);
+      },
+    });
+    const runId = "focus-amendment-interleaving";
+    const planDirectory = `docs/plans/${runId}`;
+    store = await seedRun(root, runId);
+    for (const stage of ["set-bearings", "gather-supplies", "map-route", "recon", "draft-implementation"] as const) {
+      expect((await call(port, {
+        method: "POST",
+        path: "/api/v1/journey",
+        headers: sessionHeaders(port, { cookie }),
+        body: JSON.stringify({ runId, stage, workGoal: "Complete the approved work" }),
+      })).status).toBe(200);
+    }
+    await recordPlanningApproval(store, runId);
+    expect((await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId, stage: "execute-explorer", workGoal: "Complete the approved work", executionMode: "explorer", reviewCadence: "phase" }),
+    })).status).toBe(200);
+    expect(runner.executionCalls).toBe(1);
+
+    const sourceNames = ["plan-spec.md", "design.md", "seit.md", "implementation.md"] as const;
+    const sourceContents = await Promise.all(sourceNames.map((name) => readFile(join(root, planDirectory, name), "utf8")));
+    await writeFile(join(root, planDirectory, "review.html"), renderPlanningReview(sourceNames.map((name, index) => [name, sourceContents[index]!])));
+    const verdict = await currentPlanningVerdict(root, planDirectory);
+    let durable = await store.load(runId);
+    const validation = await store.apply({
+      schemaVersion: 1,
+      commandId: "checkpoint-interleaving-validation",
+      runId,
+      expectedRevision: durable.revision,
+      type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "draft-implementation",
+        status: "waiting",
+        artifacts: [],
+        planDirectory,
+        lastResultJson: JSON.stringify({ status: "action", summary: "Amended planning package validated.", artifacts: [], tokens: 0, planningValidation: verdict }),
+      },
+      session: { sessionId: "test-bearing", actor: "bearing" },
+      correlationId: "checkpoint-interleaving-validation",
+    });
+    if (!validation.ok) throw new Error(validation.reason);
+    await recordPlanningApproval(store, runId, "interleaving");
+    const approval = await recordFocusAmendmentApproval(store, runId, "interleaving");
+    durable = await store.load(runId);
+    const checkpointCount = durable.events.filter((event) => event.type === "journeyCheckpointRecorded").length;
+    interleave = true;
+    const rejected = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "execute-explorer",
+        workGoal: "Complete the approved work",
+        executionMode: "explorer",
+        reviewCadence: "phase",
+        focusAmendmentConfirmed: true,
+        focusAmendmentDecisionId: approval.decisionId,
+        focusAmendmentExpectedRevision: approval.expectedRevision,
+      }),
+    });
+    expect(rejected.status).toBe(409);
+    expect(runner.executionCalls).toBe(1);
+    durable = await store.load(runId);
+    expect(durable.pendingDecision).toMatchObject({ decisionId: "inserted-consequential-decision" });
+    expect(durable.events.filter((event) => event.type === "journeyCheckpointRecorded")).toHaveLength(checkpointCount);
   });
 
   it("restores an escalation target from the persisted retry outcome", async () => {
@@ -3410,6 +3597,53 @@ describe("planning-state checkpoint integration", () => {
     }
     expect(await treeSnapshot(root)).toEqual(before);
     expect(runner.calls).toHaveLength(0);
+  });
+
+  it("reconstructs the same pending owner gate after handler replacement and keeps an out-of-order request unchanged", async () => {
+    const root = await tempRepo();
+    const runId = "replacement-owner-gate";
+    const first = await beginFitFlow(root, runId);
+    const before = await first.store.load(runId);
+    const firstStatus = await call(first.port, {
+      method: "GET",
+      path: `/api/v1/journey/${runId}/status`,
+      headers: { cookie: first.cookie },
+    });
+    expect(JSON.parse(firstStatus.body).run).toMatchObject({
+      runId,
+      stage: "repository-fit",
+      status: "waiting",
+      question: "Confirm the proposed plan directory.",
+    });
+
+    await closeLatestServer();
+    const replacementRunner = new CheckpointRunner();
+    const replacement = await readyJourneyHandler(root, replacementRunner);
+    const resumed = await call(replacement.port, {
+      method: "GET",
+      path: `/api/v1/journey/${runId}/status`,
+      headers: { cookie: replacement.cookie },
+    });
+    expect(JSON.parse(resumed.body).run).toMatchObject({
+      runId,
+      stage: "repository-fit",
+      status: "waiting",
+      question: "Confirm the proposed plan directory.",
+    });
+
+    const rejected = await call(replacement.port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(replacement.port, { cookie: replacement.cookie }),
+      body: JSON.stringify({ runId, stage: "map-route", workGoal: "Resume shared" }),
+    });
+    expect(rejected.status).toBe(409);
+    expect(JSON.parse(rejected.body)).toEqual({ status: "failure", code: "input_invalid", tokens: 0 });
+    const after = await first.store.load(runId);
+    expect(after.revision).toBe(before.revision);
+    expect(after.events).toEqual(before.events);
+    expect(after.pendingDecision).toEqual(before.pendingDecision);
+    expect(replacementRunner.calls).toHaveLength(0);
   });
 
   it("resumes a pre-fit-schema checkpoint that already has a valid plan directory", async () => {

@@ -53,6 +53,7 @@ const PLAN_REVIEW_QUESTION = "Approve the complete planning package before imple
 const PLAN_REVIEW_APPROVAL = "Approved for execution-mode selection";
 const CONSOLIDATION_APPROVAL = "Approve consolidation";
 const FOCUS_AMENDMENT_PROMPT = "The approved Focus contract changed. Review the drift summary. Confirm the Focus amendment to adopt the updated plan and recapture the Git baseline.";
+const FOCUS_AMENDMENT_APPROVAL = "Confirmed Focus amendment for execution retry";
 const CONTINUITY_LOST_DISCLOSURE = "The prior provider conversation is unavailable; conversation continuity was lost and context may need to be supplied again.";
 const SIGNATURE_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/bearing-office.png", import.meta.url)));
 const EXPEDITION_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/bearing-expedition.png", import.meta.url)));
@@ -565,6 +566,7 @@ const NATIVE_HTML_TEMPLATE = "<!doctype html>\n" +
     '  function renderArtifacts(body) { renderArtifactList(document.getElementById("artifact-checklist"), body); }\n' +
     '  function renderRecoveryReport(recovery) { var panel = document.getElementById("recovery-report"); document.getElementById("journey-summary").after(panel); panel.hidden = !recovery || (recovery.status !== "repaired" && recovery.status !== "stopped"); if (panel.hidden) return; var fitDiagnosticFields = {scope_repository:["repository","authorizedWorkspaceRoot"],receipt_shape:["receipt"],receipt_reason:["reason"],receipt_ok:["ok"],question_text:["question"],assumption_shape:["assumption"],assumption_repository:["repository"],assumption_plan_directory:["planDirectory"],assumption_rationale:["rationale"],assumption_evidence:["evidence"],evidence_shape:["evidence"],evidence_kind:["kind"],evidence_path:["path"],evidence_detail:["detail"],evidence_containment:["path"],result_envelope:["assistantText","envelope"]}; var fitDiagnostic = recovery.fitDiagnostic; var fields = fitDiagnostic && typeof fitDiagnostic.check === "string" && typeof fitDiagnostic.field === "string" ? fitDiagnosticFields[fitDiagnostic.check] : undefined; var hasFitDiagnostic = Array.isArray(fields) && fields.indexOf(fitDiagnostic.field) !== -1; var diagnosticSummary = hasFitDiagnostic ? " Repository fit check: " + fitDiagnostic.check + "; field: " + fitDiagnostic.field + "." : ""; document.getElementById("recovery-heading").textContent = recovery.status === "repaired" ? "Bearing repaired a recoverable agent error." : "Bearing stopped a repeated recoverable agent error."; document.getElementById("recovery-summary").textContent = "Stage " + recovery.stage + (recovery.status === "repaired" ? " recovered from " : " stopped after ") + recovery.code + " using " + recovery.retryLevel + "." + diagnosticSummary; document.getElementById("report-recovery-bug").onclick = function () { var title = "Bearing " + recovery.version + ": " + recovery.code + " during " + recovery.stage; var body = ["Bearing version: " + recovery.version, "Stage: " + recovery.stage, "Failure class: " + recovery.failureClass, "Failure code: " + recovery.code, "Retry level: " + recovery.retryLevel].concat(hasFitDiagnostic ? ["Repository fit check: " + fitDiagnostic.check, "Repository fit field: " + fitDiagnostic.field] : []).join("\\n"); window.open("https://github.com/alphazede/bearing/issues/new?title=" + encodeURIComponent(title) + "&body=" + encodeURIComponent(body), "_blank", "noopener,noreferrer"); }; }\n' +
     '  function recordPlanReview(answer) { var question = "Approve the complete planning package before implementation?"; return readRun(currentRunId).then(function (state) { if (state.pendingDecision && state.pendingDecision.question !== question) throw new Error("Resolve the current owner decision before reviewing the route."); var save = state.pendingDecision ? Promise.resolve(state) : postCommand(currentRunId, state, "requireDecision", { decisionId: "plan-review-" + crypto.randomUUID(), question: question, consequential: true }).then(function () { return readRun(currentRunId); }); return save; }).then(function (state) { if (!state.pendingDecision || state.pendingDecision.question !== question) throw new Error("Planning approval could not be recorded."); return postCommand(currentRunId, state, "recordOwnerAnswer", { decisionId: state.pendingDecision.decisionId, answer: answer }); }); }\n' +
+    '  function confirmFocusAmendment(stage) { var question = "The approved Focus contract changed. Review the drift summary. Confirm the Focus amendment to adopt the updated plan and recapture the Git baseline."; var answer = "Confirmed Focus amendment for execution retry"; var decisionId = "focus-amendment-" + crypto.randomUUID(); return readRun(currentRunId).then(function (state) { if (state.pendingDecision) throw new Error("Resolve the current owner decision before confirming the Focus amendment."); return postCommand(currentRunId, state, "requireDecision", { decisionId: decisionId, question: question, consequential: true }); }).then(function () { return readRun(currentRunId); }).then(function (state) { if (!state.pendingDecision || state.pendingDecision.decisionId !== decisionId || state.pendingDecision.question !== question) throw new Error("Focus amendment confirmation could not be recorded."); return postCommand(currentRunId, state, "recordOwnerAnswer", { decisionId: decisionId, answer: answer }); }).then(function () { return readRun(currentRunId); }).then(function (state) { if (state.pendingDecision) throw new Error("Another owner decision is pending."); focusAmendmentPending = false; invokeJourney(stage, { focusAmendmentConfirmed: true, focusAmendmentDecisionId: decisionId, focusAmendmentExpectedRevision: state.revision }); }, showError); }\n' +
     '  function renderPlanReview(body) { var review = body.planningReview; if (!review) { renderFailure({ code: "artifact_invalid" }); return; } planningPanel.hidden = true; planReviewPanel.hidden = false; var recovery = document.getElementById("recovery-report"); if (!recovery.hidden) planReviewPanel.querySelector(".panel-body").prepend(recovery); document.getElementById("plan-review-summary").textContent = body.summary; document.getElementById("review-phase-count").textContent = String(review.phases); document.getElementById("review-slice-count").textContent = String(review.slices); document.getElementById("review-route").textContent = review.assignments.length + " assigned routes"; renderArtifactList(document.getElementById("review-artifacts"), body); var target = document.getElementById("review-assignments"); target.replaceChildren(); review.assignments.forEach(function (assignment) { var row = document.createElement("tr"); [assignment.slice, assignment.role, assignment.model, assignment.reasoning].forEach(function (value) { var cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell); }); target.appendChild(row); }); var validation = body.planningValidation || {}; var verdict = validation.verdict || "NEEDS_AMENDMENT"; var findings = Array.isArray(validation.findings) ? validation.findings : []; var findingPanel = document.getElementById("review-findings-panel"); var findingList = document.getElementById("review-findings"); findingList.replaceChildren(); findings.forEach(function (finding) { var item = document.createElement("li"); item.textContent = [finding.code, finding.artifact, finding.sliceId].filter(Boolean).join(" · ") + ": " + finding.observed + " Required: " + finding.required + " Remedy: " + finding.remedy; findingList.appendChild(item); }); findingPanel.hidden = findings.length === 0; document.getElementById("review-verdict").textContent = verdict === "PASS" ? "Planning validation passed with advisory findings." : verdict === "OWNER_DECISION_REQUIRED" ? "Owner decision required before approval." : "Planning amendments required before approval."; var approve = document.getElementById("approve-plan"); approve.disabled = verdict !== "PASS"; document.getElementById("review-change").value = ""; setStatus(verdict === "PASS" ? "Review every artifact, request changes, or approve the route." : verdict === "OWNER_DECISION_REQUIRED" ? "Review the findings and record the required owner decision before approval." : "Review the findings and request the required planning amendments.", false); }\n' +
     '  function renderFailure(body) { hideWait(); planningSubmit.disabled = false; planningAnswerForm.hidden = true; document.getElementById("journey-action").hidden = true; document.getElementById("mode-choice").hidden = true; var complete = document.getElementById("journey-complete"); complete.hidden = false; complete.firstElementChild.textContent = "Journey paused"; focusAmendmentPending = body.code === "focus_amendment_required"; document.getElementById("journey-summary").textContent = body.code === "artifact_invalid" && currentStage === "draft-implementation" ? "Your questions are complete; the generated files need another validation pass." : "Bearing saved your progress and stopped before moving to the next phase."; var drift = body.focusDrift && Array.isArray(body.focusDrift.changedPlanSources) ? " Changed plan sources: " + body.focusDrift.changedPlanSources.join(", ") + "." : ""; document.getElementById("completion-summary").textContent = focusAmendmentPending ? (body.amendmentPrompt || "Review and confirm the Focus amendment.") + drift : body.continuityLost ? body.continuityDisclosure : body.escalationTarget ? "Automatic retry stopped. Escalation target: " + body.escalationTarget + "." : body.retryRefusal ? "Retry refused: " + body.retryRefusal + "." : body.code === "cancelled" ? "You stopped " + phaseNames[currentStage] + ". Any Git changes remain visible and the phase can be retried." : body.code === "interrupted" ? "Bearing stopped while " + phaseNames[currentStage] + " was running. Inspect the Git changes before deciding whether to retry the saved phase." : body.code === "token_budget" ? "This run reached its token budget before the phase completed. Retry after lowering reasoning with /model or raise the CLI budget." : body.recovery && body.recovery.status === "stopped" ? "Bearing tried one focused repair and one simpler contract-preserving repair. The same deterministic failure remains, so automatic repair stopped: " + body.code + "." : body.code === "artifact_invalid" && currentStage === "draft-implementation" ? "Your answers and planning files are saved. Bearing could not verify the generated implementation package. Retry this step; you will not repeat the questions." : "The agent could not complete " + phaseNames[currentStage] + ": " + (body.code || "request_failed") + ". No success was recorded."; document.getElementById("completion-artifacts").replaceChildren(); var retry = document.getElementById("journey-retry"); retry.textContent = focusAmendmentPending ? "Confirm amendment" : "Retry"; retry.hidden = !focusAmendmentPending && (!!body.continuityLost || !!body.escalationTarget || !!body.retryRefusal || !!(body.recovery && body.recovery.status === "stopped")); document.getElementById("new-journey").hidden = true; setStatus(focusAmendmentPending ? "Owner confirmation is required for the Focus amendment." : body.continuityLost ? "Conversation continuity was lost; review the disclosure." : body.escalationTarget ? "Automatic retry escalated to " + body.escalationTarget + "." : body.retryRefusal ? "Retry refused: " + body.retryRefusal + "." : body.code === "cancelled" ? "Journey stopped by owner." : body.code === "interrupted" ? "Journey interrupted. Inspect changes before retrying." : body.recovery && body.recovery.status === "stopped" ? "Automatic repair stopped after repeated equivalent failures." : "Journey blocked. Retry is available.", false); }\n' +
     '  function renderJourney(body) { hideWait(); planningSubmit.disabled = false; renderArtifacts(body); renderRecoveryReport(body.recovery); pendingQuestionCount = body.status === "question" && Array.isArray(body.questions) ? Math.max(0, body.questions.length - 1) : 0; document.getElementById("journey-phase").textContent = phaseNames[currentStage].toUpperCase(); document.getElementById("journey-heading").textContent = phaseNames[currentStage]; document.getElementById("journey-summary").textContent = body.status === "action" ? body.summary : currentStage === "gather-supplies" ? "Answer the planning questions before the route map is written." : "The selected agent needs an owner answer before it can continue."; document.getElementById("journey-complete").hidden = true; document.getElementById("mode-choice").hidden = true; document.getElementById("journey-action").hidden = true; if (body.status === "failure") { renderFailure(body); return; } if (body.status === "question") { document.getElementById("journey-question-box").hidden = false; document.getElementById("planning-question").textContent = body.question || ""; var help = questionHelp(body.question || ""); document.getElementById("question-help").textContent = help; document.getElementById("question-help").hidden = !help; planningAnswerForm.hidden = false; planningAnswer.value = ""; planningAnswer.focus(); setStatus(currentStage === "gather-supplies" && pendingQuestionCount ? "Question saved locally. " + pendingQuestionCount + " remaining." : phaseNames[currentStage] + " needs your answer.", false); return; } document.getElementById("journey-question-box").hidden = true; document.getElementById("question-help").hidden = true; planningAnswerForm.hidden = true; if (currentStage === "draft-implementation") { renderPlanReview(body); return; } if (currentStage === "execute-explorer" || currentStage === "execute-expedition") { invokeJourney("review"); return; } if (currentStage === "review") { document.getElementById("journey-complete").hidden = false; document.getElementById("completion-summary").textContent = body.summary; renderArtifactList(document.getElementById("completion-artifacts"), body); document.getElementById("journey-retry").hidden = true; document.getElementById("new-journey").hidden = false; setStatus("Journey complete. Review the validated evidence.", false); return; } var next = document.getElementById("journey-next"); next.textContent = currentStage === "set-bearings" ? "Gather Supplies" : "Map the Route"; document.getElementById("journey-action").hidden = false; setStatus(phaseNames[currentStage] + " complete. Owner handoff required.", false); }\n' +
@@ -667,7 +669,7 @@ const NATIVE_HTML_TEMPLATE = "<!doctype html>\n" +
     '  document.getElementById("mode-back").addEventListener("click", function () { document.getElementById("mode-choice").hidden = true; planningPanel.hidden = true; planReviewPanel.hidden = false; setStatus("Review the approved planning package.", false); });\n' +
     '  document.getElementById("completion-back").addEventListener("click", function () { document.getElementById("journey-complete").hidden = true; document.getElementById("mode-choice").hidden = false; setStatus("Review the selected execution settings.", false); });\n' +
     '  document.getElementById("dismiss-recovery-report").addEventListener("click", function () { document.getElementById("recovery-report").hidden = true; });\n' +
-    '  document.getElementById("journey-retry").addEventListener("click", function () { document.getElementById("journey-complete").firstElementChild.textContent = "Evidence complete"; var stage = retryStage || currentStage; retryStage = ""; var extra = focusAmendmentPending ? { focusAmendmentConfirmed: true } : undefined; focusAmendmentPending = false; invokeJourney(stage, extra); });\n' +
+    '  document.getElementById("journey-retry").addEventListener("click", function () { document.getElementById("journey-complete").firstElementChild.textContent = "Evidence complete"; var stage = retryStage || currentStage; retryStage = ""; focusAmendmentPending ? confirmFocusAmendment(stage) : invokeJourney(stage); });\n' +
     '  document.getElementById("new-journey").addEventListener("click", startNewJourney);\n' +
     '  workBack.addEventListener("click", openRouteChooser);\n' +
     '  document.getElementById("owner-name").addEventListener("input", function () { this.setCustomValidity(""); });\n' +
@@ -758,7 +760,7 @@ function isJourneyBody(v) {
     if (typeof v !== "object" || v === null || Array.isArray(v))
         return false;
     const body = v;
-    const allowed = new Set(["runId", "stage", "workGoal", "answer", "endQuestions", "reviewChange", "executionMode", "reviewCadence", "cleanupMergedWorktrees", "focusAmendmentConfirmed"]);
+    const allowed = new Set(["runId", "stage", "workGoal", "answer", "endQuestions", "reviewChange", "executionMode", "reviewCadence", "cleanupMergedWorktrees", "focusAmendmentConfirmed", "focusAmendmentDecisionId", "focusAmendmentExpectedRevision"]);
     // ponytail: built from the ledger tuple. A hand-written literal types its
     // members but not its completeness, so a missing stage would be rejected here
     // and nowhere else.
@@ -772,7 +774,10 @@ function isJourneyBody(v) {
         (body.executionMode === undefined || body.executionMode === "explorer" || body.executionMode === "expedition") &&
         (body.reviewCadence === undefined || body.reviewCadence === "slice" || body.reviewCadence === "phase" || body.reviewCadence === "end") &&
         (body.cleanupMergedWorktrees === undefined || ((body.stage === "execute-explorer" || body.stage === "execute-expedition") && typeof body.cleanupMergedWorktrees === "boolean")) &&
-        (body.focusAmendmentConfirmed === undefined || (body.focusAmendmentConfirmed === true && (body.stage === "execute-explorer" || body.stage === "execute-expedition")));
+        ((body.focusAmendmentConfirmed === undefined && body.focusAmendmentDecisionId === undefined && body.focusAmendmentExpectedRevision === undefined) ||
+            (body.focusAmendmentConfirmed === true && (body.stage === "execute-explorer" || body.stage === "execute-expedition") &&
+                typeof body.focusAmendmentDecisionId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(body.focusAmendmentDecisionId) &&
+                Number.isSafeInteger(body.focusAmendmentExpectedRevision) && Number(body.focusAmendmentExpectedRevision) >= 0));
 }
 const HEADER_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const QUOTED_HEADER_VALUE = /^"(?:[\t !#-\[\]-~]|\\[\t !-~])*"$/;
@@ -1541,6 +1546,24 @@ function planningApprovalRecorded(state, afterRevision) {
     }
     return false;
 }
+function focusAmendmentApprovalRecorded(state, decisionId) {
+    let required = false;
+    for (const event of state.events) {
+        if (event.type === "decisionRequired"
+            && event.actor === "owner"
+            && event.payload.decisionId === decisionId
+            && event.payload.question === FOCUS_AMENDMENT_PROMPT
+            && event.payload.consequential === true)
+            required = true;
+        if (required
+            && event.type === "ownerAnswered"
+            && event.actor === "owner"
+            && event.payload.decisionId === decisionId
+            && event.payload.answer === FOCUS_AMENDMENT_APPROVAL)
+            return true;
+    }
+    return false;
+}
 function reviewedPlanningValidation(state, afterRevision) {
     for (const event of [...state.events].reverse()) {
         if (event.sequence <= afterRevision || event.type !== "journeyCheckpointRecorded" || (event.payload.stage !== "map-route" && event.payload.stage !== "draft-implementation") || typeof event.payload.lastResultJson !== "string")
@@ -1708,8 +1731,12 @@ async function completedRequirementRefs(repositoryPath, runId, state, durable) {
     const refs = [...new Set(parsed.value.slices.flatMap((slice) => slice.requirementIds))];
     return isRequirementRefs(refs) ? refs : undefined;
 }
-async function persistJourneyCheckpoint(store, runId, state, journey, repositoryPath) {
+class JourneyCheckpointRevisionConflict extends Error {
+}
+async function persistJourneyCheckpoint(store, runId, state, journey, repositoryPath, expectedRevision) {
     const durable = await store.load(runId);
+    if (expectedRevision !== undefined && durable.revision !== expectedRevision)
+        throw new JourneyCheckpointRevisionConflict();
     const id = `checkpoint-${randomToken(12)}`;
     const trace = journey?.activityTrail(runId) ?? state.activityTrail;
     const runtimeStateJson = serializeRuntimeState({
@@ -1781,10 +1808,13 @@ async function persistJourneyCheckpoint(store, runId, state, journey, repository
         ...(requirementRefs === undefined ? {} : { requirementRefs }),
         ...planningFields,
     };
-    const command = { schemaVersion: 1, commandId: id, runId, expectedRevision: durable.revision, session: { sessionId: "local-runtime", actor: "bearing" }, correlationId: id, type: "recordJourneyCheckpoint", payload };
+    const command = { schemaVersion: 1, commandId: id, runId, expectedRevision: expectedRevision ?? durable.revision, session: { sessionId: "local-runtime", actor: "bearing" }, correlationId: id, type: "recordJourneyCheckpoint", payload };
     const recorded = await store.apply(command);
-    if (!recorded.ok)
+    if (!recorded.ok) {
+        if (expectedRevision !== undefined && recorded.reason === "stale_revision")
+            throw new JourneyCheckpointRevisionConflict();
         throw new Error(`checkpoint rejected: ${recorded.reason}`);
+    }
     return checkpointDiagnostic;
 }
 function parseCheckpointJson(value, fallback) {
@@ -1888,7 +1918,7 @@ function syncBusyLease(selected) {
     selected.busyLeaseQueue = update.catch(() => { });
     return update;
 }
-function handleJourneyPost(req, res, service, selected, journey) {
+function handleJourneyPost(req, res, service, selected, journey, beforeExecutionCheckpoint) {
     if (!service.validOrigin(req.headers.origin)) {
         writeRejection(res, 403);
         return;
@@ -2032,10 +2062,24 @@ function handleJourneyPost(req, res, service, selected, journey) {
         }
         if (value.focusAmendmentConfirmed && (stageChanged
             || previousResult?.status !== "failure"
-            || previousResult.code !== "focus_amendment_required")) {
+            || previousResult.code !== "focus_amendment_required"
+            || durable.revision !== value.focusAmendmentExpectedRevision
+            || durable.pendingDecision !== null
+            || !focusAmendmentApprovalRecorded(durable, value.focusAmendmentDecisionId))) {
             writeRejection(res, 409);
             return;
         }
+        const amendmentRollback = value.focusAmendmentConfirmed ? {
+            stage: state.stage,
+            status: state.status,
+            lastResult: state.lastResult,
+            qa: [...state.qa],
+            retryLedger: [...state.retryLedger],
+            concurrency: state.concurrency,
+            pendingRetryWarrant: state.pendingRetryWarrant,
+            retryRefusal: state.retryRefusal,
+            escalationTarget: state.escalationTarget,
+        } : undefined;
         if (stageChanged)
             clearRetryDecision(state);
         const retryFailure = failedResultForStage(durable, value.stage, state);
@@ -2064,7 +2108,7 @@ function handleJourneyPost(req, res, service, selected, journey) {
                     failureClass: "agent_receipt_or_artifact_validation",
                     code: retryFailure.code,
                     retryLevel: "simplify",
-                    version: "0.1.5",
+                    version: "0.1.6",
                     ...recoveryFitDiagnostic(retryFailure),
                 };
                 writeShowcaseJson(res, {
@@ -2321,13 +2365,39 @@ function handleJourneyPost(req, res, service, selected, journey) {
         state.busy = true;
         try {
             await syncBusyLease(selected);
-            await persistJourneyCheckpoint(selected.store, value.runId, state);
+            if (value.focusAmendmentConfirmed)
+                await beforeExecutionCheckpoint?.({ runId: value.runId, expectedRevision: value.focusAmendmentExpectedRevision });
+            await persistJourneyCheckpoint(selected.store, value.runId, state, undefined, undefined, value.focusAmendmentExpectedRevision);
         }
-        catch {
+        catch (error) {
             state.busy = false;
-            state.status = "failed";
+            if (error instanceof JourneyCheckpointRevisionConflict && amendmentRollback) {
+                state.stage = amendmentRollback.stage;
+                state.status = amendmentRollback.status;
+                state.lastResult = amendmentRollback.lastResult;
+                state.qa.splice(0, state.qa.length, ...amendmentRollback.qa);
+                state.retryLedger = amendmentRollback.retryLedger;
+                if (amendmentRollback.concurrency)
+                    state.concurrency = amendmentRollback.concurrency;
+                else
+                    delete state.concurrency;
+                if (amendmentRollback.pendingRetryWarrant)
+                    state.pendingRetryWarrant = amendmentRollback.pendingRetryWarrant;
+                else
+                    delete state.pendingRetryWarrant;
+                if (amendmentRollback.retryRefusal)
+                    state.retryRefusal = amendmentRollback.retryRefusal;
+                else
+                    delete state.retryRefusal;
+                if (amendmentRollback.escalationTarget)
+                    state.escalationTarget = amendmentRollback.escalationTarget;
+                else
+                    delete state.escalationTarget;
+            }
+            else
+                state.status = "failed";
             await syncBusyLease(selected).catch(() => { });
-            writeRejection(res, 503);
+            writeRejection(res, error instanceof JourneyCheckpointRevisionConflict ? 409 : 503);
             return;
         }
         let result;
@@ -2392,11 +2462,11 @@ function handleJourneyPost(req, res, service, selected, journey) {
                 result = await execute(recoveryGuidance(lastRetryLevel, result.code), fingerprint);
             }
             if (result.status !== "failure" && firstFailure) {
-                recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure.code, retryLevel: lastRetryLevel, version: "0.1.5", ...recoveryFitDiagnostic(firstFailure) };
+                recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure.code, retryLevel: lastRetryLevel, version: "0.1.6", ...recoveryFitDiagnostic(firstFailure) };
                 clearRetryDecision(state);
             }
             else if (recoverableFailure(result) && firstFailure) {
-                recoveryReport = { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: result.code, retryLevel: "simplify", version: "0.1.5", ...recoveryFitDiagnostic(result) };
+                recoveryReport = { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: result.code, retryLevel: "simplify", version: "0.1.6", ...recoveryFitDiagnostic(result) };
             }
             else if (result.status !== "failure")
                 clearRetryDecision(state);
@@ -3506,7 +3576,7 @@ export function createRequestHandler(service, repositoryBootstrap = new Reposito
             return;
         }
         if (method === "POST" && path === "/api/v1/journey") {
-            handleJourneyPost(req, res, service, selected, journey);
+            handleJourneyPost(req, res, service, selected, journey, options.beforeJourneyExecutionCheckpoint);
             return;
         }
         if (method === "POST" && path === "/api/v1/journey/control") {
@@ -3644,6 +3714,31 @@ export function createRequestHandler(service, repositoryBootstrap = new Reposito
 }
 const HEADLESS_BOUND_HOST = "127.0.0.1:0";
 const HEADLESS_WORKSPACE_DISCLOSURE = "Bearing writes durable planning state to the selected repository's .bearing/ directory.";
+const MAX_HEADLESS_TEXT = 4_096;
+const MAX_HEADLESS_ARTIFACTS = 32;
+const HEADLESS_SECRET = /(?:\b(?:api[_ -]?key|secret|token|password|authorization)\s*[=:]\s*|\bBearer\s+|\bsk-[A-Za-z0-9_-]{8,}|\bAKIA[A-Z0-9]{16})[^\s,;]*/i;
+const HEADLESS_JOURNEY_FAILURE_CODES = new Set([
+    "input_invalid",
+    "plan_directory_invalid",
+    "plan_directory_absent",
+    "plan_directory_ambiguous",
+    "selection_mismatch",
+    "crewmate_unavailable",
+    "adapter_failed",
+    "session_unavailable",
+    "cancelled",
+    "interrupted",
+    "token_budget",
+    "result_missing",
+    "result_malformed",
+    "artifact_invalid",
+    "focus_invalid",
+    "focus_amendment_required",
+    "completion_invalid",
+    "fit_unavailable",
+    "fit_malformed",
+    "fit_undecidable",
+]);
 function headlessResponseCode(status) {
     if (status === 400 || status === 413 || status === 422)
         return "input_invalid";
@@ -3728,9 +3823,21 @@ function invokeHeadlessHandler(handler, method, path, headers, body) {
         });
     });
 }
-function headlessAllowedActions(run, pendingDecision) {
+function headlessFocusAmendmentRequired(run) {
+    if (!run || (run.status !== "failed" && run.status !== "stopped") || (run.stage !== "execute-explorer" && run.stage !== "execute-expedition"))
+        return false;
+    const lastResult = typeof run.lastResult === "object" && run.lastResult !== null && !Array.isArray(run.lastResult)
+        ? run.lastResult
+        : undefined;
+    return lastResult?.status === "failure" && lastResult.code === "focus_amendment_required";
+}
+function headlessAllowedActions(run, pendingDecision, readinessReady) {
     if (!run)
         return ["create", "resume", "status"];
+    if (run.status === "complete")
+        return ["status"];
+    if (!readinessReady)
+        return ["status", "resume"];
     if (pendingDecision && typeof pendingDecision.decisionId === "string") {
         return pendingDecision.question === PLAN_REVIEW_QUESTION && run.planReviewAvailable === true
             ? ["status", "resume", "approve-route"]
@@ -3738,11 +3845,86 @@ function headlessAllowedActions(run, pendingDecision) {
                 ? ["status", "resume"]
                 : ["status", "resume", "decide"];
     }
-    return run.explorerAvailable === true
-        ? ["status", "resume", "select-explorer", "progress"]
+    if (headlessFocusAmendmentRequired(run))
+        return ["status", "resume", "confirm-amendment"];
+    if (run.status === "failed" || run.status === "stopped")
+        return ["status", "resume", "progress"];
+    return run.status === "waiting" && run.stage === "draft-implementation" && run.explorerAvailable === true
+        ? ["status", "resume", "select-execution", "select-explorer"]
         : run.planReviewAvailable === true
-            ? ["status", "resume", "approve-route", "progress"]
+            ? ["status", "resume", "approve-route"]
             : ["status", "resume", "progress"];
+}
+function headlessText(value) {
+    return typeof value === "string"
+        && value.length > 0
+        && value.length <= MAX_HEADLESS_TEXT
+        && value === value.trim()
+        && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)
+        && !HEADLESS_SECRET.test(value);
+}
+function headlessArtifacts(value) {
+    if (!Array.isArray(value))
+        return [];
+    const projected = [];
+    const seen = new Set();
+    for (const artifact of value) {
+        if (projected.length === MAX_HEADLESS_ARTIFACTS
+            || !headlessText(artifact)
+            || !repositoryRelativePlanDirectory(artifact)
+            || seen.has(artifact))
+            continue;
+        seen.add(artifact);
+        projected.push(artifact);
+    }
+    return projected;
+}
+function projectHeadlessReceipt(run, pendingDecision, readinessReady) {
+    const allowedActions = headlessAllowedActions(run, pendingDecision, readinessReady);
+    if (!run)
+        return { allowedActions };
+    const lastResult = typeof run.lastResult === "object" && run.lastResult !== null && !Array.isArray(run.lastResult)
+        ? run.lastResult
+        : undefined;
+    const artifacts = headlessArtifacts(run.artifacts);
+    const summary = lastResult?.status === "action" && headlessText(lastResult.summary) ? lastResult.summary : undefined;
+    const question = typeof pendingDecision?.decisionId === "string"
+        && headlessText(pendingDecision.question)
+        && run.question === pendingDecision.question
+        && pendingDecision.question !== PLAN_REVIEW_QUESTION
+        ? pendingDecision.question
+        : undefined;
+    const routeApprovalRequired = readinessReady && run.planReviewAvailable === true
+        && (pendingDecision === null || pendingDecision?.question === PLAN_REVIEW_QUESTION);
+    const focusAmendmentRequired = readinessReady && pendingDecision === null && headlessFocusAmendmentRequired(run);
+    const executionSelectionRequired = allowedActions.includes("select-execution");
+    const status = run.status;
+    const failureCode = lastResult?.status === "failure"
+        && typeof lastResult.code === "string"
+        && HEADLESS_JOURNEY_FAILURE_CODES.has(lastResult.code)
+        ? lastResult.code
+        : "failure_unavailable";
+    const outcome = status === "failed" || status === "stopped"
+        ? { type: status, code: failureCode }
+        : status === "running" || status === "waiting" || status === "complete"
+            ? { type: status }
+            : undefined;
+    return {
+        allowedActions,
+        ...(question ? { question, requiredOwnerAction: { type: "answer", question } } : {}),
+        ...(summary ? { summary } : {}),
+        ...(artifacts.length ? { artifacts } : {}),
+        ...(routeApprovalRequired
+            ? { requiredOwnerAction: { type: "approve-route", prompt: PLAN_REVIEW_QUESTION, artifacts } }
+            : {}),
+        ...(executionSelectionRequired
+            ? { requiredOwnerAction: { type: "select-execution", modes: ["explorer", "expedition"], reviewCadences: ["slice", "phase", "end"] } }
+            : {}),
+        ...(focusAmendmentRequired
+            ? { requiredOwnerAction: { type: "confirm-amendment", prompt: FOCUS_AMENDMENT_PROMPT } }
+            : {}),
+        ...(outcome ? { outcome } : {}),
+    };
 }
 /** Execute one headless command through the authenticated browser transition layer. */
 export async function executeHeadlessJourney(request, deps) {
@@ -3885,16 +4067,72 @@ export async function executeHeadlessJourney(request, deps) {
             }
         }
     }
+    else if (request.action === "confirm-amendment") {
+        const restored = headlessJson((await restore()).body)?.run;
+        let current = await readRun();
+        const restoredRun = typeof restored === "object" && restored !== null && !Array.isArray(restored)
+            ? restored
+            : undefined;
+        const stage = restoredRun?.stage === "execute-explorer" || restoredRun?.stage === "execute-expedition"
+            ? restoredRun.stage
+            : undefined;
+        if (stage === undefined || current.body?.pendingDecision !== null || !headlessFocusAmendmentRequired(restoredRun)) {
+            operation = { status: 409, body: "", headers: {} };
+        }
+        else {
+            const decisionId = `focus-amendment-${randomToken(12)}`;
+            const required = await command("requireDecision", { decisionId, question: FOCUS_AMENDMENT_PROMPT, consequential: true });
+            if (required.status !== 200) {
+                operation = required;
+            }
+            else {
+                current = await readRun();
+                const pending = current.body?.pendingDecision;
+                if (!current.body || typeof pending !== "object" || pending === null || pending.decisionId !== decisionId || pending.question !== FOCUS_AMENDMENT_PROMPT) {
+                    operation = { status: 409, body: "", headers: {} };
+                }
+                else {
+                    const answered = await command("recordOwnerAnswer", { decisionId, answer: FOCUS_AMENDMENT_APPROVAL });
+                    if (answered.status !== 200) {
+                        operation = answered;
+                    }
+                    else {
+                        current = await readRun();
+                        operation = !current.body || current.body.pendingDecision !== null
+                            ? { status: 409, body: "", headers: {} }
+                            : await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, {
+                                runId: request.runId,
+                                stage,
+                                executionMode: stage === "execute-explorer" ? "explorer" : "expedition",
+                                focusAmendmentConfirmed: true,
+                                focusAmendmentDecisionId: decisionId,
+                                focusAmendmentExpectedRevision: current.revision,
+                            });
+                    }
+                }
+            }
+        }
+    }
     else {
-        await restore();
-        const stage = request.action === "select-explorer" ? "execute-explorer" : request.stage;
-        operation = stage === undefined
-            ? { status: 400, body: "", headers: {} }
-            : await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, {
-                runId: request.runId,
-                stage,
-                ...(request.action === "select-explorer" ? { executionMode: "explorer", reviewCadence: request.reviewCadence } : {}),
-            });
+        const restored = headlessJson((await restore()).body)?.run;
+        const restoredRun = typeof restored === "object" && restored !== null && !Array.isArray(restored)
+            ? restored
+            : undefined;
+        const terminal = restoredRun?.status === "complete";
+        const selection = request.action === "select-explorer" || request.action === "select-execution";
+        const executionMode = request.action === "select-explorer" ? "explorer" : request.executionMode;
+        const stage = selection && executionMode
+            ? executionMode === "explorer" ? "execute-explorer" : "execute-expedition"
+            : request.stage;
+        operation = terminal || headlessFocusAmendmentRequired(restoredRun)
+            ? { status: 409, body: "", headers: {} }
+            : stage === undefined
+                ? { status: 400, body: "", headers: {} }
+                : await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, {
+                    runId: request.runId,
+                    stage,
+                    ...(selection ? { executionMode, reviewCadence: request.reviewCadence } : {}),
+                });
     }
     const stateResponse = await restore();
     const state = headlessJson(stateResponse.body)?.run;
@@ -3909,7 +4147,7 @@ export async function executeHeadlessJourney(request, deps) {
             revision: durable.revision,
             ...(stage ? { stage } : {}),
             ...(status === "running" || status === "waiting" || status === "stopped" || status === "failed" || status === "complete" ? { status } : {}),
-            allowedActions: headlessAllowedActions(run, durable.body?.pendingDecision),
+            ...projectHeadlessReceipt(run, durable.body?.pendingDecision, readinessReady),
             ...firstLaunch,
             ...readReadiness,
         }

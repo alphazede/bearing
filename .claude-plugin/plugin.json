@@ -1,6 +1,6 @@
 {
   "name": "bearing",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Launch Bearing's local planning-first repository workflow: turn a complex repo request into an approved plan, bounded execution, owner decisions, and reviewable evidence.",
   "author": {
     "name": "William Rumph / AlphaZede",
