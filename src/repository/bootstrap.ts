@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -68,10 +69,16 @@ export class RepositoryBootstrap {
     if (!validated.ok) return validated;
 
     const repositoryPath = validated.repositoryPath;
-    const isGitRoot = await lstat(join(repositoryPath, ".git"))
+    const markerPresent = await lstat(join(repositoryPath, ".git"))
       .then((marker) => marker.isDirectory() || marker.isFile())
       .catch(() => false);
-    const containingGitRoot = isGitRoot ? undefined : await findContainingGitRoot(repositoryPath);
+    const gitTopLevel = await resolveGitTopLevel(repositoryPath);
+    const resolvedGitRoot = gitTopLevel === repositoryPath;
+    const containingGitRoot = resolvedGitRoot
+      ? undefined
+      : gitTopLevel ?? await findContainingGitRoot(repositoryPath);
+    const isGitRoot = resolvedGitRoot ||
+      (gitTopLevel === undefined && markerPresent && containingGitRoot === undefined);
     const safety = assessRepositorySafety({
       candidate: repositoryPath,
       isGitRoot,
@@ -276,6 +283,47 @@ async function findContainingGitRoot(candidate: string): Promise<string | undefi
     if (parent === current) return undefined;
     current = parent;
   }
+}
+
+async function resolveGitTopLevel(candidate: string): Promise<string | undefined> {
+  const repositoryEnvironment = new Set([
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_DIR",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_WORK_TREE",
+  ]);
+  const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    !repositoryEnvironment.has(name) && !name.startsWith("GIT_CONFIG_")));
+  return new Promise((resolveTopLevel) => {
+    execFile("git", ["-c", "core.fsmonitor=false", "-C", candidate, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      env: {
+        ...environment,
+        GIT_CEILING_DIRECTORIES: "",
+        GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
+        LANG: "C",
+        LC_ALL: "C",
+      },
+      maxBuffer: 16 * 1024,
+      timeout: 5_000,
+      windowsHide: true,
+    }, (error, stdout) => {
+      if (error) {
+        resolveTopLevel(undefined);
+        return;
+      }
+      const topLevel = stdout.trim();
+      if (!isAbsolute(topLevel)) {
+        resolveTopLevel(undefined);
+        return;
+      }
+      realpath(topLevel).then(resolveTopLevel, () => resolveTopLevel(undefined));
+    });
+  });
 }
 
 function knownAgentExecutableRealpaths(): readonly string[] {
