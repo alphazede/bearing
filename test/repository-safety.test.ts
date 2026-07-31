@@ -14,6 +14,7 @@ describe("assessRepositorySafety", () => {
     expect(assessRepositorySafety({
       candidate,
       isGitRoot: false,
+      containingGitRoot: undefined,
       agentExecutableRealpaths: [`${candidate}/.local/bin/codex`],
       ownerConfirmedNonGit: false,
     })).toEqual({
@@ -27,6 +28,7 @@ describe("assessRepositorySafety", () => {
     expect(assessRepositorySafety({
       candidate,
       isGitRoot: true,
+      containingGitRoot: undefined,
       agentExecutableRealpaths: ["/opt/agents/codex"],
       ownerConfirmedNonGit: false,
     })).toEqual({ ok: true, warnings: [] });
@@ -36,6 +38,7 @@ describe("assessRepositorySafety", () => {
     const input = {
       candidate,
       isGitRoot: false,
+      containingGitRoot: undefined,
       agentExecutableRealpaths: [],
     } as const;
     expect(assessRepositorySafety({ ...input, ownerConfirmedNonGit: false })).toEqual({
@@ -49,11 +52,26 @@ describe("assessRepositorySafety", () => {
     });
   });
 
+  it("never reports a nested unignored workspace inside a containing Git repository as safe", () => {
+    expect(assessRepositorySafety({
+      candidate: `${candidate}/docs/plans/nested`,
+      isGitRoot: false,
+      containingGitRoot: candidate,
+      agentExecutableRealpaths: [],
+      ownerConfirmedNonGit: true,
+    })).toEqual({
+      ok: false,
+      code: "repository_nested_in_git",
+      remedy: `This directory is inside Git repository ${candidate}. Choose ${candidate} instead.`,
+    });
+  });
+
   it("does not infer an agent from an unrelated bin path", () => {
     expect(runnerGuardInside(candidate, `${candidate}/bin/tool`)).toBe(true);
     expect(assessRepositorySafety({
       candidate,
       isGitRoot: true,
+      containingGitRoot: undefined,
       agentExecutableRealpaths: ["/opt/agents/codex"],
       ownerConfirmedNonGit: false,
     })).toEqual({ ok: true, warnings: [] });
@@ -68,6 +86,7 @@ describe("assessRepositorySafety", () => {
       const result = assessRepositorySafety({
         candidate: root,
         isGitRoot: true,
+        containingGitRoot: undefined,
         agentExecutableRealpaths: [entry],
         ownerConfirmedNonGit: false,
       });

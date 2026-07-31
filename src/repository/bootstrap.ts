@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -12,7 +13,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 import { resolveExecutable } from "./executable-path.js";
 import { assessRepositorySafety } from "./safety.js";
@@ -28,7 +29,7 @@ const BEARING_IGNORE_LINES: readonly string[] = [".bearing", ".bearing/", "/.bea
 export type BootstrapResult =
   | { ok: true; status: "initialized"; repositoryPath: string; gitignoreMissing: boolean; gitignoreAbsent: boolean; ownerName?: string }
   | { ok: true; status: "resumed"; repositoryPath: string; ownerName?: string }
-  | { ok: false; reason: BootstrapFailure };
+  | { ok: false; reason: BootstrapFailure; containingRepositoryPath?: string };
 
 export type BootstrapFailure =
   | "path_not_absolute"
@@ -36,6 +37,7 @@ export type BootstrapFailure =
   | "repository_not_directory"
   | "repository_not_writable"
   | "repository_not_git"
+  | "repository_nested_in_git"
   | "repository_contains_agent"
   | "bearing_symlink"
   | "bearing_not_directory"
@@ -67,17 +69,28 @@ export class RepositoryBootstrap {
     if (!validated.ok) return validated;
 
     const repositoryPath = validated.repositoryPath;
-    const isGitRoot = await lstat(join(repositoryPath, ".git"))
+    const markerPresent = await lstat(join(repositoryPath, ".git"))
       .then((marker) => marker.isDirectory() || marker.isFile())
       .catch(() => false);
+    const gitTopLevel = await resolveGitTopLevel(repositoryPath);
+    const resolvedGitRoot = gitTopLevel === repositoryPath;
+    const containingGitRoot = resolvedGitRoot
+      ? undefined
+      : gitTopLevel ?? await findContainingGitRoot(repositoryPath);
+    const isGitRoot = resolvedGitRoot ||
+      (gitTopLevel === undefined && markerPresent && containingGitRoot === undefined);
     const safety = assessRepositorySafety({
       candidate: repositoryPath,
       isGitRoot,
+      containingGitRoot,
       agentExecutableRealpaths: opts?.agentExecutableRealpaths ?? knownAgentExecutableRealpaths(),
       ownerConfirmedNonGit: opts?.ownerConfirmedNonGit === true,
     });
     if (!safety.ok && safety.code === "repository_contains_agent") {
       return { ok: false, reason: "repository_contains_agent" };
+    }
+    if (!safety.ok && safety.code === "repository_nested_in_git") {
+      return { ok: false, reason: "repository_nested_in_git", containingRepositoryPath: containingGitRoot };
     }
 
     const bearingPath = join(repositoryPath, BEARING_DIR);
@@ -255,6 +268,62 @@ export class RepositoryBootstrap {
       return { ok: false, reason: "initialize_failed" };
     }
   }
+}
+
+async function findContainingGitRoot(candidate: string): Promise<string | undefined> {
+  let current = dirname(candidate);
+  while (true) {
+    const marker = await lstat(join(current, ".git")).catch(() => undefined);
+    if (marker?.isFile()) return current;
+    if (marker?.isDirectory()) {
+      const head = await lstat(join(current, ".git", "HEAD")).catch(() => undefined);
+      if (head?.isFile()) return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+async function resolveGitTopLevel(candidate: string): Promise<string | undefined> {
+  const repositoryEnvironment = new Set([
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_DIR",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_WORK_TREE",
+  ]);
+  const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    !repositoryEnvironment.has(name) && !name.startsWith("GIT_CONFIG_")));
+  return new Promise((resolveTopLevel) => {
+    execFile("git", ["-c", "core.fsmonitor=false", "-C", candidate, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      env: {
+        ...environment,
+        GIT_CEILING_DIRECTORIES: "",
+        GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
+        LANG: "C",
+        LC_ALL: "C",
+      },
+      maxBuffer: 16 * 1024,
+      timeout: 5_000,
+      windowsHide: true,
+    }, (error, stdout) => {
+      if (error) {
+        resolveTopLevel(undefined);
+        return;
+      }
+      const topLevel = stdout.trim();
+      if (!isAbsolute(topLevel)) {
+        resolveTopLevel(undefined);
+        return;
+      }
+      realpath(topLevel).then(resolveTopLevel, () => resolveTopLevel(undefined));
+    });
+  });
 }
 
 function knownAgentExecutableRealpaths(): readonly string[] {

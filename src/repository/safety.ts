@@ -2,12 +2,14 @@ import { isAbsolute, relative } from "node:path";
 
 export type RepositorySafetyCode =
   | "not_git_repository"
+  | "repository_nested_in_git"
   | "repository_contains_agent"
   | "launch_cwd_unavailable";
 
 export interface RepositorySafetyInput {
   readonly candidate: string;
   readonly isGitRoot: boolean;
+  readonly containingGitRoot?: string;
   readonly agentExecutableRealpaths: readonly string[];
   readonly ownerConfirmedNonGit: boolean;
 }
@@ -27,6 +29,13 @@ export function assessRepositorySafety(input: RepositorySafetyInput): Repository
         remedy: "Choose a project repository, not a directory that contains your agent tools such as your home directory.",
       };
     }
+  }
+  if (!input.isGitRoot && input.containingGitRoot) {
+    return {
+      ok: false,
+      code: "repository_nested_in_git",
+      remedy: `This directory is inside Git repository ${input.containingGitRoot}. Choose ${input.containingGitRoot} instead.`,
+    };
   }
   if (!input.isGitRoot) {
     if (input.ownerConfirmedNonGit) return { ok: true, warnings: ["not_git_repository"] };

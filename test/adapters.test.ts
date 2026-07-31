@@ -43,6 +43,29 @@ describe("provider-neutral adapters", () => {
     expect(runner.calls[0]?.args).not.toContain('model_reasoning_effort="high"');
   });
 
+  it("refuses a malformed role reasoning projection at the adapter boundary", async () => {
+    const runner = new SyntheticRunner();
+    const projected = role();
+
+    const receipt = await adapter(runner).execute({
+      runId: "malformed-role-reasoning",
+      repositoryPath,
+      role: {
+        ...projected,
+        reasoning: { ...projected.reasoning, providerLevel: "unsupported-provider-level" },
+      },
+      task: { prompt: "do work" },
+    });
+
+    expect(receipt).toMatchObject({
+      status: "blocked",
+      failure: "unsupported_policy",
+      attempts: 0,
+    });
+    expect(receipt.warningCodes).toContain("reasoning_unsupported");
+    expect(runner.calls).toEqual([]);
+  });
+
   it("passes the optional activity observer through the provider-neutral process seam", async () => {
     const runner = new SyntheticRunner();
     const onActivity = () => {};

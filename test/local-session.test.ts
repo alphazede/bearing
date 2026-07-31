@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
-import type { Server } from "node:http";
+import type { Server, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { access, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import type { LauncherDeps } from "../src/cli.js";
 import { run } from "../src/cli.js";
 import { SyntheticRunner, type ProcessInvocation, type ProcessResult, type ProcessRunner } from "../src/adapters/adapters.js";
@@ -25,6 +26,7 @@ import {
   buildImprovementHandoffFacts,
   buildImprovementReport,
   createRequestHandler,
+  dispatchAsyncRunGet,
   greetingFor,
   measureImprovementWindow,
   unnamedGreetingFor,
@@ -36,6 +38,7 @@ import { GRADER_RUBRIC, GRADER_RUBRIC_VERSION } from "../src/verification/grader
 
 const servers: Server[] = [];
 const roots: string[] = [];
+const packageVersion = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { readonly version: string }).version;
 afterEach(async () => {
   while (servers.length) {
     const s = servers.pop()!;
@@ -724,15 +727,17 @@ class FocusAmendmentRunner extends CheckpointRunner {
 }
 
 describe("LocalSessionService unit", () => {
-  it("terminates every async run GET dispatch with a 500 rejection handler", async () => {
-    const source = await readFile(join(process.cwd(), "src/server/local-session.ts"), "utf8");
-    for (const dispatch of [
-      "void handleExecutionContractGet(req, res, service, selected, executionContract[1], executionContract[2]).catch(() => writeRejection(res, 500));",
-      "void handlePlanningStateGet(req, res, service, selected, planningState[1]).catch(() => writeRejection(res, 500));",
-      "void handleJourneyArtifactGet(res, service, req, selected, journeyArtifact[1], journeyArtifact[2]).catch(() => writeRejection(res, 500));",
-    ]) {
-      expect(source).toContain(dispatch);
-    }
+  it("returns 500 when an injected async run GET handler rejects", async () => {
+    const writeHead = vi.fn();
+    const end = vi.fn();
+    const response = { writeHead, end } as unknown as ServerResponse;
+
+    await dispatchAsyncRunGet(response, async () => {
+      throw new Error("injected rejection");
+    });
+
+    expect(writeHead).toHaveBeenCalledWith(500, { "Content-Type": "text/plain; charset=utf-8" });
+    expect(end).toHaveBeenCalledWith("Rejected");
   });
 
   it("keeps the existing GET and POST route-dispatch counts", async () => {
@@ -1614,7 +1619,7 @@ describe("GET / native page and fragment secrecy", () => {
       failureClass: "agent_receipt_or_artifact_validation",
       code: "fit_malformed",
       retryLevel: "simplify",
-      version: "0.1.6",
+      version: packageVersion,
       fitDiagnostic: { check: "receipt_ok", field: "detail", repository: root, payload: secret },
     };
     renderRecoveryReport(invalid);
@@ -1877,20 +1882,43 @@ describe("GET run execution contract and planning state", () => {
     }
   });
 
-  it("rejects an absolute plan directory without returning the repository path", async () => {
+  it.each([
+    ["absolute", (root: string) => join(root, "docs/plans/approved")],
+    ["relative parent traversal", () => "../approved"],
+    ["normalized parent traversal", () => "docs/plans/../approved"],
+    ["backslash traversal", () => "docs\\plans\\approved"],
+    ["alternate data stream", () => "docs/plans/approved:stream"],
+  ])("rejects a %s plan directory without returning the repository path", async (_case, planDirectoryFor) => {
     const { port, cap } = await launch();
     const cookie = await exchangeCookie(port, cap);
     const root = await tempRepo();
-    const absolutePlanDirectory = join(root, "docs/plans/approved");
+    const planDirectory = planDirectoryFor(root);
     await selectRepository(port, cookie, root);
-    await seedRun(root, "run-1", absolutePlanDirectory);
-    await mkdir(absolutePlanDirectory, { recursive: true });
-    await writeFile(join(absolutePlanDirectory, "execution-contract.json"), JSON.stringify(approvedContract("run-1", { planDirectory: absolutePlanDirectory })));
+    await seedRun(root, "run-1", planDirectory);
 
     const response = await call(port, { method: "GET", path: contractPath, headers: { cookie } });
     expect(response.status).toBe(422);
     expect(JSON.parse(response.body)).toEqual({ status: "blocked", code: "execution_contract_malformed", remedy: expect.any(String) });
     expect(response.body).not.toContain(root);
+  });
+
+  it("rejects a symlinked plan directory that resolves outside the repository", async () => {
+    const { port, cap } = await launch();
+    const cookie = await exchangeCookie(port, cap);
+    const root = await tempRepo();
+    const outside = await tempDirectory();
+    const planDirectory = "docs/plans/approved";
+    await selectRepository(port, cookie, root);
+    await seedRun(root, "run-1", planDirectory);
+    await mkdir(join(root, "docs/plans"), { recursive: true });
+    await writeFile(join(outside, "execution-contract.json"), JSON.stringify(approvedContract("run-1", { planDirectory })));
+    await symlink(outside, join(root, planDirectory), "dir");
+
+    const response = await call(port, { method: "GET", path: contractPath, headers: { cookie } });
+    expect(response.status).toBe(404);
+    expect(JSON.parse(response.body)).toEqual({ status: "blocked", code: "execution_contract_unavailable", remedy: expect.any(String) });
+    expect(response.body).not.toContain(root);
+    expect(response.body).not.toContain(outside);
   });
 
   it("returns a typed failure when a valid contract cannot fit the bounded response", async () => {
@@ -2959,7 +2987,7 @@ describe("Phase 5 local runtime wiring", () => {
       recovery: {
         status: "stopped",
         code: "fit_malformed",
-        version: "0.1.6",
+        version: packageVersion,
         fitDiagnostic: { check: "assumption_repository", field: "repository" },
       },
     });
@@ -5491,6 +5519,34 @@ describe("POST /api/v1/repository", () => {
     expect(switched.status).toBe(200);
     expect(JSON.parse(switched.body)).toMatchObject({ status: "initialized", repositoryPath: nextRoot });
     expect(await readFile(join(nextRoot, ".bearing", "workspace.json"), "utf8")).toContain(nextRoot);
+  });
+
+  it("rejects a nested non-root selection with the containing root and no persisted state", async () => {
+    const { port, cap } = await launch();
+    const cookie = await exchangeCookie(port, cap);
+    const root = await tempRepo();
+    await new Promise<void>((resolve, reject) => execFile("git", ["-C", root, "init"], (error) => error ? reject(error) : resolve()));
+    const nested = join(root, "docs", "plans", "nested");
+    await mkdir(nested, { recursive: true });
+
+    const rejected = await call(port, {
+      method: "POST",
+      path: "/api/v1/repository",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ path: nested, confirmNonGit: true }),
+    });
+
+    expect(rejected.status).toBe(422);
+    expect(JSON.parse(rejected.body)).toEqual({
+      status: "blocked",
+      code: "repository_nested_in_git",
+      remedy: `This directory is inside Git repository ${root}. Choose ${root} instead.`,
+      containingRepositoryPath: root,
+      tokens: 0,
+    });
+    await expect(access(join(nested, ".bearing"))).rejects.toBeDefined();
+    await expect(access(join(nested, ".bearing", "owner.json"))).rejects.toBeDefined();
+    await expect(access(join(nested, ".bearing", "runs"))).rejects.toBeDefined();
   });
 
   it("rejects malformed, oversized, and invalid repository requests before mutation", async () => {

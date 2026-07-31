@@ -25,7 +25,7 @@ import {
   type ImprovementServiceFailure,
 } from "./improvement/improvement-service.js";
 import type { TrialVerdict } from "./improvement/improvement-proposal.js";
-import { planDirectoryValid } from "./journey/plan-directory.js";
+import { nativePlanDirectoryPath, planDirectoryValid } from "./journey/plan-directory.js";
 import { validatePlan } from "./journey/planning-validator.js";
 import type { PlanDocuments } from "./journey/plan-structure.js";
 import { REASONING_TIERS } from "./profile/reasoning-policy.js";
@@ -258,26 +258,37 @@ async function readPlanSource(root: string, path: string): Promise<string | unde
   }
 }
 
-async function readPlanDocuments(root: string, directory: string): Promise<PlanDocuments | undefined> {
-  if (!planDirectoryValid(directory)) return undefined;
+type PlanDocumentReadResult =
+  | { readonly ok: true; readonly documents: PlanDocuments }
+  | { readonly ok: false; readonly reason: "repository_root_unreadable" | "plan_directory_invalid" | "plan_directory_unreadable" | "plan_directory_unsafe" | `required_document_unreadable:${string}` };
+
+async function readPlanDocuments(root: string, directory: string): Promise<PlanDocumentReadResult> {
   const canonicalRoot = await realpath(root).catch(() => undefined);
-  if (!canonicalRoot) return undefined;
-  const candidate = resolve(canonicalRoot, directory);
+  if (!canonicalRoot) return { ok: false, reason: "repository_root_unreadable" };
+  const relativeDirectory = isAbsolute(directory)
+    ? nativePlanDirectoryPath(relative(canonicalRoot, directory))
+    : directory;
+  if (!planDirectoryValid(relativeDirectory)) return { ok: false, reason: "plan_directory_invalid" };
+  const candidate = resolve(canonicalRoot, relativeDirectory);
   try {
     const linked = await lstat(candidate);
     const canonical = await realpath(candidate);
     const relation = relative(canonicalRoot, canonical);
-    if (!linked.isDirectory() || linked.isSymbolicLink() || !relation || relation.startsWith("..") || isAbsolute(relation)) return undefined;
+    if (!linked.isDirectory() || linked.isSymbolicLink() || !relation || relation.startsWith("..") || isAbsolute(relation)) return { ok: false, reason: "plan_directory_unsafe" };
   } catch {
-    return undefined;
+    return { ok: false, reason: "plan_directory_unreadable" };
   }
-  const [plan, design, seit, implementation] = await Promise.all([
+  const names = [
     "plan-spec.md",
     "design.md",
     "seit.md",
     "implementation.md",
-  ].map((name) => readPlanSource(canonicalRoot, posix.join(directory, name))));
-  return plan && design && seit && implementation ? { plan, design, seit, implementation } : undefined;
+  ] as const;
+  const contents = await Promise.all(names.map((name) => readPlanSource(canonicalRoot, posix.join(relativeDirectory, name))));
+  const unreadable = contents.findIndex((content) => !content);
+  if (unreadable !== -1) return { ok: false, reason: `required_document_unreadable:${names[unreadable]}` };
+  const [plan, design, seit, implementation] = contents as [string, string, string, string];
+  return { ok: true, documents: { plan, design, seit, implementation } };
 }
 
 function findingLine(finding: ReturnType<typeof validatePlan>["findings"][number]): string {
@@ -875,20 +886,20 @@ export function run(args: string[], deps: LauncherDeps = {}): Promise<Server | u
       return Promise.resolve(undefined);
     }
     const directory = args[2];
-    return readPlanDocuments(deps.cwd ?? process.cwd(), directory).then((documents) => {
-      if (!documents) {
-        stderr.write("bearing plan validate: plan_input_invalid\n");
+    return readPlanDocuments(deps.cwd ?? process.cwd(), directory).then((input) => {
+      if (!input.ok) {
+        stderr.write(`bearing plan validate: plan_input_invalid:${input.reason}\n`);
         exit(3);
         return undefined;
       }
-      const result = validatePlan({ documents, planDirectory: directory });
+      const result = validatePlan({ documents: input.documents, planDirectory: directory });
       stdout.write(`${result.verdict}\n`);
       for (const finding of result.findings) stdout.write(`${findingLine(finding)}\n`);
       const code = result.verdict === "PASS" ? 0 : result.verdict === "NEEDS_AMENDMENT" ? 1 : 2;
       if (code) exit(code);
       return undefined;
     }).catch(() => {
-      stderr.write("bearing plan validate: plan_input_invalid\n");
+      stderr.write("bearing plan validate: plan_input_invalid:unexpected_failure\n");
       exit(3);
       return undefined;
     });

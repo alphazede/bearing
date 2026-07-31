@@ -1,5 +1,7 @@
 import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import {
   chmod,
   lstat,
@@ -17,6 +19,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RepositoryBootstrap } from "../src/repository/bootstrap.js";
 
 const roots: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   while (roots.length) {
@@ -34,7 +37,7 @@ async function tempDir(): Promise<string> {
 
 async function tempRepo(): Promise<string> {
   const root = await tempDir();
-  await mkdir(join(root, ".git"));
+  await execFileAsync("git", ["-C", root, "init", "-q"]);
   return root;
 }
 
@@ -88,6 +91,45 @@ describe("RepositoryBootstrap", () => {
     });
   });
 
+  it("rejects a nested directory inside a Git repository before writing workspace state", async () => {
+    const root = await tempRepo();
+    const repositoryPath = await realpath(root);
+    const nested = join(root, "docs", "plans", "nested");
+    await mkdir(nested, { recursive: true });
+
+    expect(await new RepositoryBootstrap().choose(nested, {
+      ownerConfirmedNonGit: true,
+      agentExecutableRealpaths: [],
+    })).toEqual({
+      ok: false,
+      reason: "repository_nested_in_git",
+      containingRepositoryPath: repositoryPath,
+    });
+    await expect(lstat(join(nested, ".bearing"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each([
+    ["arbitrary file", "file"],
+    ["empty directory", "directory"],
+  ] as const)("rejects a nested directory with an %s .git marker before writing workspace state", async (_label, markerKind) => {
+    const root = await tempRepo();
+    const repositoryPath = await realpath(root);
+    const nested = join(root, "nested");
+    await mkdir(nested);
+    if (markerKind === "file") await writeFile(join(nested, ".git"), "not a gitdir marker\n");
+    else await mkdir(join(nested, ".git"));
+
+    expect(await new RepositoryBootstrap().choose(nested, {
+      ownerConfirmedNonGit: true,
+      agentExecutableRealpaths: [],
+    })).toEqual({
+      ok: false,
+      reason: "repository_nested_in_git",
+      containingRepositoryPath: repositoryPath,
+    });
+    await expect(lstat(join(nested, ".bearing"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("always blocks a repository that contains an agent executable", async () => {
     const root = await tempDir();
     const repositoryPath = await realpath(root);
@@ -100,10 +142,19 @@ describe("RepositoryBootstrap", () => {
   });
 
   it("accepts a git worktree marker file and resumes it normally", async () => {
-    const root = await tempDir();
+    const primary = await tempRepo();
+    await writeFile(join(primary, ".gitignore"), ".bearing/\n");
+    await execFileAsync("git", ["-C", primary, "add", ".gitignore"]);
+    await execFileAsync("git", [
+      "-C", primary,
+      "-c", "user.name=Bearing Test",
+      "-c", "user.email=bearing@example.invalid",
+      "commit", "-q", "-m", "fixture",
+    ]);
+    const worktreeParent = await tempDir();
+    const root = join(worktreeParent, "linked");
+    await execFileAsync("git", ["-C", primary, "worktree", "add", "-q", "--detach", root, "HEAD"]);
     const repositoryPath = await realpath(root);
-    await writeFile(join(root, ".git"), "gitdir: /tmp/worktree\n");
-    await writeFile(join(root, ".gitignore"), ".bearing/\n");
     const bootstrap = new RepositoryBootstrap();
 
     expect(await bootstrap.choose(root, { agentExecutableRealpaths: [] })).toEqual({

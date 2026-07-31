@@ -55,6 +55,7 @@ const CONSOLIDATION_APPROVAL = "Approve consolidation";
 const FOCUS_AMENDMENT_PROMPT = "The approved Focus contract changed. Review the drift summary. Confirm the Focus amendment to adopt the updated plan and recapture the Git baseline.";
 const FOCUS_AMENDMENT_APPROVAL = "Confirmed Focus amendment for execution retry";
 const CONTINUITY_LOST_DISCLOSURE = "The prior provider conversation is unavailable; conversation continuity was lost and context may need to be supplied again.";
+const BEARING_VERSION = JSON.parse(readFileSync(fileURLToPath(new URL("../../package.json", import.meta.url)), "utf8")).version;
 const SIGNATURE_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/bearing-office.png", import.meta.url)));
 const EXPEDITION_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/bearing-expedition.png", import.meta.url)));
 const EXPLORER_CARD_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/bearing-explorer-card.png", import.meta.url)));
@@ -1007,6 +1008,10 @@ function handleRepositoryPost(req, res, service, repositoryBootstrap, repository
                     writeRepositoryFailure(res, {
                         ...repositoryFailureCode(result.reason),
                         ...(result.reason === "repository_not_git" ? { candidate: resolved.candidate } : {}),
+                        ...(result.reason === "repository_nested_in_git" ? {
+                            containingRepositoryPath: result.containingRepositoryPath,
+                            tokens: 0,
+                        } : {}),
                     });
                     return;
                 }
@@ -1078,7 +1083,7 @@ function handleOwnerPost(req, res, service, repositoryBootstrap, repositoryPath,
 function repositoryFailureStatus(reason) {
     if (reason === "initialize_failed")
         return 500;
-    if (reason === "repository_not_git" || reason === "repository_contains_agent")
+    if (reason === "repository_not_git" || reason === "repository_nested_in_git" || reason === "repository_contains_agent")
         return 422;
     if (reason === "launch_cwd_unavailable")
         return 409;
@@ -1097,6 +1102,7 @@ function repositoryFailureCode(reason) {
         repository_not_directory: "Choose a directory, not a file.",
         repository_not_writable: "Choose a repository that Bearing can write to.",
         repository_not_git: "Not a Git repo — confirm to use for planning, or pick a repo.",
+        repository_nested_in_git: "This directory is inside another Git repository. Choose its root instead.",
         repository_contains_agent: "Pick a project repo, not a dir containing your agent tools (e.g. home).",
         launch_cwd_unavailable: "Launch directory is unavailable. Browse for a repository.",
         bearing_symlink: "Remove the .bearing symlink or choose another repository.",
@@ -1129,6 +1135,11 @@ function writeRepositoryFailure(res, failure, responseStatus = "blocked") {
         code: failure.code,
         remedy: failure.remedy,
         ...(failure.candidate === undefined ? {} : { candidate: failure.candidate }),
+        ...(failure.containingRepositoryPath === undefined ? {} : {
+            remedy: `This directory is inside Git repository ${failure.containingRepositoryPath}. Choose ${failure.containingRepositoryPath} instead.`,
+            containingRepositoryPath: failure.containingRepositoryPath,
+        }),
+        ...(failure.tokens === undefined ? {} : { tokens: failure.tokens }),
     }));
 }
 function handleRepositoryOptions(req, res, service, repositoryChoice) {
@@ -2108,7 +2119,7 @@ function handleJourneyPost(req, res, service, selected, journey, beforeExecution
                     failureClass: "agent_receipt_or_artifact_validation",
                     code: retryFailure.code,
                     retryLevel: "simplify",
-                    version: "0.1.6",
+                    version: BEARING_VERSION,
                     ...recoveryFitDiagnostic(retryFailure),
                 };
                 writeShowcaseJson(res, {
@@ -2462,11 +2473,11 @@ function handleJourneyPost(req, res, service, selected, journey, beforeExecution
                 result = await execute(recoveryGuidance(lastRetryLevel, result.code), fingerprint);
             }
             if (result.status !== "failure" && firstFailure) {
-                recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure.code, retryLevel: lastRetryLevel, version: "0.1.6", ...recoveryFitDiagnostic(firstFailure) };
+                recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure.code, retryLevel: lastRetryLevel, version: BEARING_VERSION, ...recoveryFitDiagnostic(firstFailure) };
                 clearRetryDecision(state);
             }
             else if (recoverableFailure(result) && firstFailure) {
-                recoveryReport = { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: result.code, retryLevel: "simplify", version: "0.1.6", ...recoveryFitDiagnostic(result) };
+                recoveryReport = { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: result.code, retryLevel: "simplify", version: BEARING_VERSION, ...recoveryFitDiagnostic(result) };
             }
             else if (result.status !== "failure")
                 clearRetryDecision(state);
@@ -3024,9 +3035,18 @@ async function handleImprovementHandoffGet(req, res, service, selected) {
 function repositoryRelativePlanDirectory(value) {
     return !isAbsolute(value)
         && !/^[A-Za-z]:/.test(value)
+        && !value.includes(":")
         && !value.includes("\\")
         && posix.normalize(value) === value
         && value.split("/").every((part) => part && part !== "." && part !== "..");
+}
+export async function dispatchAsyncRunGet(res, handler) {
+    try {
+        await handler();
+    }
+    catch {
+        writeRejection(res, 500);
+    }
 }
 async function executionContractSource(repositoryPath, planDirectory) {
     if (!repositoryRelativePlanDirectory(planDirectory))
@@ -3613,12 +3633,12 @@ export function createRequestHandler(service, repositoryBootstrap = new Reposito
         }
         const executionContract = /^\/api\/v1\/runs\/([A-Za-z0-9_-]{1,128})\/execution-contract\/([A-Za-z0-9.]{1,128})$/.exec(path);
         if (method === "GET" && executionContract) {
-            void handleExecutionContractGet(req, res, service, selected, executionContract[1], executionContract[2]).catch(() => writeRejection(res, 500));
+            void dispatchAsyncRunGet(res, () => handleExecutionContractGet(req, res, service, selected, executionContract[1], executionContract[2]));
             return;
         }
         const planningState = /^\/api\/v1\/runs\/([A-Za-z0-9_-]{1,128})\/planning-state$/.exec(path);
         if (method === "GET" && planningState) {
-            void handlePlanningStateGet(req, res, service, selected, planningState[1]).catch(() => writeRejection(res, 500));
+            void dispatchAsyncRunGet(res, () => handlePlanningStateGet(req, res, service, selected, planningState[1]));
             return;
         }
         const verificationReport = /^\/api\/v1\/runs\/([A-Za-z0-9_-]{1,128})\/verification\/(validator|grader|park-ranger)$/.exec(path);
@@ -3638,7 +3658,7 @@ export function createRequestHandler(service, repositoryBootstrap = new Reposito
         }
         const journeyArtifact = /^\/api\/v1\/journey\/([A-Za-z0-9_-]{1,128})\/artifacts\/(\d{1,3})$/.exec(path);
         if (method === "GET" && journeyArtifact) {
-            void handleJourneyArtifactGet(res, service, req, selected, journeyArtifact[1], journeyArtifact[2]).catch(() => writeRejection(res, 500));
+            void dispatchAsyncRunGet(res, () => handleJourneyArtifactGet(res, service, req, selected, journeyArtifact[1], journeyArtifact[2]));
             return;
         }
         if (method === "GET" && path === "/api/v1/workflows") {
