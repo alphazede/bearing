@@ -69,12 +69,13 @@ codex plugin add bearing@bearing
 ```
 
 Start a new Codex session, then invoke `$bearing` or ask Codex to use the
-Bearing skill. Codex starts the existing local Bearing CLI in persistent mode
-from the current repository, keeps it running, reports its loopback URL, and
-begins the planning-first journey. It does not launch on SessionStart, install
-software, or change Codex native collaboration behavior. After an explicit
-invocation, the CLI's default `start` command best-effort opens the browser
-automatically.
+Bearing skill. When the request does not name a mode, Codex asks whether to run
+the guided workflow in the current conversation, open the browser UI, or use
+the headless CLI. An explicit browser request starts the installed Bearing CLI
+in persistent mode, reports its loopback URL, and best-effort opens the browser
+automatically. Guided and headless modes follow the receipt-driven journey
+below. Bearing does not launch on SessionStart, install software, or change
+Codex native collaboration behavior.
 
 If the active Codex sandbox blocks the loopback listener, Codex asks for owner
 approval to rerun only the Bearing CLI launch with host escalation. That launch
@@ -90,8 +91,8 @@ In Claude Code, add this repository as a marketplace and install Bearing:
 /plugin install bearing@bearing
 ```
 
-Invoke `/bearing` or ask Claude to use Bearing. The shared skill starts the same
-local planning-first journey described above.
+Invoke `/bearing` or ask Claude to use Bearing. The shared skill offers the same
+guided, browser, and headless choices described above.
 
 ## Workflow skills
 
