@@ -1,8 +1,13 @@
-import { posix } from "node:path";
+import { posix, sep } from "node:path";
 
 const PREFIX = "docs/plans/";
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MAX_SEGMENT = 64;
+
+/** Convert a path returned by the host path.relative() into repository POSIX form. */
+export function nativePlanDirectoryPath(value: string, separator: string = sep): string {
+  return separator === posix.sep ? value : value.split(separator).join(posix.sep);
+}
 
 export function planDirectoryValid(value: string): boolean {
   if (!value.startsWith(PREFIX) || posix.isAbsolute(value) || posix.normalize(value) !== value) return false;

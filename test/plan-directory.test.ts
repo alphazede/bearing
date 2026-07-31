@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
+import { win32 } from "node:path";
 import { describe, expect, it } from "vitest";
-import { planDirectoryValid, proposePlanDirectory } from "../src/journey/plan-directory.js";
+import { nativePlanDirectoryPath, planDirectoryValid, proposePlanDirectory } from "../src/journey/plan-directory.js";
 
 describe("plan directory", () => {
   it("accepts the relaxed bounded grammar", () => {
@@ -26,6 +27,16 @@ describe("plan directory", () => {
     `docs/plans/${"a".repeat(65)}`,
   ])("rejects %s", (value) => {
     expect(planDirectoryValid(value)).toBe(false);
+  });
+
+  it("normalizes a native Windows relative path without relaxing relative input validation", () => {
+    const root = "C:\\repo";
+    const directory = "C:\\repo\\docs\\plans\\import";
+    const nativeRelative = win32.relative(root, directory);
+
+    expect(nativePlanDirectoryPath(nativeRelative, win32.sep)).toBe("docs/plans/import");
+    expect(planDirectoryValid(nativeRelative)).toBe(false);
+    expect(planDirectoryValid(nativePlanDirectoryPath(nativeRelative, win32.sep))).toBe(true);
   });
 
   it("is a strict superset of generated values accepted by the legacy regex", () => {

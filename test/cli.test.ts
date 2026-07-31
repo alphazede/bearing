@@ -1825,6 +1825,23 @@ describe("plan validate", () => {
     expect(await readdir(directory)).not.toContain("review.html");
   });
 
+  it("validates a known-good repository plan supplied as an absolute path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bearing-plan-validate-absolute-"));
+    roots.push(root);
+    const directory = await writePlan(root);
+    const before = await planTree(directory);
+    const ctx = newCtx();
+
+    // Regression: normalize absolute repository plan paths before containment validation.
+    await run(["plan", "validate", directory], { ...ctx.d, cwd: root });
+
+    expect(ctx.getExitCode() ?? 0).toBe(0);
+    expect(ctx.out).toEqual(["PASS\n"]);
+    expect(ctx.err).toEqual([]);
+    expect(await planTree(directory)).toEqual(before);
+    expect(await readdir(root)).not.toContain(".bearing");
+  });
+
   it("returns typed input failures for outside, symlinked, and incomplete plan directories", async () => {
     const root = await mkdtemp(join(tmpdir(), "bearing-plan-root-"));
     const outside = await mkdtemp(join(tmpdir(), "bearing-plan-outside-"));
@@ -1834,11 +1851,15 @@ describe("plan validate", () => {
     await symlink(join(outside, "plan"), join(root, "docs/plans/escape"));
     await mkdir(join(root, "docs/plans/incomplete"));
 
-    for (const directory of [join(outside, "plan"), "docs/plans/escape", "docs/plans/incomplete"]) {
+    for (const [directory, reason] of [
+      [join(outside, "plan"), "plan_directory_invalid"],
+      ["docs/plans/escape", "plan_directory_unsafe"],
+      ["docs/plans/incomplete", "required_document_unreadable:plan-spec.md"],
+    ] as const) {
       const ctx = newCtx();
       await expect(run(["plan", "validate", directory], { ...ctx.d, cwd: root })).resolves.toBeUndefined();
       expect(ctx.getExitCode()).toBe(3);
-      expect(ctx.err.join("")).toContain("plan_input_invalid");
+      expect(ctx.err).toEqual([`bearing plan validate: plan_input_invalid:${reason}\n`]);
     }
     expect(await readFile(join(outside, "plan/plan-spec.md"), "utf8")).toBe(validPlan);
   });

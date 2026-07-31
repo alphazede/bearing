@@ -12,7 +12,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 import { resolveExecutable } from "./executable-path.js";
 import { assessRepositorySafety } from "./safety.js";
@@ -28,7 +28,7 @@ const BEARING_IGNORE_LINES: readonly string[] = [".bearing", ".bearing/", "/.bea
 export type BootstrapResult =
   | { ok: true; status: "initialized"; repositoryPath: string; gitignoreMissing: boolean; gitignoreAbsent: boolean; ownerName?: string }
   | { ok: true; status: "resumed"; repositoryPath: string; ownerName?: string }
-  | { ok: false; reason: BootstrapFailure };
+  | { ok: false; reason: BootstrapFailure; containingRepositoryPath?: string };
 
 export type BootstrapFailure =
   | "path_not_absolute"
@@ -36,6 +36,7 @@ export type BootstrapFailure =
   | "repository_not_directory"
   | "repository_not_writable"
   | "repository_not_git"
+  | "repository_nested_in_git"
   | "repository_contains_agent"
   | "bearing_symlink"
   | "bearing_not_directory"
@@ -70,14 +71,19 @@ export class RepositoryBootstrap {
     const isGitRoot = await lstat(join(repositoryPath, ".git"))
       .then((marker) => marker.isDirectory() || marker.isFile())
       .catch(() => false);
+    const containingGitRoot = isGitRoot ? undefined : await findContainingGitRoot(repositoryPath);
     const safety = assessRepositorySafety({
       candidate: repositoryPath,
       isGitRoot,
+      containingGitRoot,
       agentExecutableRealpaths: opts?.agentExecutableRealpaths ?? knownAgentExecutableRealpaths(),
       ownerConfirmedNonGit: opts?.ownerConfirmedNonGit === true,
     });
     if (!safety.ok && safety.code === "repository_contains_agent") {
       return { ok: false, reason: "repository_contains_agent" };
+    }
+    if (!safety.ok && safety.code === "repository_nested_in_git") {
+      return { ok: false, reason: "repository_nested_in_git", containingRepositoryPath: containingGitRoot };
     }
 
     const bearingPath = join(repositoryPath, BEARING_DIR);
@@ -254,6 +260,21 @@ export class RepositoryBootstrap {
       }
       return { ok: false, reason: "initialize_failed" };
     }
+  }
+}
+
+async function findContainingGitRoot(candidate: string): Promise<string | undefined> {
+  let current = dirname(candidate);
+  while (true) {
+    const marker = await lstat(join(current, ".git")).catch(() => undefined);
+    if (marker?.isFile()) return current;
+    if (marker?.isDirectory()) {
+      const head = await lstat(join(current, ".git", "HEAD")).catch(() => undefined);
+      if (head?.isFile()) return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
   }
 }
 

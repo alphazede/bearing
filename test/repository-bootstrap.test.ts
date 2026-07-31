@@ -1,5 +1,7 @@
 import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import {
   chmod,
   lstat,
@@ -17,6 +19,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RepositoryBootstrap } from "../src/repository/bootstrap.js";
 
 const roots: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   while (roots.length) {
@@ -86,6 +89,24 @@ describe("RepositoryBootstrap", () => {
       status: "initialized",
       gitignoreMissing: false,
     });
+  });
+
+  it("rejects a nested directory inside a Git repository before writing workspace state", async () => {
+    const root = await tempRepo();
+    await execFileAsync("git", ["-C", root, "init"]);
+    const repositoryPath = await realpath(root);
+    const nested = join(root, "docs", "plans", "nested");
+    await mkdir(nested, { recursive: true });
+
+    expect(await new RepositoryBootstrap().choose(nested, {
+      ownerConfirmedNonGit: true,
+      agentExecutableRealpaths: [],
+    })).toEqual({
+      ok: false,
+      reason: "repository_nested_in_git",
+      containingRepositoryPath: repositoryPath,
+    });
+    await expect(lstat(join(nested, ".bearing"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("always blocks a repository that contains an agent executable", async () => {

@@ -104,6 +104,7 @@ const CONSOLIDATION_APPROVAL = "Approve consolidation";
 const FOCUS_AMENDMENT_PROMPT = "The approved Focus contract changed. Review the drift summary. Confirm the Focus amendment to adopt the updated plan and recapture the Git baseline.";
 const FOCUS_AMENDMENT_APPROVAL = "Confirmed Focus amendment for execution retry";
 const CONTINUITY_LOST_DISCLOSURE = "The prior provider conversation is unavailable; conversation continuity was lost and context may need to be supplied again.";
+const BEARING_VERSION = (JSON.parse(readFileSync(fileURLToPath(new URL("../../package.json", import.meta.url)), "utf8")) as { readonly version: string }).version;
 const SIGNATURE_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/bearing-office.png", import.meta.url)));
 const EXPEDITION_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/bearing-expedition.png", import.meta.url)));
 const EXPLORER_CARD_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/bearing-explorer-card.png", import.meta.url)));
@@ -1118,6 +1119,10 @@ function handleRepositoryPost(
           writeRepositoryFailure(res, {
             ...repositoryFailureCode(result.reason),
             ...(result.reason === "repository_not_git" ? { candidate: resolved.candidate } : {}),
+            ...(result.reason === "repository_nested_in_git" ? {
+              containingRepositoryPath: result.containingRepositoryPath,
+              tokens: 0,
+            } : {}),
           });
           return;
         }
@@ -1179,7 +1184,7 @@ function handleOwnerPost(
 
 function repositoryFailureStatus(reason: string): number {
   if (reason === "initialize_failed") return 500;
-  if (reason === "repository_not_git" || reason === "repository_contains_agent") return 422;
+  if (reason === "repository_not_git" || reason === "repository_nested_in_git" || reason === "repository_contains_agent") return 422;
   if (reason === "launch_cwd_unavailable") return 409;
   if (
     reason === "path_not_absolute" ||
@@ -1199,6 +1204,7 @@ function repositoryFailureCode(reason: string): { status: number; code: string; 
     repository_not_directory: "Choose a directory, not a file.",
     repository_not_writable: "Choose a repository that Bearing can write to.",
     repository_not_git: "Not a Git repo — confirm to use for planning, or pick a repo.",
+    repository_nested_in_git: "This directory is inside another Git repository. Choose its root instead.",
     repository_contains_agent: "Pick a project repo, not a dir containing your agent tools (e.g. home).",
     launch_cwd_unavailable: "Launch directory is unavailable. Browse for a repository.",
     bearing_symlink: "Remove the .bearing symlink or choose another repository.",
@@ -1223,7 +1229,7 @@ function repositoryFailureCode(reason: string): { status: number; code: string; 
 
 function writeRepositoryFailure(
   res: ServerResponse,
-  failure: { status: number; code: string; remedy: string; candidate?: string },
+  failure: { status: number; code: string; remedy: string; candidate?: string; containingRepositoryPath?: string; tokens?: number },
   responseStatus: "blocked" | "error" = "blocked",
 ): void {
   res.writeHead(failure.status, {
@@ -1236,6 +1242,11 @@ function writeRepositoryFailure(
     code: failure.code,
     remedy: failure.remedy,
     ...(failure.candidate === undefined ? {} : { candidate: failure.candidate }),
+    ...(failure.containingRepositoryPath === undefined ? {} : {
+      remedy: `This directory is inside Git repository ${failure.containingRepositoryPath}. Choose ${failure.containingRepositoryPath} instead.`,
+      containingRepositoryPath: failure.containingRepositoryPath,
+    }),
+    ...(failure.tokens === undefined ? {} : { tokens: failure.tokens }),
   }));
 }
 
@@ -1572,7 +1583,7 @@ type RecoveryReport = {
   readonly failureClass: "agent_receipt_or_artifact_validation";
   readonly code: FailureResult["code"];
   readonly retryLevel: "repair" | "simplify";
-  readonly version: "0.1.6";
+  readonly version: string;
   readonly fitDiagnostic?: FitDiagnostic;
 };
 
@@ -2358,7 +2369,7 @@ function handleJourneyPost(
           failureClass: "agent_receipt_or_artifact_validation",
           code: retryFailure.code,
           retryLevel: "simplify",
-          version: "0.1.6",
+          version: BEARING_VERSION,
           ...recoveryFitDiagnostic(retryFailure),
         } satisfies RecoveryReport;
         writeShowcaseJson(res, {
@@ -2633,10 +2644,10 @@ function handleJourneyPost(
         result = await execute(recoveryGuidance(lastRetryLevel, result.code), fingerprint);
       }
       if (result.status !== "failure" && firstFailure) {
-        recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure.code, retryLevel: lastRetryLevel, version: "0.1.6", ...recoveryFitDiagnostic(firstFailure) };
+        recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure.code, retryLevel: lastRetryLevel, version: BEARING_VERSION, ...recoveryFitDiagnostic(firstFailure) };
         clearRetryDecision(state);
       } else if (recoverableFailure(result) && firstFailure) {
-        recoveryReport = { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: result.code, retryLevel: "simplify", version: "0.1.6", ...recoveryFitDiagnostic(result) };
+        recoveryReport = { status: "stopped", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: result.code, retryLevel: "simplify", version: BEARING_VERSION, ...recoveryFitDiagnostic(result) };
       } else if (result.status !== "failure") clearRetryDecision(state);
     } catch {
       result = { status: "failure" as const, code: "adapter_failed" as const, tokens: 0 };
@@ -3112,9 +3123,21 @@ async function handleImprovementHandoffGet(
 function repositoryRelativePlanDirectory(value: string): boolean {
   return !isAbsolute(value)
     && !/^[A-Za-z]:/.test(value)
+    && !value.includes(":")
     && !value.includes("\\")
     && posix.normalize(value) === value
     && value.split("/").every((part) => part && part !== "." && part !== "..");
+}
+
+export async function dispatchAsyncRunGet(
+  res: ServerResponse,
+  handler: () => Promise<void>,
+): Promise<void> {
+  try {
+    await handler();
+  } catch {
+    writeRejection(res, 500);
+  }
 }
 
 async function executionContractSource(repositoryPath: string, planDirectory: string): Promise<{ readonly available: true; readonly value: unknown } | { readonly available: false }> {
@@ -3590,12 +3613,12 @@ export function createRequestHandler(
     }
     const executionContract = /^\/api\/v1\/runs\/([A-Za-z0-9_-]{1,128})\/execution-contract\/([A-Za-z0-9.]{1,128})$/.exec(path);
     if (method === "GET" && executionContract) {
-      void handleExecutionContractGet(req, res, service, selected, executionContract[1], executionContract[2]).catch(() => writeRejection(res, 500));
+      void dispatchAsyncRunGet(res, () => handleExecutionContractGet(req, res, service, selected, executionContract[1], executionContract[2]));
       return;
     }
     const planningState = /^\/api\/v1\/runs\/([A-Za-z0-9_-]{1,128})\/planning-state$/.exec(path);
     if (method === "GET" && planningState) {
-      void handlePlanningStateGet(req, res, service, selected, planningState[1]).catch(() => writeRejection(res, 500));
+      void dispatchAsyncRunGet(res, () => handlePlanningStateGet(req, res, service, selected, planningState[1]));
       return;
     }
     const verificationReport = /^\/api\/v1\/runs\/([A-Za-z0-9_-]{1,128})\/verification\/(validator|grader|park-ranger)$/.exec(path);
@@ -3615,7 +3638,7 @@ export function createRequestHandler(
     }
     const journeyArtifact = /^\/api\/v1\/journey\/([A-Za-z0-9_-]{1,128})\/artifacts\/(\d{1,3})$/.exec(path);
     if (method === "GET" && journeyArtifact) {
-      void handleJourneyArtifactGet(res, service, req, selected, journeyArtifact[1], journeyArtifact[2]).catch(() => writeRejection(res, 500));
+      void dispatchAsyncRunGet(res, () => handleJourneyArtifactGet(res, service, req, selected, journeyArtifact[1], journeyArtifact[2]));
       return;
     }
     if (method === "GET" && path === "/api/v1/workflows") {

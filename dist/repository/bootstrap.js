@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { access, lstat, mkdir, open, readdir, realpath, rename, stat, unlink, writeFile, } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 import { resolveExecutable } from "./executable-path.js";
 import { assessRepositorySafety } from "./safety.js";
@@ -21,14 +21,19 @@ export class RepositoryBootstrap {
         const isGitRoot = await lstat(join(repositoryPath, ".git"))
             .then((marker) => marker.isDirectory() || marker.isFile())
             .catch(() => false);
+        const containingGitRoot = isGitRoot ? undefined : await findContainingGitRoot(repositoryPath);
         const safety = assessRepositorySafety({
             candidate: repositoryPath,
             isGitRoot,
+            containingGitRoot,
             agentExecutableRealpaths: opts?.agentExecutableRealpaths ?? knownAgentExecutableRealpaths(),
             ownerConfirmedNonGit: opts?.ownerConfirmedNonGit === true,
         });
         if (!safety.ok && safety.code === "repository_contains_agent") {
             return { ok: false, reason: "repository_contains_agent" };
+        }
+        if (!safety.ok && safety.code === "repository_nested_in_git") {
+            return { ok: false, reason: "repository_nested_in_git", containingRepositoryPath: containingGitRoot };
         }
         const bearingPath = join(repositoryPath, BEARING_DIR);
         const existing = await this.validateExistingBearing(bearingPath, repositoryPath);
@@ -182,6 +187,23 @@ export class RepositoryBootstrap {
             }
             return { ok: false, reason: "initialize_failed" };
         }
+    }
+}
+async function findContainingGitRoot(candidate) {
+    let current = dirname(candidate);
+    while (true) {
+        const marker = await lstat(join(current, ".git")).catch(() => undefined);
+        if (marker?.isFile())
+            return current;
+        if (marker?.isDirectory()) {
+            const head = await lstat(join(current, ".git", "HEAD")).catch(() => undefined);
+            if (head?.isFile())
+                return current;
+        }
+        const parent = dirname(current);
+        if (parent === current)
+            return undefined;
+        current = parent;
     }
 }
 function knownAgentExecutableRealpaths() {
