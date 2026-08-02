@@ -10,6 +10,7 @@ import {
 const MAX_ITEMS = 128;
 const MAX_TEXT = 16_384;
 const MAX_TRAVERSAL_DEPTH = 128;
+const EXECUTION_SLICE_ID = /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/;
 const PRIORITY_ORDER: Readonly<Record<Priority, number>> = {
   P0: 0,
   P1: 1,
@@ -30,6 +31,7 @@ const FINDING_KEYS = [
   "location",
   "reproduction",
   "reachability",
+  "sliceIds",
   "lens",
   "confirmedBy",
 ] as const;
@@ -73,6 +75,7 @@ export interface ParkRangerFinding {
   readonly location: { readonly path: string; readonly line: number };
   readonly reproduction: Reproduction;
   readonly reachability: Reachability;
+  readonly sliceIds: readonly string[];
   readonly lens: LensId;
   readonly confirmedBy: readonly LensId[];
   readonly testStrength?: TestStrengthCode;
@@ -139,6 +142,8 @@ export type ParkRangerReportFailure =
   | "prototype_pollution"
   | "finding_unreproduced"
   | "finding_unreachable"
+  | "finding_slice_scope_invalid"
+  | "unknown_slice"
   | "claim_unadjudicated"
   | "self_certification"
   | "shared_ancestry";
@@ -271,6 +276,16 @@ function reachabilityShape(value: unknown): value is Reachability {
     && value.path.length > 0;
 }
 
+function findingSliceIdsShape(value: unknown): value is readonly string[] {
+  return denseArray(value, (entry): entry is string =>
+    typeof entry === "string"
+      && entry.length > 0
+      && entry.length <= 128
+      && EXECUTION_SLICE_ID.test(entry))
+    && value.length > 0
+    && new Set(value).size === value.length;
+}
+
 function findingShape(value: unknown): value is ParkRangerFinding {
   return hasAllowedKeys(value, FINDING_KEYS, FINDING_OPTIONAL_KEYS)
     && boundedText(value.id)
@@ -280,6 +295,7 @@ function findingShape(value: unknown): value is ParkRangerFinding {
     && locationShape(value.location)
     && reproductionShape(value.reproduction)
     && reachabilityShape(value.reachability)
+    && findingSliceIdsShape(value.sliceIds)
     && isLensId(value.lens)
     && denseArray(value.confirmedBy, isLensId)
     && (!Object.hasOwn(value, "testStrength") || isTestStrengthCode(value.testStrength))
@@ -353,6 +369,12 @@ function reachabilityFailure(value: Record<string, unknown>): boolean {
     && finding.reachability.path.length === 0);
 }
 
+function findingSliceScopeFailure(value: Record<string, unknown>): boolean {
+  if (!Array.isArray(value.findings)) return false;
+  return value.findings.some((finding) => isObject(finding)
+    && (!Object.hasOwn(finding, "sliceIds") || !findingSliceIdsShape(finding.sliceIds)));
+}
+
 function claimKey(claim: ReadinessClaim): string {
   return JSON.stringify([claim.text, claim.sliceIds]);
 }
@@ -376,6 +398,7 @@ function normalizeFinding(finding: ParkRangerFinding, confirmingLens: LensId = f
   const reasons = finding.reasons === undefined ? undefined : [...new Set(finding.reasons)].sort();
   return {
     ...finding,
+    sliceIds: [...finding.sliceIds].sort(compareText),
     priority: clampPriority(finding.priority, finding.reachability.trustBoundary),
     confirmedBy: [confirmingLens],
     ...(reasons === undefined ? {} : { reasons }),
@@ -386,6 +409,7 @@ export function parseParkRangerReport(
   value: unknown,
   inboundClaims: readonly ReadinessClaim[] = [],
   independence: VerificationIndependence = EMPTY_INDEPENDENCE,
+  allowedSliceIds?: readonly string[],
 ): ParkRangerReportParseResult {
   const objectFailure = objectGraphFailure(value)
     ?? objectGraphFailure(inboundClaims)
@@ -397,6 +421,7 @@ export function parseParkRangerReport(
   }
   if (reproductionFailure(value)) return { ok: false, reason: "finding_unreproduced" };
   if (reachabilityFailure(value)) return { ok: false, reason: "finding_unreachable" };
+  if (findingSliceScopeFailure(value)) return { ok: false, reason: "finding_slice_scope_invalid" };
   if (!hasAllowedKeys(value, PARK_RANGER_REPORT_KEYS)
     || !isLensId(value.lens)
     || !boundedText(value.sessionId)
@@ -419,7 +444,24 @@ export function parseParkRangerReport(
     return { ok: false, reason: "claim_unadjudicated" };
   }
 
-  return { ok: true, value: value as unknown as ParkRangerReport };
+  const report = value as unknown as ParkRangerReport;
+  if (allowedSliceIds !== undefined) {
+    const allowed = new Set(allowedSliceIds);
+    if (report.findings.some((finding) => finding.sliceIds.some((sliceId) => !allowed.has(sliceId)))) {
+      return { ok: false, reason: "unknown_slice" };
+    }
+  }
+
+  return {
+    ok: true,
+    value: {
+      ...report,
+      findings: report.findings.map((finding) => ({
+        ...finding,
+        sliceIds: [...finding.sliceIds].sort(compareText),
+      })),
+    },
+  };
 }
 
 export function adjudicateClaim(input: {
@@ -429,8 +471,10 @@ export function adjudicateClaim(input: {
   readonly findings: readonly ParkRangerFinding[];
 }): AdjudicationResult {
   const reasons: string[] = [];
+  const claimSliceIds = new Set(input.claim.sliceIds);
   const blockingPriorities = [...new Set(input.findings
     .map((finding) => normalizeFinding(finding))
+    .filter((finding) => finding.sliceIds.some((sliceId) => claimSliceIds.has(sliceId)))
     .filter(({ priority }) => priority === "P0" || priority === "P1")
     .map(({ priority }) => `open_${priority.toLowerCase()}_finding`))].sort();
 
@@ -458,6 +502,10 @@ export function clampPriority(priority: Priority, boundary: TrustBoundary): Prio
 
 function findingCode(finding: ParkRangerFinding): string {
   return finding.code ?? finding.testStrength ?? finding.id;
+}
+
+export function findingIdentity(finding: ParkRangerFinding): string {
+  return JSON.stringify([finding.location.path, finding.location.line, findingCode(finding)]);
 }
 
 function compareText(left: string, right: string): number {
@@ -496,7 +544,7 @@ export function synthesizeFindings(
     }
     if (candidate.reachability.path.length === 0) return { ok: false, reason: "finding_unreachable" };
 
-    const key = JSON.stringify([candidate.location.path, candidate.location.line, findingCode(candidate)]);
+    const key = findingIdentity(candidate);
     const existing = deduplicated.get(key);
     if (!existing) {
       deduplicated.set(key, candidate);
@@ -509,9 +557,11 @@ export function synthesizeFindings(
       ? candidate.priority
       : existing.priority;
     const reasons = [...new Set([...(existing.reasons ?? []), ...(candidate.reasons ?? [])])].sort();
+    const sliceIds = [...new Set([...existing.sliceIds, ...candidate.sliceIds])].sort(compareText);
     deduplicated.set(key, {
       ...existing,
       priority,
+      sliceIds,
       confirmedBy,
       ...(reasons.length === 0 ? {} : { reasons }),
     });

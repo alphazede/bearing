@@ -1,6 +1,9 @@
 /** Provider-neutral process adapters.  Inspection is metadata-only. */
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { resolveBackgroundReasoning } from "../profile/reasoning-policy.js";
+export const BACKGROUND_BRIEF_CAPABILITY = "read-only-background-brief";
+export const MAX_BACKGROUND_BRIEF_CHARS = 4_096;
 /** Exact built-ins; only these routes can be selected without a custom registry. */
 export const BUILTIN_ROUTES = [
     { id: "codex", provider: "codex", model: "*", executable: "codex", capabilities: ["structured-events"], compatibleFallbacks: [], reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"] },
@@ -8,7 +11,7 @@ export const BUILTIN_ROUTES = [
     { id: "agy", provider: "agy", model: "*", executable: "agy", capabilities: ["headless-output"], compatibleFallbacks: [], reasoningLevels: ["low", "medium", "high", "thinking"] },
     { id: "grok-build", provider: "grok", model: "grok-build", executable: "grok-safe", capabilities: ["structured-events"], compatibleFallbacks: [], reasoningLevels: ["low", "medium", "high", "xhigh"] },
     { id: "opencode", provider: "opencode", model: "*", executable: "opencode", capabilities: ["structured-events"], compatibleFallbacks: [], reasoningLevels: ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"] },
-    { id: "pi", provider: "pi", model: "*", executable: "pi", capabilities: ["structured-events"], compatibleFallbacks: [], reasoningLevels: ["off", "minimal", "low", "medium", "high", "xhigh"] },
+    { id: "pi", provider: "pi", model: "*", executable: "pi", capabilities: ["structured-events", BACKGROUND_BRIEF_CAPABILITY], compatibleFallbacks: [], reasoningLevels: ["off", "minimal", "low", "medium", "high", "xhigh"] },
 ];
 const secretKey = /key|secret|token|credential|authorization|password/i;
 const secretValue = /(?:\b(?:api[_ -]?key|secret|token|password|authorization)\s*[=:]\s*|\bBearer\s+|\bsk-[A-Za-z0-9_-]{8,}|\bAKIA[A-Z0-9]{16})[^\s,;]*/gi;
@@ -100,6 +103,27 @@ class ProcessAgentAdapter {
                 return this.receipt("blocked", requested, requested, isolation.state, isolation.warnings, fallbackVerified.failure ?? "verification_failed", 0, [], 0);
         }
         return adapter.run(request, requested, isolation.state, isolation.warnings);
+    }
+    async readOnlyBackgroundBrief(request) {
+        const backgroundReasoning = resolveBackgroundReasoning(request.role.selection.provider, request.role.reasoning.tier);
+        if (!this.route.capabilities.includes(BACKGROUND_BRIEF_CAPABILITY) || !backgroundReasoning.ok || backgroundReasoning.tier !== "medium")
+            return undefined;
+        const role = {
+            ...request.role,
+            sessionId: null,
+            reasoning: { tier: backgroundReasoning.tier, providerLevel: backgroundReasoning.providerLevel, clamped: backgroundReasoning.clamped },
+            authority: { ...request.role.authority, read: true, write: false, network: false, externalAction: false },
+            toolAllow: request.role.toolAllow.filter((tool) => /^(?:read|search)$/i.test(tool)),
+            limits: { ...request.role.limits, maxRetries: 0 },
+        };
+        const receipt = await this.execute({ runId: request.runId, repositoryPath: request.repositoryPath, role, task: request.task });
+        if (receipt.status !== "completed")
+            return undefined;
+        const content = receipt.events.flatMap((event) => {
+            const value = event.data?.content;
+            return typeof value === "string" ? [value] : [];
+        }).at(-1)?.trim();
+        return content ? content.slice(0, MAX_BACKGROUND_BRIEF_CHARS) : undefined;
     }
     fallback(id, selection) {
         if (!id || !this.route.compatibleFallbacks.includes(id))

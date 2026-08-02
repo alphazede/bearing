@@ -20,4 +20,9 @@ After integration, write a JSON receipt under `.bearing/focus/` containing every
 changed artifact and one truthful result for every required command ID. Run
 `bearing focus validate --run <run-id> --receipt <path>`. Do not claim completion
 unless it returns `ok: true`. Never edit Focus state, bypass validation, or
-publish repository data.
+publish repository data. In autonomous Navigator or Expedition mode, Navigator must create or resume one
+persistent host goal before execution, retain it through recoverable blockers,
+continue dependency-independent authorized work, store a concrete resume action
+for each blocked lane, complete only after all authorized slices, gates,
+reviews, and owner-authorized external actions, mark blocked only under hosting
+runtime goal threshold and status rules, and never bypass owner authority.

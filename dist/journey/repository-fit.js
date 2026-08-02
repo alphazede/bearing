@@ -30,6 +30,27 @@ const DIAGNOSTIC_FIELDS_BY_CHECK = {
     evidence_containment: ["path"],
     result_envelope: ["assistantText", "envelope"],
 };
+export const FIT_OWNER_ANSWER_REMEDY = 'Answer "Confirm", enter an exact docs/plans/... path, or answer "Decline".';
+/** Normalize only the repository-fit owner's bounded decision vocabulary. */
+export function canonicalizeFitOwnerAnswer(answer) {
+    const normalized = answer.trim().toLowerCase().replace(/[.!]+$/g, "");
+    if (["y", "yes", "confirm", "confirmed", "approve", "approved", "proceed", "use it", "looks good", "i confirm all of these"].includes(normalized)) {
+        return { ok: true, answer: "Confirm" };
+    }
+    if (["no", "decline", "declined", "stop", "cancel"].includes(normalized)) {
+        return { ok: true, answer: "Decline" };
+    }
+    // Preserve the existing bounded basename lookup used to disambiguate known
+    // plan directories; prose is never reinterpreted as a filesystem request.
+    if (planDirectoryValid(answer) || /^[A-Za-z0-9._/-]+$/.test(answer))
+        return { ok: true, answer };
+    return {
+        ok: false,
+        error: "repository_fit_answer_invalid",
+        remedy: FIT_OWNER_ANSWER_REMEDY,
+        correctionAction: "decide",
+    };
+}
 function record(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }

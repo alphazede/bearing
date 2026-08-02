@@ -6,6 +6,7 @@ import {
   GLOBAL_DEFAULT_REASONING_TIER,
   REASONING_PROVIDER_MAP,
   REASONING_TIERS,
+  resolveBackgroundReasoning,
   resolveReasoning,
   type ReasoningPolicy,
   type ReasoningProvider,
@@ -37,6 +38,11 @@ function policy(tier: ReasoningTier = "medium", maxSteps = 10): ReasoningPolicy 
 const CELLS = REASONING_TIERS.flatMap((tier) => PROVIDERS.map((provider) => ({ tier, provider, expected: EXPECTED_LEVELS[tier][provider] })));
 
 describe("reasoning provider mapping", () => {
+  it("resolves the background brief at abstract medium without changing foreground policy", () => {
+    expect(resolveBackgroundReasoning("pi")).toEqual({ ok: true, tier: "medium", providerLevel: "medium", clamped: false, reason: "default" });
+    expect(resolveBackgroundReasoning("unknown-provider")).toEqual({ ok: false, code: "reasoning_unmappable" });
+  });
+
   it("documents reachable abstract and legacy CLI reasoning values", () => {
     const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 

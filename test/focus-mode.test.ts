@@ -73,7 +73,7 @@ const implementation = "---\ntype: implementation\nstatus: complete\n---\n\n## P
 const pending = '<section id="bearing-final-qa" data-status="pending"><h2>Actual implementation and QA</h2><p>Pending implementation and validation.</p></section>';
 const completedReview = renderPlanningReview([["plan-spec.md", plan], ["design.md", design], ["seit.md", seit], ["implementation.md", implementation]]).replace(pending, '<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: src/import.ts changed exactly as planned.</p><p>Validation evidence: CMD-UNIT passed.</p></section>');
 
-async function repository(): Promise<string> {
+async function repository(ignoreDocs = false): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "bearing-focus-"));
   roots.push(root);
   await mkdir(join(root, "docs/plans/import"), { recursive: true });
@@ -86,6 +86,7 @@ async function repository(): Promise<string> {
     writeFile(join(root, "docs/plans/import/review.html"), renderPlanningReview([["plan-spec.md", plan], ["design.md", design], ["seit.md", seit], ["implementation.md", implementation]])),
     writeFile(join(root, "src/import.ts"), "export const imported = false;\n"),
     writeFile(join(root, "notes.txt"), "owner draft\n"),
+    ...(ignoreDocs ? [writeFile(join(root, ".gitignore"), "docs/\n")] : []),
   ]);
   await exec("git", ["init", "-q"], { cwd: root });
   await exec("git", ["config", "user.email", "bearing@example.invalid"], { cwd: root });
@@ -355,6 +356,63 @@ describe("Focus mode", () => {
     await writeFile(join(secondRoot, ".bearing/focus", `${unauthorized.runId}.json`), JSON.stringify({ githubIssueMutationAuthorized: true }));
     await writeFile(join(secondRoot, ".bearing/focus/receipt.json"), JSON.stringify({ artifacts: ["src/import.ts", "docs/plans/import/review.html"], evidence: passed, githubIssueMutation: true }));
     expect(await validateStandaloneFocus(secondRoot, unauthorized.runId, ".bearing/focus/receipt.json")).toEqual({ ok: false, reason: "authority_invalid" });
+    expect(await validateStandaloneFocus(secondRoot, unauthorized.runId, ".bearing/focus/receipt.json")).toEqual({ ok: false, reason: "state_invalid" });
+  });
+
+  it("accepts a corrected ignored canonical review against the same immutable Focus context", async () => {
+    const root = await repository(true);
+    await mkdir(join(root, ".bearing/focus"), { recursive: true });
+    await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({ role: "crewmate", objective: "Import bounded data", planDirectory: "docs/plans/import", slice: "1.1" }));
+    const begun = await beginStandaloneFocus(root, ".bearing/focus/request.json");
+    if (!begun.ok) throw new Error(begun.reason);
+    await Promise.all([
+      writeFile(join(root, "src/import.ts"), "export const imported = true;\n"),
+      writeFile(join(root, "docs/plans/import/review.html"), "invalid review\n"),
+      writeFile(join(root, ".bearing/focus/receipt.json"), JSON.stringify({ artifacts: ["src/import.ts", "docs/plans/import/review.html"], evidence: passed })),
+    ]);
+
+    expect(await validateStandaloneFocus(root, begun.runId, ".bearing/focus/receipt.json")).toEqual({ ok: false, reason: "review_invalid" });
+    await writeFile(join(root, "docs/plans/import/review.html"), completedReview);
+    expect(await validateStandaloneFocus(root, begun.runId, ".bearing/focus/receipt.json")).toEqual({
+      ok: true,
+      changedPaths: ["docs/plans/import/review.html", "src/import.ts"],
+    });
+    expect(await validateStandaloneFocus(root, begun.runId, ".bearing/focus/receipt.json")).toEqual({ ok: false, reason: "state_invalid" });
+  });
+
+  it("fingerprints only the canonical ignored review when an omitted ignored sibling also changes", async () => {
+    const root = await repository(true);
+    await mkdir(join(root, ".bearing/focus"), { recursive: true });
+    await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({ role: "crewmate", objective: "Import bounded data", planDirectory: "docs/plans/import", slice: "1.1" }));
+    const begun = await beginStandaloneFocus(root, ".bearing/focus/request.json");
+    if (!begun.ok) throw new Error(begun.reason);
+    await Promise.all([
+      writeFile(join(root, "src/import.ts"), "export const imported = true;\n"),
+      writeFile(join(root, "docs/plans/import/review.html"), completedReview),
+      writeFile(join(root, "docs/plans/import/other.html"), "omitted ignored artifact\n"),
+      writeFile(join(root, ".bearing/focus/receipt.json"), JSON.stringify({ artifacts: ["src/import.ts", "docs/plans/import/review.html"], evidence: passed })),
+    ]);
+
+    expect(await validateStandaloneFocus(root, begun.runId, ".bearing/focus/receipt.json")).toEqual({
+      ok: true,
+      changedPaths: ["docs/plans/import/review.html", "src/import.ts"],
+    });
+  });
+
+  it("rejects a declared ignored sibling outside the exact review allowance", async () => {
+    const root = await repository(true);
+    await mkdir(join(root, ".bearing/focus"), { recursive: true });
+    await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({ role: "crewmate", objective: "Import bounded data", planDirectory: "docs/plans/import", slice: "1.1" }));
+    const begun = await beginStandaloneFocus(root, ".bearing/focus/request.json");
+    if (!begun.ok) throw new Error(begun.reason);
+    await Promise.all([
+      writeFile(join(root, "src/import.ts"), "export const imported = true;\n"),
+      writeFile(join(root, "docs/plans/import/review.html"), completedReview),
+      writeFile(join(root, "docs/plans/import/other.html"), "undeclared ignored artifact\n"),
+      writeFile(join(root, ".bearing/focus/receipt.json"), JSON.stringify({ artifacts: ["src/import.ts", "docs/plans/import/review.html", "docs/plans/import/other.html"], evidence: passed })),
+    ]);
+
+    expect(await validateStandaloneFocus(root, begun.runId, ".bearing/focus/receipt.json")).toEqual({ ok: false, reason: "path_outside_write_set" });
   });
 
   it("rejects direct Crewmate use without a bounded request and approved plan", async () => {
@@ -439,7 +497,7 @@ describe("Focus mode", () => {
     )).toEqual({ ok: false, reason: "response_too_large" });
   });
 
-  it("keeps the one-use guard available after an unrelated loopback probe", async () => {
+  it("keeps the consume-on-success-or-terminal guard available after an unrelated loopback probe", async () => {
     const root = await repository();
     await mkdir(join(root, ".bearing/focus"), { recursive: true });
     await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({
@@ -485,7 +543,8 @@ describe("Focus mode", () => {
     });
 
     // Invariant, not a regression guard: answering an oversized request must never
-    // consume the one-use guard. Today the guard survives either way, because
+    // consume the guard before successful completion or terminal rejection. Today
+    // the guard survives either way, because
     // `response.end`'s callback does not fire while the oversized body stays
     // unconsumed, so the scheduled `server.close()` never runs. Passing
     // `consume: false` states the intent explicitly instead of depending on that
@@ -496,12 +555,13 @@ describe("Focus mode", () => {
   });
 
   // A 400 is rejected before validateStored runs, so it spends no validation
-  // attempt and must leave the one-use guard intact, exactly as 404 and 413 do.
+  // attempt and must leave the consume-on-success-or-terminal guard intact,
+  // exactly as 404 and 413 do.
   it.each([
     ["a body that does not parse", "{not json"],
     ["a body naming a different root", JSON.stringify({ root: "/elsewhere", receiptPath: "receipt.json" })],
     ["a body with no receiptPath", JSON.stringify({ root: "PLACEHOLDER_ROOT" })],
-  ])("keeps the one-use guard available after %s", async (_label, rawBody) => {
+  ])("keeps the consume-on-success-or-terminal guard available after %s", async (_label, rawBody) => {
     const root = await repository();
     await mkdir(join(root, ".bearing/focus"), { recursive: true });
     await writeFile(join(root, ".bearing/focus/request.json"), JSON.stringify({

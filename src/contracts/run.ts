@@ -94,6 +94,25 @@ export interface RecommendExecutionModePayload {
   readonly selection?: SelectionSignals;
 }
 
+export const JOURNEY_TOKEN_BUDGET_STATES = ["within_budget", "exhausted"] as const;
+export const JOURNEY_RECOVERY_OUTCOMES = ["repaired", "stopped"] as const;
+export const MAX_JOURNEY_TOKEN_TOTAL = Number.MAX_SAFE_INTEGER;
+export const MAX_JOURNEY_RECOVERY_ATTEMPTS = 16;
+
+export type JourneyTokenBudgetState = (typeof JOURNEY_TOKEN_BUDGET_STATES)[number];
+export type JourneyRecoveryStatus = (typeof JOURNEY_RECOVERY_OUTCOMES)[number];
+
+export interface JourneyTokenUsage {
+  readonly total: number;
+  readonly budget: number;
+  readonly state: JourneyTokenBudgetState;
+}
+
+export interface JourneyRecoveryOutcome {
+  readonly outcome: JourneyRecoveryStatus;
+  readonly attempts: number;
+}
+
 export interface ApproveExecutionModePayload {
   readonly recommendationEventId: string;
 }
@@ -131,6 +150,8 @@ export interface RecordJourneyCheckpointPayload {
   readonly selectionReasoning?: string;
   readonly providerSessionId?: string;
   readonly runtimeStateJson?: string;
+  readonly tokenUsage?: JourneyTokenUsage;
+  readonly recoveryOutcome?: JourneyRecoveryOutcome;
   readonly verification?: VerificationCheckpointPayload;
   readonly planningState?: string;
   readonly planningFailure?: string;
@@ -186,6 +207,17 @@ export interface RecordJourneyCheckpointCommand extends CommandEnvelopeBase {
   readonly payload: RecordJourneyCheckpointPayload;
 }
 
+export interface RecordOwnerImprovementApplicationCommand extends CommandEnvelopeBase {
+  readonly type: "recordOwnerImprovementApplication";
+  readonly payload: {
+    readonly improvementProposalRef: string;
+    readonly externalEvidenceHash: string;
+    readonly surface: string;
+    readonly targetJson: string;
+    readonly valueJson: string;
+  };
+}
+
 export type CommandEnvelopeV1 =
   | CreateWorkRequestCommand
   | RequireDecisionCommand
@@ -193,13 +225,14 @@ export type CommandEnvelopeV1 =
   | RecommendExecutionModeCommand
   | ApproveExecutionModeCommand
   | OverrideExecutionModeCommand
-  | RecordJourneyCheckpointCommand;
+  | RecordJourneyCheckpointCommand
+  | RecordOwnerImprovementApplicationCommand;
 
 export type CommandType = CommandEnvelopeV1["type"];
 
 // --- Event envelope ---------------------------------------------------------
 
-export type EventType = "workRequestCreated" | "decisionRequired" | "ownerAnswered" | "executionModeRecommended" | "executionModeApproved" | "executionModeOverridden" | "journeyCheckpointRecorded";
+export type EventType = "workRequestCreated" | "decisionRequired" | "ownerAnswered" | "executionModeRecommended" | "executionModeApproved" | "executionModeOverridden" | "journeyCheckpointRecorded" | "ownerImprovementApplicationRecorded";
 
 export interface EventEnvelopeV1 {
   readonly schemaVersion: typeof EVENT_SCHEMA_VERSION;
@@ -263,20 +296,47 @@ const VERIFICATION_VERDICTS = {
 export type VerificationLayer = keyof typeof VERIFICATION_VERDICTS;
 export type VerificationVerdict = (typeof VERIFICATION_VERDICTS)[VerificationLayer][number];
 
+export type VerificationFindingPriority = "P0" | "P1" | "P2" | "P3";
+
+export interface CompletedSliceEvidence {
+  readonly sliceId: string;
+  readonly requirementIds: readonly string[];
+}
+
+export interface ConfirmedFindingEvidence {
+  readonly findingRef: string;
+  readonly priority: VerificationFindingPriority;
+  readonly sliceIds: readonly string[];
+}
+
 export interface VerificationCheckpointPayload {
   readonly layer: VerificationLayer;
   readonly verdict: VerificationVerdict;
   readonly rubricVersion?: string;
   readonly findingCount?: number;
+  readonly completedSlices?: readonly CompletedSliceEvidence[];
+  readonly reviewedSliceIds?: readonly string[];
+  readonly confirmedFindings?: readonly ConfirmedFindingEvidence[];
 }
 
-const VERIFICATION_CHECKPOINT_KEYS = ["layer", "verdict", "rubricVersion", "findingCount"] as const;
+const VERIFICATION_CHECKPOINT_KEYS = [
+  "layer",
+  "verdict",
+  "rubricVersion",
+  "findingCount",
+  "completedSlices",
+  "reviewedSliceIds",
+  "confirmedFindings",
+] as const;
 /**
  * A rubric version is a short identifier (today `"1"`). `layer` and `verdict` are already bounded by
  * their closed vocabularies; this is the only free-form string left, and the ledger is append-only,
  * so an oversized value can never be removed and permanently inflates the bounded projection.
  */
 const MAX_RUBRIC_VERSION = 64;
+const MAX_VERIFICATION_ITEMS = 128;
+const EXECUTION_SLICE_ID = /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/;
+const FINDING_REF = /^[a-f0-9]{64}$/;
 
 function isVerificationLayer(value: unknown): value is VerificationLayer {
   return isNonEmptyString(value) && Object.hasOwn(VERIFICATION_VERDICTS, value);
@@ -295,12 +355,25 @@ export function isVerificationCheckpointPayload(v: unknown): v is VerificationCh
   // still read it — the live event would then project metadata that disappears on JSON round-trip
   // and replay. Same in-vs-hasOwn class as the required-key guard.
   if ((v.rubricVersion !== undefined && !Object.hasOwn(v, "rubricVersion"))
-    || (v.findingCount !== undefined && !Object.hasOwn(v, "findingCount"))) return false;
-  const { layer, verdict, rubricVersion, findingCount } = v;
-  return isVerificationLayer(layer)
-    && isVerificationVerdict(layer, verdict)
-    && (rubricVersion === undefined || isNonEmptyString(rubricVersion, MAX_RUBRIC_VERSION))
-    && (findingCount === undefined || (typeof findingCount === "number" && Number.isSafeInteger(findingCount) && findingCount >= 0));
+    || (v.findingCount !== undefined && !Object.hasOwn(v, "findingCount"))
+    || (v.completedSlices !== undefined && !Object.hasOwn(v, "completedSlices"))
+    || (v.reviewedSliceIds !== undefined && !Object.hasOwn(v, "reviewedSliceIds"))
+    || (v.confirmedFindings !== undefined && !Object.hasOwn(v, "confirmedFindings"))) return false;
+  const { layer, verdict, rubricVersion, findingCount, completedSlices, reviewedSliceIds, confirmedFindings } = v;
+  if (!isVerificationLayer(layer)
+    || !isVerificationVerdict(layer, verdict)
+    || (rubricVersion !== undefined && !isNonEmptyString(rubricVersion, MAX_RUBRIC_VERSION))
+    || (findingCount !== undefined && !(typeof findingCount === "number" && Number.isSafeInteger(findingCount) && findingCount >= 0))) return false;
+  if (completedSlices !== undefined
+    && (!isCanonicalCompletedSlices(completedSlices) || layer !== "validator" || verdict !== "PASS")) return false;
+  if (reviewedSliceIds !== undefined
+    && (!isCanonicalStringArray(reviewedSliceIds, isExecutionSliceId) || layer !== "park-ranger")) return false;
+  if (confirmedFindings !== undefined
+    && (!isCanonicalConfirmedFindings(confirmedFindings)
+      || layer !== "park-ranger"
+      || typeof findingCount !== "number"
+      || findingCount !== confirmedFindings.length)) return false;
+  return true;
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -319,6 +392,32 @@ function isNonNegativeInt(v: unknown): v is number {
   return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= Number.MAX_SAFE_INTEGER;
 }
 
+export function isJourneyTokenUsage(value: unknown): value is JourneyTokenUsage {
+  if (!isObject(value)
+    || !Object.hasOwn(value, "total")
+    || !Object.hasOwn(value, "budget")
+    || !Object.hasOwn(value, "state")
+    || Object.keys(value).some((key) => key !== "total" && key !== "budget" && key !== "state")) return false;
+  const { total, budget, state } = value;
+  if (!isNonNegativeInt(total)
+    || total > MAX_JOURNEY_TOKEN_TOTAL
+    || !isNonNegativeInt(budget)
+    || budget === 0
+    || !JOURNEY_TOKEN_BUDGET_STATES.some((allowed) => allowed === state)) return false;
+  return true;
+}
+
+export function isJourneyRecoveryOutcome(value: unknown): value is JourneyRecoveryOutcome {
+  return isObject(value)
+    && Object.hasOwn(value, "outcome")
+    && Object.hasOwn(value, "attempts")
+    && Object.keys(value).every((key) => key === "outcome" || key === "attempts")
+    && JOURNEY_RECOVERY_OUTCOMES.some((allowed) => allowed === value.outcome)
+    && isNonNegativeInt(value.attempts)
+    && value.attempts > 0
+    && value.attempts <= MAX_JOURNEY_RECOVERY_ATTEMPTS;
+}
+
 function isSessionRef(v: unknown): v is SessionRef {
   if (!isObject(v)) return false;
   return isId(v.sessionId) && isNonEmptyString(v.actor, 64);
@@ -328,6 +427,76 @@ function isReadonlyStringArray(v: unknown): v is readonly string[] {
   if (!Array.isArray(v)) return false;
   if (v.length > MAX_EVIDENCE_REFS) return false;
   return v.every((entry) => typeof entry === "string" && entry.length <= MAX_STRING);
+}
+
+function isNativeDenseArray(v: unknown): v is readonly unknown[] {
+  if (!Array.isArray(v)
+    || Object.getPrototypeOf(v) !== Array.prototype
+    || v.length > MAX_VERIFICATION_ITEMS
+    || Object.keys(v).length !== v.length) return false;
+  for (let index = 0; index < v.length; index += 1) {
+    if (!Object.hasOwn(v, index)) return false;
+  }
+  return true;
+}
+
+function isExecutionSliceId(v: unknown): v is string {
+  return isNonEmptyString(v, 128) && EXECUTION_SLICE_ID.test(v);
+}
+
+function isPriority(v: unknown): v is VerificationFindingPriority {
+  return v === "P0" || v === "P1" || v === "P2" || v === "P3";
+}
+
+function isCanonicalStringArray(
+  v: unknown,
+  predicate: (value: unknown) => value is string,
+): v is readonly string[] {
+  if (!isNativeDenseArray(v) || v.length === 0 || !v.every(predicate)) return false;
+  for (let index = 1; index < v.length; index += 1) {
+    if (v[index - 1] >= v[index]) return false;
+  }
+  return true;
+}
+
+function isCanonicalCompletedSlice(v: unknown): v is CompletedSliceEvidence {
+  if (!isObject(v)
+    || Object.keys(v).length !== 2
+    || !Object.hasOwn(v, "sliceId")
+    || !Object.hasOwn(v, "requirementIds")) return false;
+  return isExecutionSliceId(v.sliceId) && isCanonicalStringArray(v.requirementIds, (value): value is string => {
+    return typeof value === "string"
+      && value.length <= MAX_REQUIREMENT_REF
+      && REQUIREMENT_REF.test(value);
+  });
+}
+
+function isCanonicalCompletedSlices(v: unknown): v is readonly CompletedSliceEvidence[] {
+  if (!isNativeDenseArray(v) || !v.every(isCanonicalCompletedSlice)) return false;
+  for (let index = 1; index < v.length; index += 1) {
+    if (v[index - 1].sliceId >= v[index].sliceId) return false;
+  }
+  return true;
+}
+
+function isCanonicalConfirmedFinding(v: unknown): v is ConfirmedFindingEvidence {
+  if (!isObject(v)
+    || Object.keys(v).length !== 3
+    || !Object.hasOwn(v, "findingRef")
+    || !Object.hasOwn(v, "priority")
+    || !Object.hasOwn(v, "sliceIds")) return false;
+  return typeof v.findingRef === "string"
+    && FINDING_REF.test(v.findingRef)
+    && isPriority(v.priority)
+    && isCanonicalStringArray(v.sliceIds, isExecutionSliceId);
+}
+
+function isCanonicalConfirmedFindings(v: unknown): v is readonly ConfirmedFindingEvidence[] {
+  if (!isNativeDenseArray(v) || !v.every(isCanonicalConfirmedFinding)) return false;
+  for (let index = 1; index < v.length; index += 1) {
+    if (v[index - 1].findingRef >= v[index].findingRef) return false;
+  }
+  return true;
 }
 
 const MAX_REQUIREMENT_REFS = 128;
@@ -389,6 +558,9 @@ export function parseCommandEnvelope(v: unknown): ParseResult<CommandEnvelopeV1>
       break;
     case "recordJourneyCheckpoint":
       if (!isRecordJourneyCheckpointPayload(v.payload)) return { ok: false, reason: "malformed" };
+      break;
+    case "recordOwnerImprovementApplication":
+      if (!isRecordOwnerImprovementApplicationPayload(v.payload)) return { ok: false, reason: "malformed" };
       break;
     default:
       return { ok: false, reason: "malformed" };
@@ -467,7 +639,7 @@ function isOverrideExecutionModePayload(v: unknown): v is OverrideExecutionModeP
 function isRecordJourneyCheckpointPayload(v: unknown): v is RecordJourneyCheckpointPayload {
   if (!isObject(v)) return false;
   const requiredKeys = ["stage", "status", "artifacts"];
-  const optionalKeys = ["planDirectory", "question", "questionDecisionId", "reviewBaselineRevision", "lastResultJson", "qaJson", "gatherQuestionsDiscovered", "selectionProvider", "selectionModel", "selectionReasoning", "providerSessionId", "runtimeStateJson", "verification", "planningState", "planningFailure", "ownerApprovedContentHash", "repositoryFitDecision", "resolvedPlanDirectory", "improvementProposalRef", "requirementRefs"];
+  const optionalKeys = ["planDirectory", "question", "questionDecisionId", "reviewBaselineRevision", "lastResultJson", "qaJson", "gatherQuestionsDiscovered", "selectionProvider", "selectionModel", "selectionReasoning", "providerSessionId", "runtimeStateJson", "tokenUsage", "recoveryOutcome", "verification", "planningState", "planningFailure", "ownerApprovedContentHash", "repositoryFitDecision", "resolvedPlanDirectory", "improvementProposalRef", "requirementRefs"];
   if (
     !requiredKeys.every((key) => Object.hasOwn(v, key))
     || Object.keys(v).some((key) => ![...requiredKeys, ...optionalKeys].includes(key))
@@ -484,6 +656,8 @@ function isRecordJourneyCheckpointPayload(v: unknown): v is RecordJourneyCheckpo
   const gatherQuestionsDiscovered = ownValue("gatherQuestionsDiscovered");
   const providerSessionId = ownValue("providerSessionId");
   const runtimeStateJson = ownValue("runtimeStateJson");
+  const tokenUsage = ownValue("tokenUsage");
+  const recoveryOutcome = ownValue("recoveryOutcome");
   const verification = ownValue("verification");
   const planningState = ownValue("planningState");
   const planningFailure = ownValue("planningFailure");
@@ -499,6 +673,8 @@ function isRecordJourneyCheckpointPayload(v: unknown): v is RecordJourneyCheckpo
     (qaJson === undefined || isNonEmptyString(qaJson, MAX_QA_JSON_BYTES)) && (gatherQuestionsDiscovered === undefined || typeof gatherQuestionsDiscovered === "boolean") &&
     (providerSessionId === undefined || typeof providerSessionId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(providerSessionId)) &&
     (runtimeStateJson === undefined || typeof runtimeStateJson === "string" && parseRuntimeState(runtimeStateJson).ok) &&
+    (tokenUsage === undefined || isJourneyTokenUsage(tokenUsage)) &&
+    (recoveryOutcome === undefined || isJourneyRecoveryOutcome(recoveryOutcome)) &&
     (verification === undefined || isVerificationCheckpointPayload(verification)) &&
     (planningState === undefined || typeof planningState === "string" && PLANNING_STATE_VALUES.some((state) => state === planningState)) &&
     (planningFailure === undefined || typeof planningFailure === "string" && PLANNING_FAILURE_VALUES.some((state) => state === planningFailure)) &&
@@ -508,8 +684,30 @@ function isRecordJourneyCheckpointPayload(v: unknown): v is RecordJourneyCheckpo
     (requirementRefs === undefined || isRequirementRefs(requirementRefs)) && selectionValid;
 }
 
+function isRecordOwnerImprovementApplicationPayload(v: unknown): v is RecordOwnerImprovementApplicationCommand["payload"] {
+  return hasExactKeys(v, ["improvementProposalRef", "externalEvidenceHash", "surface", "targetJson", "valueJson"])
+    && typeof v.improvementProposalRef === "string"
+    && /^[a-f0-9]{64}$/.test(v.improvementProposalRef)
+    && typeof v.externalEvidenceHash === "string"
+    && /^[a-f0-9]{64}$/.test(v.externalEvidenceHash)
+    && isNonEmptyString(v.surface, 128)
+    && isCanonicalJson(v.targetJson)
+    && isCanonicalJson(v.valueJson);
+}
+
+function isCanonicalJson(v: unknown): v is string {
+  if (typeof v !== "string" || v.length === 0 || v.length > MAX_STRING) return false;
+  try {
+    return canonicalStringify(JSON.parse(v)) === v;
+  } catch {
+    return false;
+  }
+}
+
 function hasExactKeys(v: unknown, keys: readonly string[]): v is Record<string, unknown> {
-  return isObject(v) && Object.keys(v).length === keys.length && keys.every((key) => key in v);
+  return isObject(v)
+    && Object.keys(v).length === keys.length
+    && keys.every((key) => Object.hasOwn(v, key));
 }
 
 function isRepositoryFitDecision(v: unknown): v is FitDecision {
@@ -568,6 +766,9 @@ export function parseEventEnvelope(v: unknown): ParseResult<EventEnvelopeV1> {
       break;
     case "journeyCheckpointRecorded":
       if (!isRecordJourneyCheckpointPayload(v.payload)) return { ok: false, reason: "malformed" };
+      break;
+    case "ownerImprovementApplicationRecorded":
+      if (!isRecordOwnerImprovementApplicationPayload(v.payload)) return { ok: false, reason: "malformed" };
       break;
     default:
       return { ok: false, reason: "malformed" };

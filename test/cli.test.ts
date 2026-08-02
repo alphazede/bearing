@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ImprovementCliReport, LauncherDeps } from "../src/cli.js";
 import { defaultOpenBrowser, isDirectInvocation, parseFocusArgs, parseImproveArgs, parseJourneyArgs, parseStartArgs, run } from "../src/cli.js";
+import { buildProposal } from "../src/improvement/improvement-proposal.js";
 import { executeHeadlessJourney } from "../src/server/local-session.js";
 import type { ProcessRunner } from "../src/adapters/adapters.js";
 import { BearingStore } from "../src/store/bearing-store.js";
@@ -519,6 +520,24 @@ describe("headless journey commands", () => {
       },
     };
     const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "headless_decision_1" } as const;
+    const affirmationBase = { ...base, runId: "headless_natural_affirmation_1" } as const;
+    const affirmationCreated = await executeHeadlessJourney({ action: "create", ...affirmationBase, goal: "Accept an explicit natural repository-fit affirmation." }, { processRunner: runner });
+    const affirmationStore = new BearingStore(root);
+    const affirmationBefore = await affirmationStore.load(affirmationBase.runId);
+    const affirmationDecisionId = affirmationBefore.pendingDecision?.decisionId;
+    expect(affirmationCreated).toMatchObject({ ok: true, allowedActions: ["status", "resume", "decide"] });
+    expect(await executeHeadlessJourney({ action: "decide", ...affirmationBase, answer: "I confirm all of these" }, { processRunner: runner })).toMatchObject({
+      ok: true,
+      summary: "Repository fit confirmed for docs/plans/headless-decision.",
+      allowedActions: ["status", "resume", "progress"],
+    });
+    const affirmationAfter = await affirmationStore.load(affirmationBase.runId);
+    expect(affirmationAfter.pendingDecision).toBeNull();
+    expect(affirmationAfter.revision).toBe(affirmationBefore.revision + 2);
+    expect(affirmationAfter.events.filter((event) => event.type === "ownerAnswered")).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ decisionId: affirmationDecisionId, answer: "I confirm all of these" }) }),
+    ]);
+
     const created = await executeHeadlessJourney({ action: "create", ...base, goal: "Advance the accepted repository-fit decision." }, { processRunner: runner });
     expect(created).toMatchObject({
       ok: true,
@@ -536,19 +555,51 @@ describe("headless journey commands", () => {
     expect(decisionId).toBeTypeOf("string");
     expect(before.journeyCheckpoint).toMatchObject({ stage: "repository-fit", status: "waiting", question, questionDecisionId: decisionId });
 
+    const absent = await executeHeadlessJourney({ action: "decide", ...base, answer: "missing-plan" }, { processRunner: runner });
+    expect(absent).toMatchObject({
+      ok: true,
+      stage: "repository-fit",
+      status: "waiting",
+      validationError: "repository_fit_answer_invalid",
+      remedy: 'Answer "Confirm", enter an exact docs/plans/... path, or answer "Decline".',
+      correctionAction: "decide",
+      allowedActions: ["status", "resume", "decide"],
+      requiredOwnerAction: { type: "answer" },
+    });
+    const correctable = await store.load(base.runId);
+    expect(correctable.pendingDecision).not.toBeNull();
+    expect(correctable.pendingDecision?.decisionId).not.toBe(decisionId);
+    expect(await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner })).toMatchObject({
+      validationError: "repository_fit_answer_invalid",
+      correctionAction: "decide",
+      allowedActions: ["status", "resume", "decide"],
+    });
+
+    const replacementDecisionId = correctable.pendingDecision?.decisionId;
+    expect(replacementDecisionId).toBeTypeOf("string");
+    expect(await executeHeadlessJourney({ action: "decide", ...base, answer: "Use the repository I mentioned" }, { processRunner: runner })).toMatchObject({
+      validationError: "repository_fit_answer_invalid",
+      correctionAction: "decide",
+      allowedActions: ["status", "resume", "decide"],
+    });
+    const correctedAgain = await store.load(base.runId);
+    const acceptedDecisionId = correctedAgain.pendingDecision?.decisionId;
+    expect(acceptedDecisionId).toBeTypeOf("string");
+    expect(acceptedDecisionId).not.toBe(replacementDecisionId);
+
     const decided = await executeHeadlessJourney({ action: "decide", ...base, answer, stage: "review" }, { processRunner: runner });
     const after = await store.load(base.runId);
     expect(decided).toEqual({
       ok: true,
       runId: base.runId,
-      revision: before.revision + 2,
+      revision: before.revision + 6,
       stage: "repository-fit",
       status: "waiting",
       summary: "Repository fit confirmed for docs/plans/headless-decision.",
       outcome: { type: "waiting" },
       allowedActions: ["status", "resume", "progress"],
     });
-    expect(after.revision).toBe(before.revision + 2);
+    expect(after.revision).toBe(before.revision + 6);
     expect(after.pendingDecision).toBeNull();
     expect(after.journeyCheckpoint).toMatchObject({
       stage: "repository-fit",
@@ -557,9 +608,15 @@ describe("headless journey commands", () => {
       repositoryFitDecision: { outcome: "confirmed", planDirectory: "docs/plans/headless-decision", repository: root },
     });
     expect(after.journeyCheckpoint?.question).toBeUndefined();
-    expect(JSON.parse(after.journeyCheckpoint?.qaJson ?? "null")).toEqual([{ question, answer }]);
+    expect(JSON.parse(after.journeyCheckpoint?.qaJson ?? "null")).toEqual([
+      { question, answer: "missing-plan" },
+      { question: correctable.pendingDecision?.question, answer: "Use the repository I mentioned" },
+      { question: correctedAgain.pendingDecision?.question, answer },
+    ]);
     expect(after.events.slice(before.events.length).filter((event) => event.type === "ownerAnswered")).toEqual([
-      expect.objectContaining({ payload: expect.objectContaining({ decisionId, answer }) }),
+      expect.objectContaining({ payload: expect.objectContaining({ decisionId, answer: "missing-plan" }) }),
+      expect.objectContaining({ payload: expect.objectContaining({ decisionId: replacementDecisionId, answer: "Use the repository I mentioned" }) }),
+      expect.objectContaining({ payload: expect.objectContaining({ decisionId: acceptedDecisionId, answer }) }),
     ]);
   });
 
@@ -1290,51 +1347,59 @@ describe("improve commands", () => {
     trialMinDistinctRuns: 3,
     trialMaxAgeDays: 90,
   });
-  const metric = Object.freeze({
+  const metricFps = Object.freeze({
     id: "first-pass-success" as const,
     value: 0.8,
     numerator: 16,
     denominator: 20,
     sufficient: true,
   });
+  const guardEsc = Object.freeze({ id: "escaped-defects" as const, value: 0.1, numerator: 2, denominator: 20, sufficient: true });
+  const guardFps = Object.freeze({ id: "first-pass-success" as const, value: 0.8, numerator: 16, denominator: 20, sufficient: true });
+  const guardCost = Object.freeze({ id: "cost-per-accepted-criterion" as const, value: 100, numerator: 100, denominator: 1, sufficient: true });
+  const fullGuards = Object.freeze([guardEsc, guardFps, guardCost]);
+  const baseRec = Object.freeze({
+    patternId: "grader-disagreement" as const,
+    surface: "review-cadence" as const,
+    target: Object.freeze({ role: "surveyor" as const }),
+    from: "per-phase" as const,
+    to: "per-slice" as const,
+    evidence: Object.freeze({
+      recordRefs: Object.freeze(["a".repeat(64)]),
+      occurrences: 5,
+      distinctRuns: 3,
+    }),
+    baseline: metricFps,
+    guards: fullGuards,
+    trial: Object.freeze({
+      minOccurrences: 5,
+      minDistinctRuns: 3,
+      maxAgeDays: 90,
+      openedAtRef: "b".repeat(64),
+    }),
+    revert: Object.freeze({
+      surface: "review-cadence" as const,
+      target: Object.freeze({ role: "surveyor" as const }),
+      value: "per-phase" as const,
+    }),
+  });
+  const builtProposal = buildProposal(baseRec);
+  if (!builtProposal.ok) throw new Error("fixture must construct valid proposal with three guards");
   const report = Object.freeze({
     settledRuns: 20,
     unreadableRuns: 1,
     thresholds,
-    metrics: Object.freeze([metric]),
+    metrics: Object.freeze([metricFps]),
     recommendation: Object.freeze({
       status: "ready" as const,
       thresholds,
-      recommendations: Object.freeze([Object.freeze({
-        patternId: "grader-disagreement" as const,
-        surface: "review-cadence" as const,
-        target: Object.freeze({ role: "surveyor" as const }),
-        from: "per-phase" as const,
-        to: "per-slice" as const,
-        evidence: Object.freeze({
-          recordRefs: Object.freeze(["a".repeat(64)]),
-          occurrences: 5,
-          distinctRuns: 3,
-        }),
-        baseline: metric,
-        guards: Object.freeze([metric]),
-        trial: Object.freeze({
-          minOccurrences: 5,
-          minDistinctRuns: 3,
-          maxAgeDays: 90,
-          openedAtRef: "b".repeat(64),
-        }),
-        revert: Object.freeze({
-          surface: "review-cadence" as const,
-          target: Object.freeze({ role: "surveyor" as const }),
-          value: "per-phase" as const,
-        }),
-      })]),
+      recommendations: Object.freeze([baseRec]),
     }),
     trialVerdicts: Object.freeze([Object.freeze({
       status: "retain" as const,
       prescribedAction: "retain" as const,
       reason: "target_improved" as const,
+      proposalHash: builtProposal.value.proposalHash,
       occurrences: 5,
       distinctRuns: 3,
       requiredOccurrences: 5,
@@ -1619,6 +1684,46 @@ describe("improve commands", () => {
       workflowNotes: [],
     });
 
+    // CLI export matches by proposalHash even when two verdicts are in the opposite order.
+    const secondRec = {
+      ...baseRec,
+      target: Object.freeze({ role: "validator" as const }),
+      revert: Object.freeze({
+        surface: "review-cadence" as const,
+        target: Object.freeze({ role: "validator" as const }),
+        value: "per-phase" as const,
+      }),
+    };
+    const secondBuilt = buildProposal(secondRec);
+    if (!secondBuilt.ok) throw new Error("second fixture proposal must be valid");
+    const secondVerdict = Object.freeze({
+      ...report.trialVerdicts[0]!,
+      status: "revert" as const,
+      prescribedAction: "revert" as const,
+      reason: "target_not_improved" as const,
+      proposalHash: secondBuilt.value.proposalHash,
+    });
+    const crossedReport: ImprovementCliReport = {
+      ...report,
+      recommendation: {
+        ...report.recommendation,
+        recommendations: Object.freeze([baseRec, secondRec]),
+      },
+      trialVerdicts: Object.freeze([secondVerdict, report.trialVerdicts[0]!]),
+    };
+    const crossedCtx = newCtx();
+    await run(["improve", "export", "--out", "contrib/crossed-order.json"], {
+      cwd: root,
+      stdout: crossedCtx.d.stdout,
+      stderr: crossedCtx.d.stderr,
+      exit: crossedCtx.d.exit,
+      improvement: { report: async () => ({ ok: true, value: crossedReport }) },
+    });
+    expect(crossedCtx.getExitCode()).toBeUndefined();
+    const crossedParsed = JSON.parse(await readFile(join(root, "contrib/crossed-order.json"), "utf8"));
+    expect(crossedParsed.policyValues.length).toBe(1);
+    expect(crossedParsed.policyValues[0].to).toBe("per-slice");
+
     for (const [name, leaked] of [
       ["digest", "a".repeat(64)],
       ["run id", "run-private-1"],
@@ -1628,12 +1733,17 @@ describe("improve commands", () => {
       ["repository path", "private/repository"],
     ] as const) {
       const destination = `contrib/refused-${name.replaceAll(" ", "-")}.json`;
+      const leakedRec = { ...report.recommendation.recommendations[0]!, to: leaked };
+      const leakedBuilt = buildProposal(leakedRec);
+      if (!leakedBuilt.ok) throw new Error("leaked fixture proposal must be valid");
+      const unsafeVerdict = { ...report.trialVerdicts[0]!, proposalHash: leakedBuilt.value.proposalHash };
       const unsafe = {
         ...report,
         recommendation: {
           ...report.recommendation,
-          recommendations: [{ ...report.recommendation.recommendations[0]!, to: leaked }],
+          recommendations: [leakedRec],
         },
+        trialVerdicts: Object.freeze([unsafeVerdict]),
       } as unknown as ImprovementCliReport;
       const refused = newCtx();
       await run(["improve", "export", "--out", destination], {

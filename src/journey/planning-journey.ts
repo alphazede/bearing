@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
-import { BUILTIN_ROUTES, createAgentAdapter, type ProcessActivity, type ProcessRunner, type RouteDescriptor } from "../adapters/adapters.js";
+import { BUILTIN_ROUTES, createAgentAdapter, MAX_BACKGROUND_BRIEF_CHARS, type ProcessActivity, type ProcessRunner, type RouteDescriptor } from "../adapters/adapters.js";
 import type { ResolvedRun, Selection } from "../profile/profile.js";
 import { createFocusContext, snapshotGitState, validateFocusCompletion, type CommandEvidence, type FocusContext, type FocusContextResult } from "./focus-mode.js";
 import { resolvePlanDirectory } from "./plan-resolution.js";
@@ -268,7 +268,7 @@ export interface NextStageEstimate {
 }
 export type JourneyResult = (
   | { readonly status: "question"; readonly question?: string; readonly questions?: readonly string[]; readonly fitAssumption?: FitAssumption; readonly tokens: number; readonly nextStageEstimate?: NextStageEstimate }
-  | { readonly status: "action"; readonly summary: string; readonly artifacts: readonly string[]; readonly tokens: number; readonly recon?: JourneyReconResult; readonly planningReview?: PlanningReview; readonly planningValidation?: PlanningValidationRecord; readonly verification?: ValidatorReport; readonly nextStageEstimate?: NextStageEstimate }
+  | { readonly status: "action"; readonly summary: string; readonly artifacts: readonly string[]; readonly tokens: number; readonly recon?: JourneyReconResult; readonly planningReview?: PlanningReview; readonly planningValidation?: PlanningValidationRecord; readonly verification?: ValidatorReport; readonly nextStageEstimate?: NextStageEstimate; readonly ownerDecisionId?: string; readonly ownerDecisionQuestion?: string; readonly ownerDecisionAnswered?: true }
   | { readonly status: "failure"; readonly code: "focus_amendment_required"; readonly focusDrift: FocusDrift; readonly tokens: number; readonly failureStage?: never }
   | { readonly status: "failure"; readonly code: "fit_malformed"; readonly fitDiagnostic: FitDiagnostic; readonly tokens: number; readonly failureStage?: "map-route" | "recon" | "draft-implementation" }
   | { readonly status: "failure"; readonly code: Exclude<JourneyFailureCode, "focus_amendment_required" | "fit_malformed">; readonly tokens: number; readonly failureStage?: "map-route" | "recon" | "draft-implementation" }
@@ -285,6 +285,16 @@ export type JourneyReconResult =
     readonly brief: ReconBrief;
     readonly report: ReconReport;
   };
+
+/** Smallest shared derivation for the durable free-text decision question shown for recon OWNER_DECISION_REQUIRED. */
+export function reconOwnerDecisionQuestion(recon: { readonly report: ReconReport }): string {
+  const report = recon.report;
+  const keys = ["cost", "architecture", "scope", "risk"] as const;
+  const mat = keys.filter((k) => report.materialChange[k]).join(", ");
+  const rec = report.recommendation ?? "decide";
+  const base = mat ? `Recon material change (${mat}).` : "Recon requires owner decision.";
+  return `${base} Agent recommendation: ${rec}. Enter your free-text decision and rationale to resume the same planning stage.`;
+}
 
 const STAGE_SKILLS: Readonly<Record<JourneyStage, readonly string[]>> = {
   "repository-fit": ["repository-fit"],
@@ -316,6 +326,7 @@ const MAX_ARTIFACTS = 32;
 const MAX_ENVELOPE_BYTES = 512 * 1024;
 const MAX_ESTIMATE_BASIS = 280;
 const MAX_ACTIVITY_TRAIL = 20;
+const BACKGROUND_BRIEF_STAGES = ["gather-supplies", "map-route", "recon", "draft-implementation"] as const satisfies readonly JourneyStage[];
 const SAFE_ACTIVITY_VALUE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const SECRET_ACTIVITY = /(?:\b(?:api[_ -]?key|secret|token|password|authorization)\s*[=:]\s*|\bBearer\s+|\bsk-[A-Za-z0-9_-]{8,}|\bAKIA[A-Z0-9]{16})[^\s,;]*/i;
 
@@ -434,6 +445,18 @@ function prompt(request: JourneyRequest, planDirectory: string | undefined, skil
         : focus
           ? `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question"} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["every relative path changed during this invocation"],"evidence":[{"commandId":"CMD-ID","status":"passed","summary":"bounded observed result"}]}. On success include every command ID from BEARING_FOCUS exactly once. Never mark failed, skipped, missing, unknown, or duplicate evidence as passed.`
           : `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question","nextStageEstimate":{"stage":"${request.stage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific remaining-work basis"}} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["relative/existing/path"],"nextStageEstimate":{"stage":"${nextActionStage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific full-phase workload basis"}}. Replace the uppercase placeholders with honest integer estimates; do not copy a canned duration. A question estimate covers all work remaining in the same stage after the answer. Omit nextStageEstimate when you cannot honestly estimate it.`,
+  ].join("\n");
+}
+
+function backgroundBriefPrompt(request: JourneyRequest, planDirectory: string | undefined): string {
+  return [
+    "You are producing a bounded read-only background planning brief.",
+    `Stage: ${request.stage}. Work goal: ${JSON.stringify(request.workGoal)}.`,
+    `Validated plan directory: ${planDirectory ? JSON.stringify(planDirectory) : "none"}.`,
+    `Prior owner decisions: ${JSON.stringify(request.priorOwnerQa).slice(0, MAX_BACKGROUND_BRIEF_CHARS)}.`,
+    "Inspect existing repository context only and return one concise evidence-backed brief for the foreground planner.",
+    "Do not write, execute, ask questions, request approval, claim a receipt, name artifacts as completed, or report validation. The foreground planner alone owns questions, approvals, receipts, artifacts, writes, execution, and validation.",
+    `Keep the brief at most ${MAX_BACKGROUND_BRIEF_CHARS} characters.`,
   ].join("\n");
 }
 
@@ -993,7 +1016,7 @@ export class JourneyService {
     if (current.trail.length > MAX_ACTIVITY_TRAIL) current.trail.shift();
   }
 
-  private async executeOnce(request: JourneyRequest, activityStage = request.stage, recordStageStart = true, freshSessionFallback = { used: false }): Promise<JourneyResult> {
+  private async executeOnce(request: JourneyRequest, activityStage = request.stage, recordStageStart = true, freshSessionFallback: { used: boolean; backgroundBriefUsed: boolean } = { used: false, backgroundBriefUsed: false }): Promise<JourneyResult> {
     if (!validRequest(request)) return { status: "failure", code: "input_invalid", tokens: 0 };
     const fitStage = request.stage === "repository-fit";
     let repositoryPath: string;
@@ -1132,6 +1155,11 @@ export class JourneyService {
       };
       const adapter = createAgentAdapter(projected.selection, observedRunner);
       if (!adapter) return { status: "failure", code: fitStage ? "fit_unavailable" : "crewmate_unavailable", tokens: 0 };
+      if (!freshSessionFallback.backgroundBriefUsed && BACKGROUND_BRIEF_STAGES.some((stage) => stage === request.stage)) {
+        freshSessionFallback.backgroundBriefUsed = true;
+        const brief = await adapter.readOnlyBackgroundBrief({ runId: processRunId, repositoryPath, role: projected, task: { prompt: backgroundBriefPrompt(request, planDirectory) } }).catch(() => undefined);
+        if (brief) taskPrompt = `${taskPrompt}\n\nBackground planning brief (advisory context only):\n${brief}`;
+      }
       let receipt;
       const questionDiscovery = fitStage || request.stage === "gather-supplies" && request.gatherMode === "questions";
       const journeySession = request.stage !== "review";
@@ -1244,7 +1272,7 @@ export class JourneyService {
   }
 
   private async executeMapRoute(request: JourneyRequest): Promise<JourneyResult> {
-    const freshSessionFallback = { used: false };
+    const freshSessionFallback = { used: false, backgroundBriefUsed: false };
     const design = await this.executeOnce(request, "map-route", true, freshSessionFallback);
     if (design.status !== "action") return design;
     let designArtifacts: readonly string[] | undefined;

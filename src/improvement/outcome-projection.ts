@@ -1,4 +1,9 @@
-import type { EventEnvelopeV1 } from "../contracts/run.js";
+import {
+  isJourneyRecoveryOutcome,
+  isJourneyTokenUsage,
+  isVerificationCheckpointPayload,
+  type EventEnvelopeV1,
+} from "../contracts/run.js";
 import {
   CONCURRENCY_SIGNALS,
   RETRY_OUTCOMES,
@@ -17,10 +22,14 @@ export const OUTCOME_SIGNALS = Object.freeze([
   "retry",
   "grader_score",
   "park_ranger_finding",
+  "park_ranger_review",
+  "slice_completion",
   "surveyor_failure",
   "reasoning_effectiveness",
   "concurrency_conflict",
   "coordination",
+  "token_usage",
+  "recovery",
 ] as const);
 
 export const OUTCOME_CODES = Object.freeze({
@@ -40,10 +49,14 @@ export const OUTCOME_CODES = Object.freeze({
   retry: Object.freeze([...RETRY_OUTCOMES]),
   grader_score: Object.freeze(["strong", "acceptable", "weak"] as const),
   park_ranger_finding: Object.freeze(["P0", "P1", "P2", "P3"] as const),
+  park_ranger_review: Object.freeze(["complete"] as const),
+  slice_completion: Object.freeze(["complete"] as const),
   surveyor_failure: Object.freeze(["failed", "blocked", "deviated"] as const),
   reasoning_effectiveness: Object.freeze(["complete", "failed"] as const),
   concurrency_conflict: Object.freeze([...CONCURRENCY_SIGNALS]),
   coordination: Object.freeze([...EXECUTION_MODES]),
+  token_usage: Object.freeze(["within_budget", "exhausted"] as const),
+  recovery: Object.freeze(["repaired", "stopped"] as const),
 } as const);
 
 export type OutcomeSignal = (typeof OUTCOME_SIGNALS)[number];
@@ -59,7 +72,6 @@ interface OutcomeRecordBase {
   readonly reasoningTier?: ReasoningTier;
   readonly provider?: string;
   readonly attempt?: number;
-  readonly value?: number;
   readonly fingerprintRef?: string;
   readonly pathRefs?: readonly string[];
 }
@@ -68,7 +80,21 @@ export type OutcomeRecord = {
   [S in OutcomeSignal]: Readonly<OutcomeRecordBase & {
     readonly signal: S;
     readonly code: OutcomeCode<S>;
-  }>;
+  } & (S extends "coordination"
+    ? { readonly workItemCount: number; readonly estimatedAgents: number }
+    : S extends "concurrency_conflict"
+      ? { readonly value: number }
+      : S extends "slice_completion"
+        ? { readonly sliceRef: string; readonly sequence: number; readonly requirementRefs: readonly string[] }
+        : S extends "park_ranger_review"
+          ? { readonly sliceRef: string; readonly sequence: number }
+          : S extends "park_ranger_finding"
+            ? { readonly sliceRef: string; readonly sequence: number; readonly findingRef: string }
+            : S extends "token_usage"
+              ? { readonly tokens: number; readonly budget: number }
+              : S extends "recovery"
+                ? { readonly attempts: number }
+          : {})>;
 }[OutcomeSignal];
 
 export interface ProjectOutcomesInput {
@@ -125,7 +151,21 @@ function digest(value: string, digester: ProjectOutcomesInput["digest"]): string
 type OutcomeRecordDraft<S extends OutcomeSignal> = OutcomeRecordBase & {
   readonly signal: S;
   readonly code: OutcomeCode<S>;
-};
+} & (S extends "coordination"
+  ? { readonly workItemCount: number; readonly estimatedAgents: number }
+  : S extends "concurrency_conflict"
+    ? { readonly value: number }
+    : S extends "slice_completion"
+      ? { readonly sliceRef: string; readonly sequence: number; readonly requirementRefs: readonly string[] }
+      : S extends "park_ranger_review"
+      ? { readonly sliceRef: string; readonly sequence: number }
+      : S extends "park_ranger_finding"
+        ? { readonly sliceRef: string; readonly sequence: number; readonly findingRef: string }
+        : S extends "token_usage"
+          ? { readonly tokens: number; readonly budget: number }
+          : S extends "recovery"
+            ? { readonly attempts: number }
+        : {});
 
 function freezeRecord<S extends OutcomeSignal>(
   draft: OutcomeRecordDraft<S>,
@@ -176,6 +216,35 @@ function concurrencySignature(value: {
   ]);
 }
 
+function tokenSeriesPoisoned(events: readonly EventEnvelopeV1[]): boolean {
+  let initialized = false;
+  let previousTotal = 0;
+  let previousBudget = 0;
+  let previousState: "within_budget" | "exhausted" = "within_budget";
+  for (const event of events) {
+    if (event.type !== "journeyCheckpointRecorded"
+      || !object(event.payload)
+      || !Object.hasOwn(event.payload, "tokenUsage")) continue;
+    const tokenUsage = own(event.payload, "tokenUsage");
+    if (!isJourneyTokenUsage(tokenUsage)) return true;
+    if (initialized
+      && (tokenUsage.budget !== previousBudget
+        || tokenUsage.total < previousTotal
+        || (tokenUsage.total === previousTotal
+          && previousState === "within_budget"
+          && tokenUsage.state === "exhausted"))) return true;
+    const invocationTokens = initialized ? tokenUsage.total - previousTotal : tokenUsage.total;
+    if ((!initialized || tokenUsage.total > previousTotal)
+      && tokenUsage.state === "exhausted"
+      && invocationTokens <= tokenUsage.budget) return true;
+    initialized = true;
+    previousTotal = tokenUsage.total;
+    previousBudget = tokenUsage.budget;
+    previousState = tokenUsage.state;
+  }
+  return false;
+}
+
 /** Pure, bounded projection over already-validated local ledger envelopes. */
 export function projectOutcomes(input: ProjectOutcomesInput): readonly OutcomeRecord[] {
   const runRef = digest(input.runId, input.digest);
@@ -186,6 +255,21 @@ export function projectOutcomes(input: ProjectOutcomesInput): readonly OutcomeRe
   let previousRetrySignatures: readonly string[] = [];
   let concurrencyInitialized = false;
   let previousConcurrencySignature = "";
+  let tokenUsageInitialized = false;
+  let previousTokenTotal = 0;
+  let previousTokenBudget = 0;
+  const tokenProjectionPoisoned = tokenSeriesPoisoned(input.events);
+  let previousRecoverySignature: string | undefined;
+  const sliceRefCache = new Map<string, string | undefined>();
+  const completedSliceIds = new Set<string>();
+  const findingRelations = new Set<string>();
+  const reviewedSliceIds = new Set<string>();
+  const sliceRefFor = (rawSliceId: string): string | undefined => {
+    if (sliceRefCache.has(rawSliceId)) return sliceRefCache.get(rawSliceId);
+    const reference = digest(`slice\u0000${rawSliceId}`, input.digest);
+    sliceRefCache.set(rawSliceId, reference);
+    return reference;
+  };
   const append = <S extends OutcomeSignal>(draft: OutcomeRecordDraft<S>): boolean => {
     if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN) return false;
     records.push(freezeRecord(draft));
@@ -198,21 +282,62 @@ export function projectOutcomes(input: ProjectOutcomesInput): readonly OutcomeRe
 
     if (event.type === "executionModeRecommended") {
       const recommendedMode = own(event.payload, "recommendedMode");
+      const workItems = own(event.payload, "workItems");
       const estimatedAgents = own(event.payload, "estimatedAgents");
-      if (code("coordination", recommendedMode) && smallCount(estimatedAgents)) {
+      if (
+        code("coordination", recommendedMode)
+        && smallCount(workItems)
+        && smallCount(estimatedAgents)
+      ) {
         append({
           schemaVersion: 1,
           runRef,
           recordedAt: event.recordedAt,
           signal: "coordination",
           code: recommendedMode,
-          value: estimatedAgents,
+          workItemCount: workItems,
+          estimatedAgents,
         });
       }
       continue;
     }
 
     if (event.type !== "journeyCheckpointRecorded") continue;
+
+    const tokenUsage = own(event.payload, "tokenUsage");
+    if (!tokenProjectionPoisoned && isJourneyTokenUsage(tokenUsage) && code("token_usage", tokenUsage.state)) {
+      if (!tokenUsageInitialized || tokenUsage.total > previousTokenTotal) {
+      append({
+        schemaVersion: 1,
+        runRef,
+        recordedAt: event.recordedAt,
+        signal: "token_usage",
+        code: tokenUsage.state,
+        tokens: tokenUsageInitialized ? tokenUsage.total - previousTokenTotal : tokenUsage.total,
+        budget: tokenUsage.budget,
+      });
+      tokenUsageInitialized = true;
+      previousTokenTotal = tokenUsage.total;
+      previousTokenBudget = tokenUsage.budget;
+      }
+    }
+
+    if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN) break;
+    const recoveryOutcome = own(event.payload, "recoveryOutcome");
+    if (isJourneyRecoveryOutcome(recoveryOutcome) && code("recovery", recoveryOutcome.outcome)) {
+      const signature = `${recoveryOutcome.outcome}\u0000${recoveryOutcome.attempts}`;
+      if (signature !== previousRecoverySignature) {
+        append({
+          schemaVersion: 1,
+          runRef,
+          recordedAt: event.recordedAt,
+          signal: "recovery",
+          code: recoveryOutcome.outcome,
+          attempts: recoveryOutcome.attempts,
+        });
+      }
+      previousRecoverySignature = signature;
+    } else previousRecoverySignature = undefined;
 
     const status = own(event.payload, "status");
     const planningFailure = own(event.payload, "planningFailure");
@@ -227,11 +352,10 @@ export function projectOutcomes(input: ProjectOutcomesInput): readonly OutcomeRe
     }
 
     if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN) break;
-    const verification = own(event.payload, "verification") as Readonly<{
-      layer: string;
-      verdict: unknown;
-    }> | undefined;
-    if (verification?.layer === "grader" && code("grader_score", verification.verdict)) {
+    const verification = own(event.payload, "verification");
+    if (isVerificationCheckpointPayload(verification)
+      && verification.layer === "grader"
+      && code("grader_score", verification.verdict)) {
       append({
         schemaVersion: 1,
         runRef,
@@ -239,6 +363,60 @@ export function projectOutcomes(input: ProjectOutcomesInput): readonly OutcomeRe
         signal: "grader_score",
         code: verification.verdict,
       });
+    }
+
+    if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN) break;
+    if (isVerificationCheckpointPayload(verification)) {
+      if (verification.layer === "validator"
+        && verification.verdict === "PASS"
+        && verification.completedSlices !== undefined) {
+        for (const completed of verification.completedSlices) {
+          if (completedSliceIds.has(completed.sliceId)) continue;
+          const sliceRef = sliceRefFor(completed.sliceId);
+          if (sliceRef === undefined) continue;
+          if (!append({
+            schemaVersion: 1,
+            runRef,
+            sliceRef,
+            recordedAt: event.recordedAt,
+            sequence: event.sequence,
+            signal: "slice_completion",
+            code: "complete",
+            requirementRefs: [...completed.requirementIds],
+          })) break;
+          completedSliceIds.add(completed.sliceId);
+        }
+      } else if (verification.layer === "park-ranger") {
+        for (const rawSliceId of verification.reviewedSliceIds ?? []) {
+          if (reviewedSliceIds.has(rawSliceId)) continue;
+          const sliceRef = sliceRefFor(rawSliceId);
+          if (sliceRef === undefined) continue;
+          if (!append({ schemaVersion: 1, runRef, sliceRef, recordedAt: event.recordedAt,
+            sequence: event.sequence, signal: "park_ranger_review", code: "complete" })) break;
+          reviewedSliceIds.add(rawSliceId);
+        }
+        if (verification.confirmedFindings === undefined) continue;
+        for (const finding of verification.confirmedFindings) {
+          for (const rawSliceId of finding.sliceIds) {
+            const relation = `${finding.findingRef}\u0000${rawSliceId}`;
+            if (findingRelations.has(relation)) continue;
+            const sliceRef = sliceRefFor(rawSliceId);
+            if (sliceRef === undefined) continue;
+            if (!append({
+              schemaVersion: 1,
+              runRef,
+              sliceRef,
+              recordedAt: event.recordedAt,
+              sequence: event.sequence,
+              signal: "park_ranger_finding",
+              code: finding.priority,
+              findingRef: finding.findingRef,
+            })) break;
+            findingRelations.add(relation);
+          }
+          if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN) break;
+        }
+      }
     }
 
     if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN) break;

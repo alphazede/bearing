@@ -1,3 +1,4 @@
+import { MAX_OUTCOME_RECORDS_PER_RUN } from "./outcome-projection.js";
 import { BearingStoreError, } from "../store/bearing-store.js";
 const DEFAULT_MAX_RUNS = 20;
 const DEFAULT_MAX_RECORDS = 20_000;
@@ -91,6 +92,8 @@ export class ImprovementService {
             catch {
                 return { ok: false, reason: "stage_failed" };
             }
+            if (projected.length >= MAX_OUTCOME_RECORDS_PER_RUN)
+                recordsTruncated = true;
             const remaining = this.#maxRecords - records.length;
             if (projected.length > remaining)
                 recordsTruncated = true;
@@ -106,6 +109,7 @@ export class ImprovementService {
             generatedAt,
             settledRuns,
             records: frozenRecords,
+            recordsTruncated,
         });
         let metrics;
         let recommendation;

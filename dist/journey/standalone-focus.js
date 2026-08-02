@@ -90,7 +90,7 @@ async function listen(server) {
         });
     });
 }
-/** Start a one-use loopback guard. Its authoritative snapshot remains only in this process. */
+/** Start a loopback guard whose authoritative snapshot remains only in this process. */
 export async function beginStandaloneFocus(root, requestPath) {
     const canonicalRoot = await realpath(root).catch(() => undefined);
     if (!canonicalRoot)
@@ -124,7 +124,8 @@ export async function beginStandaloneFocus(root, requestPath) {
             length += chunk.length;
             if (length > MAX_REQUEST_BYTES) {
                 // An oversized body is not a legitimate validate request: answer it so the
-                // client settles, but never let it consume the one-use guard.
+                // client settles, but never let it consume the guard before a successful
+                // completion or terminal authority rejection.
                 finish(413, { ok: false, reason: "request_too_large" }, false);
                 return;
             }
@@ -136,14 +137,15 @@ export async function beginStandaloneFocus(root, requestPath) {
             void (async () => {
                 try {
                     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-                    // The single use is a budget for validation attempts, so only a request
-                    // that reaches validateStored may spend it. A mismatched root or a
-                    // missing receiptPath is rejected before validation runs, so it leaves
-                    // the guard intact — same rule as the 404 and 413 paths above.
+                    // A mismatched root or missing receiptPath never reaches validation and
+                    // leaves the immutable guard intact — same rule as 404 and 413 above.
                     if (body.root !== canonicalRoot || typeof body.receiptPath !== "string")
                         return finish(400, { ok: false, reason: "state_invalid" }, false);
                     const result = await validateStored(context, canonicalRoot, issueAuthorized, body.receiptPath);
-                    finish(result.ok ? 200 : 409, result);
+                    // Correctable receipt, evidence, review, and containment failures retain
+                    // this exact baseline and capability. Success and terminal authority
+                    // rejection consume it; the lifetime timer still bounds all correction.
+                    finish(result.ok ? 200 : 409, result, result.ok || result.reason === "authority_invalid");
                     // A body that does not parse never named a receipt to validate. Burning
                     // the guard here would make a truncated or mis-encoded request
                     // unrecoverable and force the whole Focus run to restart.

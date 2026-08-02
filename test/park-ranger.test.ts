@@ -15,7 +15,7 @@ import {
 } from "../src/verification/park-ranger.js";
 import type { ValidatorReport } from "../src/verification/validator.js";
 
-const PASSING_VALIDATOR: ValidatorReport = { verdict: "PASS", reasons: [], escalation: "none" };
+const PASSING_VALIDATOR: ValidatorReport = { verdict: "PASS", reasons: [], escalation: "none", completedSlices: [] };
 
 function finding(overrides: Partial<ParkRangerFinding> = {}): ParkRangerFinding {
   return {
@@ -33,10 +33,15 @@ function finding(overrides: Partial<ParkRangerFinding> = {}): ParkRangerFinding 
       trustBoundary: "untrusted-input",
       path: ["validateIndex", "readItem"],
     },
+    sliceIds: ["1.1"],
     lens: "correctness",
     confirmedBy: ["correctness"],
     ...overrides,
   };
+}
+
+function scopedFinding(sliceIds: readonly string[], overrides: Partial<ParkRangerFinding> = {}): ParkRangerFinding {
+  return { ...finding(overrides), sliceIds } as unknown as ParkRangerFinding;
 }
 
 function report(
@@ -80,6 +85,39 @@ function route(id: string, provider: string): RouteDescriptor {
 }
 
 describe("Park Ranger report contract", () => {
+  it("requires and normalizes a bounded unique slice scope", () => {
+    const parsed = parseParkRangerReport(report("correctness", [scopedFinding(["2.1", "1.1"])]));
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect((parsed.value.findings[0] as unknown as { sliceIds: readonly string[] }).sliceIds)
+      .toEqual(["1.1", "2.1"]);
+  });
+
+  it.each([
+    ["empty", []],
+    ["duplicate", ["1.1", "1.1"]],
+    ["unknown", ["9.9"]],
+  ] as const)("rejects %s or unapproved slice IDs", (_label, sliceIds) => {
+    const parsed = parseParkRangerReport(
+      report("correctness", [scopedFinding(sliceIds)]),
+      [],
+      { implementerSessionIds: [], executionAncestry: [] },
+      ["1.1", "2.1"],
+    );
+
+    expect(parsed.ok).toBe(false);
+  });
+
+  it("returns a distinct diagnostic for missing or empty finding slice scope", () => {
+    const missing = finding() as unknown as Record<string, unknown>;
+    delete missing.sliceIds;
+    expect(parseParkRangerReport(report("correctness", [missing as unknown as ParkRangerFinding])))
+      .toEqual({ ok: false, reason: "finding_slice_scope_invalid" });
+    expect(parseParkRangerReport(report("correctness", [scopedFinding([])])))
+      .toEqual({ ok: false, reason: "finding_slice_scope_invalid" });
+  });
+
   it("reads the module from disk and rejects filesystem or process imports", async () => {
     const source = await readFile(new URL("../src/verification/park-ranger.ts", import.meta.url), "utf8");
     const forbiddenModule = /(?:from\s+|import\s*(?:\(\s*)?)["'](?:node:)?(?:fs(?:\/promises)?|child_process|path)["']/;
@@ -253,7 +291,7 @@ describe("reachability and claim adjudication", () => {
       claim: { text: "Slice 4.4 is merge-ready", sliceIds: ["4.4"] },
       validator: PASSING_VALIDATOR,
       validatedSliceIds: ["4.4"],
-      findings: [finding({ priority: "P1" })],
+      findings: [scopedFinding(["4.4"], { priority: "P1" })],
     })).toEqual({ verdict: "unsupported", reasons: ["open_p1_finding"] });
   });
 
@@ -262,8 +300,17 @@ describe("reachability and claim adjudication", () => {
       claim: { text: "Slice 1 is complete and safe to ship", sliceIds: ["1"] },
       validator: PASSING_VALIDATOR,
       validatedSliceIds: ["1"],
-      findings: [finding({ priority: "P0" })],
+      findings: [scopedFinding(["1"], { priority: "P0" })],
     })).toEqual({ verdict: "unsupported", reasons: ["open_p0_finding"] });
+  });
+
+  it("ignores findings outside the claim scope when adjudicating a claim", () => {
+    expect(adjudicateClaim({
+      claim: { text: "Slice 1.1 is merge-ready", sliceIds: ["1.1"] },
+      validator: PASSING_VALIDATOR,
+      validatedSliceIds: ["1.1"],
+      findings: [scopedFinding(["2.1"], { priority: "P1" })],
+    })).toEqual({ verdict: "supported", reasons: [] });
   });
 
   it("does not support a claim for a slice outside the validator scope", () => {
@@ -317,8 +364,8 @@ describe("ensemble synthesis", () => {
   });
 
   it("deduplicates by location and neutral code and unions confirming lenses", () => {
-    const correctness = finding({ id: "correctness-1", code: "unsafe-index", priority: "P0" });
-    const security = finding({
+    const correctness = scopedFinding(["1.1", "2.1"], { id: "correctness-1", code: "unsafe-index", priority: "P0" });
+    const security = scopedFinding(["2.1", "3.1"], {
       id: "security-7",
       code: "unsafe-index",
       priority: "P1",
@@ -333,7 +380,11 @@ describe("ensemble synthesis", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.findings).toHaveLength(1);
-    expect(result.value.findings[0]).toMatchObject({ priority: "P0", confirmedBy: ["correctness", "security"] });
+    expect(result.value.findings[0]).toMatchObject({
+      priority: "P0",
+      confirmedBy: ["correctness", "security"],
+      sliceIds: ["1.1", "2.1", "3.1"],
+    });
     expect(result.value.verdict).toBe("block");
   });
 

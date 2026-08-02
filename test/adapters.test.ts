@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BUILTIN_ROUTES, SyntheticRunner, createAgentAdapter } from "../src/adapters/adapters.js";
+import { BACKGROUND_BRIEF_CAPABILITY, BUILTIN_ROUTES, MAX_BACKGROUND_BRIEF_CHARS, SyntheticRunner, createAgentAdapter } from "../src/adapters/adapters.js";
 import { parseAgentProfile, resolveRun } from "../src/profile/profile.js";
 
 function role(overrides: Record<string, unknown> = {}, projectedRole: "navigator" | "explorer" | "crewmate" | "surveyor" = "navigator") {
@@ -14,6 +14,30 @@ function adapter(runner = new SyntheticRunner(), overrides: Record<string, unkno
 const repositoryPath = "/tmp/bearing-repository";
 
 describe("provider-neutral adapters", () => {
+  it("runs one bounded background brief only on a declared read-only capability", async () => {
+    const selection = { provider: "pi", model: "zai/glm-5.2", reasoning: "high" };
+    const runner = new SyntheticRunner(undefined, [{ exitCode: 0, events: [{ type: "done", data: { content: "x".repeat(MAX_BACKGROUND_BRIEF_CHARS + 40) } }], usage: { tokens: 2 } }]);
+    const pi = createAgentAdapter(selection, runner);
+    if (!pi) throw new Error("missing Pi adapter");
+    const brief = await pi.readOnlyBackgroundBrief({ runId: "brief", repositoryPath, role: role({ selection }), task: { prompt: "inspect" } });
+
+    expect(BUILTIN_ROUTES.find(({ provider }) => provider === "pi")?.capabilities).toContain(BACKGROUND_BRIEF_CAPABILITY);
+    expect(brief).toHaveLength(MAX_BACKGROUND_BRIEF_CHARS);
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]?.args).toEqual(expect.arrayContaining(["--thinking", "medium", "--tools", "read", "--no-session", "--offline"]));
+    expect(runner.calls[0]?.args.join(" ")).not.toMatch(/write|edit|shell|bash/i);
+  });
+
+  it("keeps unsupported routes foreground-only and never launches a background process", async () => {
+    const runner = new SyntheticRunner();
+    const codex = createAgentAdapter({ provider: "codex", model: "*", reasoning: "medium" }, runner);
+    if (!codex) throw new Error("missing Codex adapter");
+    const brief = await codex.readOnlyBackgroundBrief({ runId: "unsupported-brief", repositoryPath, role: role({ selection: { provider: "codex", model: "*", reasoning: "medium" } }), task: { prompt: "inspect" } });
+
+    expect(brief).toBeUndefined();
+    expect(runner.calls).toEqual([]);
+  });
+
   it("has the exact static routes and inspects without process initialization", () => {
     expect(BUILTIN_ROUTES.map(({ id, provider, model, executable }) => [id, provider, model, executable])).toEqual([["codex", "codex", "*", "codex"], ["claude", "claude", "*", "claude"], ["agy", "agy", "*", "agy"], ["grok-build", "grok", "grok-build", "grok-safe"], ["opencode", "opencode", "*", "opencode"], ["pi", "pi", "*", "pi"]]);
     const runner = new SyntheticRunner(); expect(adapter(runner).inspect().available).toBe(true); expect(runner.calls).toEqual([]);

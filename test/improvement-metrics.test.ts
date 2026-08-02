@@ -44,6 +44,10 @@ describe("improvement metrics", () => {
         { sliceRef: "slice-a", sequence: 9 },
         { sliceRef: "slice-c", sequence: 30 },
       ],
+      reviewedSlices: [
+        { sliceRef: "slice-a", sequence: 11 },
+        { sliceRef: "slice-b", sequence: 21 },
+      ],
       tokenReports: [{ tokens: 120 }, { tokens: 30 }],
     }));
 
@@ -146,11 +150,59 @@ describe("improvement metrics", () => {
         { sliceRef: "slice-a", sequence: 9 },
         { sliceRef: "slice-a", sequence: 11 },
       ],
+      reviewedSlices: [{ sliceRef: "slice-a", sequence: 13 }],
       tokenReports: [{ tokens: 20 }],
     }));
 
     expect(metrics.escapedDefects).toMatchObject({ numerator: 1, denominator: 2, value: 0.5 });
     expect(metrics.costPerAcceptedCriterion).toMatchObject({ numerator: 20, denominator: 2, value: 10 });
+  });
+
+  it("requires bounded review coverage for an honest zero escaped-defect value", () => {
+    const completedSlices = [{ sliceRef: "slice-a", sequence: 1, requirementRefs: ["AC-1"] }];
+    expect(computeMetrics(inputs({ completedSlices, confirmedFindings: [] })).escapedDefects)
+      .toMatchObject({ sufficient: false, value: null });
+    expect(computeMetrics(inputs({ completedSlices, confirmedFindings: [], reviewedSlices: [
+      { sliceRef: "slice-a", sequence: 2 },
+    ] })).escapedDefects).toMatchObject({ numerator: 0, denominator: 1, sufficient: true, value: 0 });
+  });
+
+  it("distinguishes absent token evidence from an explicit zero observation", () => {
+    const base = { completedSlices: [{ sliceRef: "slice-a", sequence: 1, requirementRefs: ["AC-1"] }] };
+    expect(computeMetrics(inputs({ ...base, tokenReports: undefined })).costPerAcceptedCriterion)
+      .toMatchObject({ sufficient: false, value: null });
+    expect(computeMetrics(inputs({ ...base, tokenReports: [{ tokens: 0 }] })).costPerAcceptedCriterion)
+      .toMatchObject({ numerator: 0, sufficient: true, value: 0 });
+  });
+
+  it("requires complete per-run token coverage and safe valid token sums", () => {
+    const completedSlices = [
+      { runRef: "run-a", sliceRef: "slice-a", sequence: 1, requirementRefs: ["AC-1", "AC-2"] },
+      { runRef: "run-b", sliceRef: "slice-b", sequence: 1, requirementRefs: ["AC-3", "AC-4"] },
+    ];
+    const full = computeMetrics(inputs({
+      completedSlices,
+      tokenReports: [
+        { runRef: "run-a", tokens: 400_000 },
+        { runRef: "run-a", tokens: 400_000 },
+        { runRef: "run-b", tokens: 400_000 },
+        { runRef: "run-b", tokens: 400_000 },
+      ],
+    })).costPerAcceptedCriterion;
+    expect(full).toMatchObject({ numerator: 1_600_000, denominator: 4, sufficient: true, value: 400_000 });
+
+    expect(computeMetrics(inputs({ completedSlices, tokenReports: [{ runRef: "run-b", tokens: 800_000 }] })).costPerAcceptedCriterion)
+      .toMatchObject({ sufficient: false, value: null });
+    expect(computeMetrics(inputs({ completedSlices, tokenReports: [
+      { runRef: "run-a", tokens: Number.MAX_SAFE_INTEGER },
+      { runRef: "run-b", tokens: 1 },
+    ] })).costPerAcceptedCriterion).toMatchObject({ sufficient: false, value: null });
+    expect(computeMetrics(inputs({ completedSlices, tokenReports: [
+      { runRef: "run-a", tokens: -1 },
+      { runRef: "run-b", tokens: 1 },
+    ] })).costPerAcceptedCriterion).toMatchObject({ sufficient: false, value: null });
+    expect(computeMetrics(inputs({ completedSlices, tokenReports: [], tokenCoverageComplete: false })).costPerAcceptedCriterion)
+      .toMatchObject({ sufficient: false, value: null });
   });
 
   it("requires an own resolved ground-truth signal instead of accepting a prototype-carried value", () => {

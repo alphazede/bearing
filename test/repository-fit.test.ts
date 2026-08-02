@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
+  canonicalizeFitOwnerAnswer,
   isFitDiagnostic,
   validateFitReceipt,
   type FitAssumption,
@@ -48,6 +49,18 @@ const diagnostics = [
 ] as const satisfies readonly [FitDiagnostic["check"], FitDiagnostic["field"]][];
 
 describe("repository fit", () => {
+  it("canonicalizes supported affirmations without accepting ambiguous prose", () => {
+    for (const answer of ["Confirm", "yes", "YES!", "approved", "looks good.", "I confirm all of these"]) {
+      expect(canonicalizeFitOwnerAnswer(answer)).toEqual({ ok: true, answer: "Confirm" });
+    }
+    expect(canonicalizeFitOwnerAnswer("Use the repository I mentioned")).toEqual({
+      ok: false,
+      error: "repository_fit_answer_invalid",
+      remedy: 'Answer "Confirm", enter an exact docs/plans/... path, or answer "Decline".',
+      correctionAction: "decide",
+    });
+  });
+
   it("accepts only emitted bounded check-and-field diagnostics", () => {
     for (const [check, field] of diagnostics) expect(isFitDiagnostic({ check, field })).toBe(true);
     expect(isFitDiagnostic({ check: "receipt_ok", field: "detail" })).toBe(false);

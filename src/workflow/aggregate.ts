@@ -181,6 +181,9 @@ function applyEvent(state: RunState, event: EventEnvelopeV1): RunState {
         pendingDecision = { decisionId: event.payload.questionDecisionId, question: event.payload.question };
       }
       break;
+    case "ownerImprovementApplicationRecorded":
+      // Typed evidence is carried by the event; no additional RunState projection required.
+      break;
   }
 
   return issueRunState({
@@ -271,6 +274,14 @@ function validateReplayEvent(state: RunState, event: EventEnvelopeV1): void {
       if (!state.workRequestCreated || event.actor !== "bearing") throw new ReplayError("invalid journey checkpoint during replay");
       if (event.payload.questionDecisionId !== undefined && (state.pendingDecision !== null || typeof event.payload.question !== "string")) throw new ReplayError("invalid journey question checkpoint during replay");
       return;
+    case "ownerImprovementApplicationRecorded":
+      if (!state.workRequestCreated || event.actor !== OWNER_ACTOR) throw new ReplayError("invalid owner improvement application during replay");
+      if (state.pendingDecision !== null
+        || state.journeyCheckpoint?.stage !== "review"
+        || state.journeyCheckpoint.status !== "complete") {
+        throw new ReplayError("owner improvement application requires a settled run");
+      }
+      return;
   }
 }
 
@@ -350,6 +361,13 @@ export function decide(
     case "recordJourneyCheckpoint":
       if (!state.workRequestCreated || command.session.actor !== "bearing") return fail(state, "illegal_transition");
       return succeed(state, command, contentHash, deps, "journeyCheckpointRecorded", cmdPayload(command));
+    case "recordOwnerImprovementApplication":
+      if (command.session.actor !== OWNER_ACTOR) return fail(state, "non_owner_approval");
+      if (!state.workRequestCreated
+        || state.pendingDecision !== null
+        || state.journeyCheckpoint?.stage !== "review"
+        || state.journeyCheckpoint.status !== "complete") return fail(state, "illegal_transition");
+      return succeed(state, command, contentHash, deps, "ownerImprovementApplicationRecorded", cmdPayload(command));
   }
 }
 

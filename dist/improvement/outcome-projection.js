@@ -1,3 +1,4 @@
+import { isJourneyRecoveryOutcome, isJourneyTokenUsage, isVerificationCheckpointPayload, } from "../contracts/run.js";
 import { CONCURRENCY_SIGNALS, RETRY_OUTCOMES, parseRuntimeState, } from "../contracts/runtime-state.js";
 import { EXECUTION_MODES } from "../execution/execution-mode.js";
 export const MAX_OUTCOME_RECORDS_PER_RUN = 1_000;
@@ -7,10 +8,14 @@ export const OUTCOME_SIGNALS = Object.freeze([
     "retry",
     "grader_score",
     "park_ranger_finding",
+    "park_ranger_review",
+    "slice_completion",
     "surveyor_failure",
     "reasoning_effectiveness",
     "concurrency_conflict",
     "coordination",
+    "token_usage",
+    "recovery",
 ]);
 export const OUTCOME_CODES = Object.freeze({
     validation_failure: Object.freeze([
@@ -29,10 +34,14 @@ export const OUTCOME_CODES = Object.freeze({
     retry: Object.freeze([...RETRY_OUTCOMES]),
     grader_score: Object.freeze(["strong", "acceptable", "weak"]),
     park_ranger_finding: Object.freeze(["P0", "P1", "P2", "P3"]),
+    park_ranger_review: Object.freeze(["complete"]),
+    slice_completion: Object.freeze(["complete"]),
     surveyor_failure: Object.freeze(["failed", "blocked", "deviated"]),
     reasoning_effectiveness: Object.freeze(["complete", "failed"]),
     concurrency_conflict: Object.freeze([...CONCURRENCY_SIGNALS]),
     coordination: Object.freeze([...EXECUTION_MODES]),
+    token_usage: Object.freeze(["within_budget", "exhausted"]),
+    recovery: Object.freeze(["repaired", "stopped"]),
 });
 const DIGEST = /^[a-f0-9]{64}$/;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -105,6 +114,38 @@ function concurrencySignature(value) {
         value.admittedLanes,
     ]);
 }
+function tokenSeriesPoisoned(events) {
+    let initialized = false;
+    let previousTotal = 0;
+    let previousBudget = 0;
+    let previousState = "within_budget";
+    for (const event of events) {
+        if (event.type !== "journeyCheckpointRecorded"
+            || !object(event.payload)
+            || !Object.hasOwn(event.payload, "tokenUsage"))
+            continue;
+        const tokenUsage = own(event.payload, "tokenUsage");
+        if (!isJourneyTokenUsage(tokenUsage))
+            return true;
+        if (initialized
+            && (tokenUsage.budget !== previousBudget
+                || tokenUsage.total < previousTotal
+                || (tokenUsage.total === previousTotal
+                    && previousState === "within_budget"
+                    && tokenUsage.state === "exhausted")))
+            return true;
+        const invocationTokens = initialized ? tokenUsage.total - previousTotal : tokenUsage.total;
+        if ((!initialized || tokenUsage.total > previousTotal)
+            && tokenUsage.state === "exhausted"
+            && invocationTokens <= tokenUsage.budget)
+            return true;
+        initialized = true;
+        previousTotal = tokenUsage.total;
+        previousBudget = tokenUsage.budget;
+        previousState = tokenUsage.state;
+    }
+    return false;
+}
 /** Pure, bounded projection over already-validated local ledger envelopes. */
 export function projectOutcomes(input) {
     const runRef = digest(input.runId, input.digest);
@@ -115,6 +156,22 @@ export function projectOutcomes(input) {
     let previousRetrySignatures = [];
     let concurrencyInitialized = false;
     let previousConcurrencySignature = "";
+    let tokenUsageInitialized = false;
+    let previousTokenTotal = 0;
+    let previousTokenBudget = 0;
+    const tokenProjectionPoisoned = tokenSeriesPoisoned(input.events);
+    let previousRecoverySignature;
+    const sliceRefCache = new Map();
+    const completedSliceIds = new Set();
+    const findingRelations = new Set();
+    const reviewedSliceIds = new Set();
+    const sliceRefFor = (rawSliceId) => {
+        if (sliceRefCache.has(rawSliceId))
+            return sliceRefCache.get(rawSliceId);
+        const reference = digest(`slice\u0000${rawSliceId}`, input.digest);
+        sliceRefCache.set(rawSliceId, reference);
+        return reference;
+    };
     const append = (draft) => {
         if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN)
             return false;
@@ -128,21 +185,61 @@ export function projectOutcomes(input) {
             continue;
         if (event.type === "executionModeRecommended") {
             const recommendedMode = own(event.payload, "recommendedMode");
+            const workItems = own(event.payload, "workItems");
             const estimatedAgents = own(event.payload, "estimatedAgents");
-            if (code("coordination", recommendedMode) && smallCount(estimatedAgents)) {
+            if (code("coordination", recommendedMode)
+                && smallCount(workItems)
+                && smallCount(estimatedAgents)) {
                 append({
                     schemaVersion: 1,
                     runRef,
                     recordedAt: event.recordedAt,
                     signal: "coordination",
                     code: recommendedMode,
-                    value: estimatedAgents,
+                    workItemCount: workItems,
+                    estimatedAgents,
                 });
             }
             continue;
         }
         if (event.type !== "journeyCheckpointRecorded")
             continue;
+        const tokenUsage = own(event.payload, "tokenUsage");
+        if (!tokenProjectionPoisoned && isJourneyTokenUsage(tokenUsage) && code("token_usage", tokenUsage.state)) {
+            if (!tokenUsageInitialized || tokenUsage.total > previousTokenTotal) {
+                append({
+                    schemaVersion: 1,
+                    runRef,
+                    recordedAt: event.recordedAt,
+                    signal: "token_usage",
+                    code: tokenUsage.state,
+                    tokens: tokenUsageInitialized ? tokenUsage.total - previousTokenTotal : tokenUsage.total,
+                    budget: tokenUsage.budget,
+                });
+                tokenUsageInitialized = true;
+                previousTokenTotal = tokenUsage.total;
+                previousTokenBudget = tokenUsage.budget;
+            }
+        }
+        if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN)
+            break;
+        const recoveryOutcome = own(event.payload, "recoveryOutcome");
+        if (isJourneyRecoveryOutcome(recoveryOutcome) && code("recovery", recoveryOutcome.outcome)) {
+            const signature = `${recoveryOutcome.outcome}\u0000${recoveryOutcome.attempts}`;
+            if (signature !== previousRecoverySignature) {
+                append({
+                    schemaVersion: 1,
+                    runRef,
+                    recordedAt: event.recordedAt,
+                    signal: "recovery",
+                    code: recoveryOutcome.outcome,
+                    attempts: recoveryOutcome.attempts,
+                });
+            }
+            previousRecoverySignature = signature;
+        }
+        else
+            previousRecoverySignature = undefined;
         const status = own(event.payload, "status");
         const planningFailure = own(event.payload, "planningFailure");
         if (status === "failed" && code("validation_failure", planningFailure)) {
@@ -157,7 +254,9 @@ export function projectOutcomes(input) {
         if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN)
             break;
         const verification = own(event.payload, "verification");
-        if (verification?.layer === "grader" && code("grader_score", verification.verdict)) {
+        if (isVerificationCheckpointPayload(verification)
+            && verification.layer === "grader"
+            && code("grader_score", verification.verdict)) {
             append({
                 schemaVersion: 1,
                 runRef,
@@ -165,6 +264,72 @@ export function projectOutcomes(input) {
                 signal: "grader_score",
                 code: verification.verdict,
             });
+        }
+        if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN)
+            break;
+        if (isVerificationCheckpointPayload(verification)) {
+            if (verification.layer === "validator"
+                && verification.verdict === "PASS"
+                && verification.completedSlices !== undefined) {
+                for (const completed of verification.completedSlices) {
+                    if (completedSliceIds.has(completed.sliceId))
+                        continue;
+                    const sliceRef = sliceRefFor(completed.sliceId);
+                    if (sliceRef === undefined)
+                        continue;
+                    if (!append({
+                        schemaVersion: 1,
+                        runRef,
+                        sliceRef,
+                        recordedAt: event.recordedAt,
+                        sequence: event.sequence,
+                        signal: "slice_completion",
+                        code: "complete",
+                        requirementRefs: [...completed.requirementIds],
+                    }))
+                        break;
+                    completedSliceIds.add(completed.sliceId);
+                }
+            }
+            else if (verification.layer === "park-ranger") {
+                for (const rawSliceId of verification.reviewedSliceIds ?? []) {
+                    if (reviewedSliceIds.has(rawSliceId))
+                        continue;
+                    const sliceRef = sliceRefFor(rawSliceId);
+                    if (sliceRef === undefined)
+                        continue;
+                    if (!append({ schemaVersion: 1, runRef, sliceRef, recordedAt: event.recordedAt,
+                        sequence: event.sequence, signal: "park_ranger_review", code: "complete" }))
+                        break;
+                    reviewedSliceIds.add(rawSliceId);
+                }
+                if (verification.confirmedFindings === undefined)
+                    continue;
+                for (const finding of verification.confirmedFindings) {
+                    for (const rawSliceId of finding.sliceIds) {
+                        const relation = `${finding.findingRef}\u0000${rawSliceId}`;
+                        if (findingRelations.has(relation))
+                            continue;
+                        const sliceRef = sliceRefFor(rawSliceId);
+                        if (sliceRef === undefined)
+                            continue;
+                        if (!append({
+                            schemaVersion: 1,
+                            runRef,
+                            sliceRef,
+                            recordedAt: event.recordedAt,
+                            sequence: event.sequence,
+                            signal: "park_ranger_finding",
+                            code: finding.priority,
+                            findingRef: finding.findingRef,
+                        }))
+                            break;
+                        findingRelations.add(relation);
+                    }
+                    if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN)
+                        break;
+                }
+            }
         }
         if (records.length >= MAX_OUTCOME_RECORDS_PER_RUN)
             break;

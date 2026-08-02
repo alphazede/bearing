@@ -37,6 +37,11 @@ export const DEFAULT_REASONING_TIERS = {
 
 export const GLOBAL_DEFAULT_REASONING_TIER: ReasoningTier = "medium";
 
+const BACKGROUND_BRIEF_POLICY: ReasoningPolicy = {
+  defaults: { "background-brief": "medium" },
+  escalation: { maxSteps: 0, onNewFailureFingerprint: false, onCrossBoundaryDefect: false },
+};
+
 export type ReasoningResolution = {
   readonly ok: true;
   readonly tier: ReasoningTier;
@@ -54,6 +59,15 @@ export interface ResolveReasoningInput {
   readonly policy: ReasoningPolicy;
   readonly globalOverride?: ReasoningTier;
   readonly escalationStep?: number;
+}
+
+export function resolveBackgroundReasoning(providerName: string, ownerCeiling?: ReasoningTier): ReasoningResolution {
+  return resolveReasoning({
+    role: "background-brief",
+    provider: providerName,
+    policy: BACKGROUND_BRIEF_POLICY,
+    ...(ownerCeiling === undefined ? {} : { globalOverride: ownerCeiling }),
+  });
 }
 
 function isReasoningTier(value: unknown): value is ReasoningTier {

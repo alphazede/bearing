@@ -24,7 +24,10 @@ import type { MetricSet } from "./improvement/improvement-metrics.js";
 import {
   type ImprovementServiceFailure,
 } from "./improvement/improvement-service.js";
-import type { TrialVerdict } from "./improvement/improvement-proposal.js";
+import {
+  buildRecommendationProposal,
+  type TrialVerdict,
+} from "./improvement/improvement-proposal.js";
 import { nativePlanDirectoryPath, planDirectoryValid } from "./journey/plan-directory.js";
 import { validatePlan } from "./journey/planning-validator.js";
 import type { PlanDocuments } from "./journey/plan-structure.js";
@@ -124,6 +127,7 @@ export interface ImprovementCliReport {
   readonly thresholds: Thresholds;
   readonly metrics: MetricCollection | MetricSet;
   readonly recommendation: RecommendationResult;
+  readonly proposals?: readonly { readonly proposalHash: string }[];
   readonly trialVerdicts: readonly TrialVerdict[];
 }
 
@@ -701,10 +705,12 @@ function contributionAtom(value: PolicyValue): ContributionPolicyValue["from"] {
 
 function contributionBundle(report: ImprovementCliReport): ContributionBundle {
   const policyValues: ContributionPolicyValue[] = [];
-  for (let index = 0; index < report.recommendation.recommendations.length; index += 1) {
-    if (report.trialVerdicts[index]?.status !== "retain") continue;
-    const recommendation = report.recommendation.recommendations[index];
-    if (!recommendation) continue;
+  for (const recommendation of report.recommendation.recommendations) {
+    const built = buildRecommendationProposal(recommendation);
+    if (!built.ok) continue;
+    const ph = built.value.proposalHash;
+    const matching = report.trialVerdicts.find((v) => v.proposalHash === ph);
+    if (matching?.status !== "retain") continue;
     policyValues.push({
       surface: recommendation.surface,
       target: contributionTarget(recommendation),

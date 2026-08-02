@@ -93,6 +93,7 @@ function gradingAccuracy(input) {
 function acceptedCriteria(input) {
     const completedAt = new Map();
     const requirementRefs = new Map();
+    const contributingRunRefs = new Set();
     for (const completion of input) {
         if (!reference(completion.sliceRef)
             || !nonNegativeInteger(completion.sequence)
@@ -106,11 +107,12 @@ function acceptedCriteria(input) {
             continue;
         completedAt.set(completion.sliceRef, completion.sequence);
         requirementRefs.set(completion.sliceRef, refs);
+        contributingRunRefs.add(completion.runRef ?? "");
     }
     let denominator = 0;
     for (const refs of requirementRefs.values())
         denominator += refs.size;
-    return { denominator, completedAt };
+    return { denominator, completedAt, contributingRunRefs };
 }
 function escapedDefects(input, criteria, sourceAvailable) {
     let numerator = 0;
@@ -123,13 +125,22 @@ function escapedDefects(input, criteria, sourceAvailable) {
     }
     return metric("escaped-defects", numerator, criteria.denominator, sourceAvailable);
 }
-function costPerAcceptedCriterion(input, denominator) {
+function costPerAcceptedCriterion(input, criteria, coverageComplete) {
     let numerator = 0;
-    for (const report of input) {
-        if (nonNegativeInteger(report.tokens))
-            numerator += report.tokens;
+    const coveredRunRefs = new Set();
+    let valid = Array.isArray(input) && coverageComplete;
+    for (const report of input ?? []) {
+        if (!nonNegativeInteger(report.tokens)
+            || report.tokens > Number.MAX_SAFE_INTEGER - numerator) {
+            valid = false;
+            continue;
+        }
+        numerator += report.tokens;
+        coveredRunRefs.add(report.runRef ?? "");
     }
-    return metric("cost-per-accepted-criterion", numerator, denominator, true);
+    const complete = valid
+        && [...criteria.contributingRunRefs].every((runRef) => coveredRunRefs.has(runRef));
+    return metric("cost-per-accepted-criterion", numerator, criteria.denominator, complete);
 }
 /** Pure computation of the five R6.3 metrics over structured ledger facts. */
 export function computeMetrics(input) {
@@ -139,11 +150,16 @@ export function computeMetrics(input) {
         : [];
     const findingSignalsAvailable = Object.hasOwn(input, "confirmedFindings")
         && Array.isArray(input.confirmedFindings);
+    const reviewed = new Set((input.reviewedSlices ?? [])
+        .filter((entry) => reference(entry.sliceRef) && nonNegativeInteger(entry.sequence))
+        .map((entry) => entry.sliceRef));
+    const reviewCoverageAvailable = criteria.completedAt.size > 0
+        && [...criteria.completedAt.keys()].every((sliceRef) => reviewed.has(sliceRef));
     return Object.freeze({
         coordinationOverhead: coordinationOverhead(input.coordination),
         firstPassSuccess: firstPassSuccess(input.sliceAttempts),
         gradingAccuracy: gradingAccuracy(grading),
-        escapedDefects: escapedDefects(findingSignalsAvailable ? input.confirmedFindings : [], criteria, findingSignalsAvailable),
-        costPerAcceptedCriterion: costPerAcceptedCriterion(input.tokenReports, criteria.denominator),
+        escapedDefects: escapedDefects(findingSignalsAvailable ? input.confirmedFindings : [], criteria, findingSignalsAvailable && reviewCoverageAvailable),
+        costPerAcceptedCriterion: costPerAcceptedCriterion(input.tokenReports, criteria, input.tokenCoverageComplete !== false),
     });
 }

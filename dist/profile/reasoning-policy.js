@@ -21,6 +21,18 @@ export const DEFAULT_REASONING_TIERS = {
     "trail-boss": "medium",
 };
 export const GLOBAL_DEFAULT_REASONING_TIER = "medium";
+const BACKGROUND_BRIEF_POLICY = {
+    defaults: { "background-brief": "medium" },
+    escalation: { maxSteps: 0, onNewFailureFingerprint: false, onCrossBoundaryDefect: false },
+};
+export function resolveBackgroundReasoning(providerName, ownerCeiling) {
+    return resolveReasoning({
+        role: "background-brief",
+        provider: providerName,
+        policy: BACKGROUND_BRIEF_POLICY,
+        ...(ownerCeiling === undefined ? {} : { globalOverride: ownerCeiling }),
+    });
+}
 function isReasoningTier(value) {
     return typeof value === "string" && REASONING_TIERS.includes(value);
 }

@@ -341,6 +341,76 @@ describe("slice 6.2 additive improvement-proposal checkpoint key", () => {
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.reason).toBe("malformed");
   });
+
+  it("accepts recordOwnerImprovementApplication with 64-hex hashes at schema v1", () => {
+    expect(COMMAND_SCHEMA_VERSION).toBe(1);
+    expect(EVENT_SCHEMA_VERSION).toBe(1);
+    const appCmd = {
+      schemaVersion: 1,
+      commandId: "cmd-app-1",
+      runId: "run-xyz",
+      expectedRevision: 3,
+      session: { sessionId: "s1", actor: "owner" },
+      correlationId: "corr-1",
+      type: "recordOwnerImprovementApplication" as const,
+      payload: {
+        improvementProposalRef: VALID_IMPROVEMENT_PROPOSAL_REF,
+        externalEvidenceHash: "cd".repeat(32),
+        surface: "review-cadence",
+        targetJson: '{"role":"surveyor"}',
+        valueJson: '"per-slice"',
+      },
+    };
+    const parsed = parseCommandEnvelope(appCmd);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.reason);
+    expect(parsed.value.type).toBe("recordOwnerImprovementApplication");
+  });
+
+  it.each([
+    ["bad proposal hash", { improvementProposalRef: "zz".repeat(32), externalEvidenceHash: "ab".repeat(32), surface: "review-cadence", targetJson: '{"role":"surveyor"}', valueJson: '"per-slice"' }],
+    ["bad evidence hash", { improvementProposalRef: VALID_IMPROVEMENT_PROPOSAL_REF, externalEvidenceHash: "AB".repeat(32), surface: "review-cadence", targetJson: '{"role":"surveyor"}', valueJson: '"per-slice"' }],
+    ["noncanonical target", { improvementProposalRef: VALID_IMPROVEMENT_PROPOSAL_REF, externalEvidenceHash: "ab".repeat(32), surface: "review-cadence", targetJson: '{"role": "surveyor"}', valueJson: '"per-slice"' }],
+    ["wrong keys", { improvementProposalRef: VALID_IMPROVEMENT_PROPOSAL_REF }],
+  ])("rejects malformed owner application command %s", (_label, payload) => {
+    const cmd = {
+      schemaVersion: 1,
+      commandId: "c2",
+      runId: "r2",
+      expectedRevision: 0,
+      session: { sessionId: "s", actor: "owner" },
+      correlationId: "c2",
+      type: "recordOwnerImprovementApplication" as const,
+      payload,
+    };
+    const parsed = parseCommandEnvelope(cmd);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.reason).toBe("malformed");
+  });
+
+  it("rejects prototype-carried owner application fields", () => {
+    const payload = Object.assign(
+      Object.create({ valueJson: '"per-slice"' }) as Record<string, unknown>,
+      {
+        improvementProposalRef: VALID_IMPROVEMENT_PROPOSAL_REF,
+        externalEvidenceHash: "ab".repeat(32),
+        surface: "review-cadence",
+        targetJson: '{"role":"surveyor"}',
+        unrelated: true,
+      },
+    );
+    const parsed = parseCommandEnvelope({
+      schemaVersion: 1,
+      commandId: "prototype-application",
+      runId: "prototype-run",
+      expectedRevision: 1,
+      session: { sessionId: "owner", actor: "owner" },
+      correlationId: "prototype-application",
+      type: "recordOwnerImprovementApplication",
+      payload,
+    });
+    expect(parsed).toEqual({ ok: false, reason: "malformed" });
+  });
 });
 
 const VALID_REQUIREMENT_REFS = ["AC-6.10", "RISK-6.REG"] as const;
@@ -405,6 +475,16 @@ describe("slice 6.13 additive requirement-reference checkpoint key", () => {
 
 const VALID_RUNTIME_STATE_JSON = JSON.stringify({ version: 1, trace: [], retry: [] });
 
+const VALID_TOKEN_USAGE = {
+  total: 12,
+  budget: 100,
+  state: "within_budget",
+} as const;
+const VALID_RECOVERY_OUTCOME = {
+  outcome: "repaired",
+  attempts: 2,
+} as const;
+
 describe("slice 5.4 additive runtime-state checkpoint key", () => {
   it("accepts a parsed runtime state without bumping either ledger schema version", () => {
     expect(COMMAND_SCHEMA_VERSION).toBe(1);
@@ -429,6 +509,46 @@ describe("slice 5.4 additive runtime-state checkpoint key", () => {
     );
 
     expect(parseCommandEnvelope(checkpoint(payload)).ok).toBe(false);
+  });
+});
+
+describe("slice 6 typed token and recovery checkpoint fields", () => {
+  it("accepts bounded typed token and recovery observations without a schema bump", () => {
+    expect(COMMAND_SCHEMA_VERSION).toBe(1);
+    expect(EVENT_SCHEMA_VERSION).toBe(1);
+    expect(parseCommandEnvelope(checkpoint({
+      ...LEGACY_CHECKPOINT_PAYLOAD,
+      tokenUsage: VALID_TOKEN_USAGE,
+      recoveryOutcome: VALID_RECOVERY_OUTCOME,
+    })).ok).toBe(true);
+    expect(parseCommandEnvelope(checkpoint({
+      ...LEGACY_CHECKPOINT_PAYLOAD,
+      tokenUsage: { total: 12, budget: Number.MAX_SAFE_INTEGER, state: "within_budget" },
+    })).ok).toBe(true);
+    expect(parseCommandEnvelope(checkpoint({
+      ...LEGACY_CHECKPOINT_PAYLOAD,
+      tokenUsage: { total: 270_000, budget: 200_000, state: "within_budget" },
+    })).ok).toBe(true);
+  });
+
+  it("rejects absent, negative, unbounded, unknown, inconsistent, and prototype-carried typed observations", () => {
+    const malformed = [
+      { tokenUsage: { total: -1, budget: 100, state: "within_budget" } },
+      { tokenUsage: { total: Number.MAX_SAFE_INTEGER + 1, budget: 100, state: "exhausted" } },
+      { tokenUsage: { total: 12, budget: 100, state: "unknown" } },
+      { recoveryOutcome: { outcome: "unknown", attempts: 1 } },
+      { recoveryOutcome: { outcome: "repaired", attempts: 0 } },
+      { recoveryOutcome: { outcome: "stopped", attempts: 17 } },
+    ];
+    for (const extra of malformed) {
+      expect(parseCommandEnvelope(checkpoint({ ...LEGACY_CHECKPOINT_PAYLOAD, ...extra })).ok).toBe(false);
+    }
+
+    const inherited = Object.assign(
+      Object.create({ tokenUsage: VALID_TOKEN_USAGE, recoveryOutcome: VALID_RECOVERY_OUTCOME }) as Record<string, unknown>,
+      LEGACY_CHECKPOINT_PAYLOAD,
+    );
+    expect(parseCommandEnvelope(checkpoint(inherited)).ok).toBe(false);
   });
 });
 
@@ -542,6 +662,78 @@ describe("slice 4.7 additive verification checkpoint key (hash-chained, no schem
     const inherited = Object.create({ layer: "validator", verdict: "PASS" }) as Record<string, unknown>;
     const badInherited = { ...PRE_47_CP_PAYLOAD_NO_VERIF, verification: inherited };
     expect(parseCommandEnvelope(checkpoint(badInherited)).ok).toBe(false);
+  });
+
+  it("accepts typed validator completion and Park Ranger finding evidence", () => {
+    expect(parseCommandEnvelope(checkpoint({
+      ...PRE_47_CP_PAYLOAD_NO_VERIF,
+      verification: {
+        layer: "validator",
+        verdict: "PASS",
+        completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1", "RISK-1"] }],
+      },
+    })).ok).toBe(true);
+
+    expect(parseCommandEnvelope(checkpoint({
+      ...PRE_47_CP_PAYLOAD_NO_VERIF,
+      verification: {
+        layer: "park-ranger",
+        verdict: "repair-required",
+        findingCount: 1,
+        confirmedFindings: [{ findingRef: "a".repeat(64), priority: "P1", sliceIds: ["1.1"] }],
+      },
+    })).ok).toBe(true);
+  });
+
+  it("rejects noncanonical, untyped, cross-layer, and unbounded verification evidence", () => {
+    const cases = [
+      {
+        layer: "validator",
+        verdict: "PASS",
+        completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-2", "AC-1"] }],
+      },
+      {
+        layer: "validator",
+        verdict: "PASS",
+        completedSlices: [{ sliceId: "1.1", requirementIds: ["REQ-1"] }],
+      },
+      {
+        layer: "grader",
+        verdict: "strong",
+        completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }],
+      },
+      {
+        layer: "park-ranger",
+        verdict: "accept",
+        findingCount: 1,
+        confirmedFindings: [{ findingRef: "A".repeat(64), priority: "P1", sliceIds: ["1.1"] }],
+      },
+      {
+        layer: "park-ranger",
+        verdict: "accept",
+        findingCount: 1,
+        confirmedFindings: [{ findingRef: "a".repeat(64), priority: "P1", sliceIds: ["1.1", "1.1"] }],
+      },
+      {
+        layer: "park-ranger",
+        verdict: "accept",
+        findingCount: 0,
+        confirmedFindings: Array.from({ length: 129 }, () => ({ findingRef: "a".repeat(64), priority: "P1", sliceIds: ["1.1"] })),
+      },
+      {
+        layer: "park-ranger",
+        verdict: "accept",
+        findingCount: 0,
+        confirmedFindings: [{ findingRef: "a".repeat(64), priority: "P1", sliceIds: ["1.1"] }],
+      },
+    ];
+
+    for (const verification of cases) {
+      expect(parseCommandEnvelope(checkpoint({
+        ...PRE_47_CP_PAYLOAD_NO_VERIF,
+        verification,
+      })).ok).toBe(false);
+    }
   });
 });
 

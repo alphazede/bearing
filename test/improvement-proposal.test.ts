@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProposal,
+  evaluateBoundedTrial,
   evaluateTrial,
+  type BoundedTrialOwnerEvidence,
   type MetricSnapshot,
+  type OwnerAppliedRecommendation,
   type ProposalRecommendation,
 } from "../src/improvement/improvement-proposal.js";
 
@@ -215,5 +218,56 @@ describe("improvement proposal", () => {
     });
 
     expect(result).toEqual({ ok: false, reason: "guard_set_invalid" });
+  });
+
+  it("evaluates exactly one owner-bound external application without applying it", () => {
+    const existing = proposal();
+    const application: OwnerAppliedRecommendation = {
+      schemaVersion: 1 as const,
+      applicationId: "external-review-cadence-change",
+      externalEvidenceHash: "ab".repeat(32),
+      proposalHash: existing.proposalHash,
+      surface: existing.recommendation.surface,
+      target: existing.recommendation.target,
+      value: existing.recommendation.to,
+    };
+    const ownerEvidence: BoundedTrialOwnerEvidence = {
+      proposalHash: existing.proposalHash,
+      applicationHash: "ab".repeat(32),
+    };
+    const result = evaluateBoundedTrial({
+      proposal: existing,
+      applications: [application],
+      ownerEvidence,
+      currentTarget: metric("grading-accuracy", 0.65),
+      currentGuards: cleanCurrentGuards(),
+      occurrences: 5,
+      distinctRuns: 3,
+      ageDays: 10,
+      minEffect: 0.15,
+      noiseFloor: 0.05,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.value.status).toBe("retain");
+  });
+
+  it("rejects mismatched proposal hash or surface-target-value binding in bounded trial", () => {
+    const existing = proposal();
+    const badEvidence = { proposalHash: "ee".repeat(32), applicationHash: "ff".repeat(32) };
+    const res = evaluateBoundedTrial({
+      proposal: existing,
+      applications: [{ schemaVersion: 1, applicationId: "x", externalEvidenceHash: "ff".repeat(32), proposalHash: existing.proposalHash, surface: existing.recommendation.surface, target: existing.recommendation.target, value: existing.recommendation.to }],
+      ownerEvidence: badEvidence,
+      currentTarget: metric("grading-accuracy", 0.65),
+      currentGuards: cleanCurrentGuards(),
+      occurrences: 5,
+      distinctRuns: 3,
+      ageDays: 10,
+      minEffect: 0.15,
+      noiseFloor: 0.05,
+    });
+    expect(res.ok).toBe(false);
   });
 });

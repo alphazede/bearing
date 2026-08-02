@@ -7,6 +7,7 @@ import { isAbsolute, posix, relative, resolve, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { NodeProcessRunner } from "./adapters/process-runner.js";
 import { exportContributionBundle, } from "./improvement/improvement-export.js";
+import { buildRecommendationProposal, } from "./improvement/improvement-proposal.js";
 import { nativePlanDirectoryPath, planDirectoryValid } from "./journey/plan-directory.js";
 import { validatePlan } from "./journey/planning-validator.js";
 import { REASONING_TIERS } from "./profile/reasoning-policy.js";
@@ -615,11 +616,13 @@ function contributionAtom(value) {
 }
 function contributionBundle(report) {
     const policyValues = [];
-    for (let index = 0; index < report.recommendation.recommendations.length; index += 1) {
-        if (report.trialVerdicts[index]?.status !== "retain")
+    for (const recommendation of report.recommendation.recommendations) {
+        const built = buildRecommendationProposal(recommendation);
+        if (!built.ok)
             continue;
-        const recommendation = report.recommendation.recommendations[index];
-        if (!recommendation)
+        const ph = built.value.proposalHash;
+        const matching = report.trialVerdicts.find((v) => v.proposalHash === ph);
+        if (matching?.status !== "retain")
             continue;
         policyValues.push({
             surface: recommendation.surface,

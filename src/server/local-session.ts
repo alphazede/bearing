@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { constants, readFileSync } from "node:fs";
@@ -11,19 +11,24 @@ import { RepositoryChoiceService, type RepositoryChoiceResult } from "../reposit
 import { assessRepositorySafety } from "../repository/safety.js";
 import { writeWorkspaceBusyLease } from "../repository/workspace-tools.js";
 import { BUILTIN_ROUTES, type ProcessRunner } from "../adapters/adapters.js";
-import { BearingStore } from "../store/bearing-store.js";
+import { BearingStore, BearingStoreError, type StoredRunListEntry, type StoredRunState } from "../store/bearing-store.js";
 import { AdapterVerification, ReadinessService, REASONING_LEVELS, type RouteInspectionPort, type VerificationPort } from "../onboarding/readiness.js";
 import { normalizeReasoningTier, type ResolvedRun, type RunOverrides, type Selection } from "../profile/profile.js";
 import { CommandGateway } from "./command-gateway.js";
 import { SseProjection } from "./sse.js";
 import { MAX_SHOWCASE_JSON, MAX_SHOWCASE_REPORT, listWorkflowShowcases, projectWorkflowShowcase, renderWorkflowReport } from "../workflows/showcase.js";
-import { JourneyService, currentPlanningVerdict, planningCheckpointFields, type JourneyActivity, type JourneyResult, type JourneyStage } from "../journey/planning-journey.js";
+import { JourneyService, currentPlanningVerdict, planningCheckpointFields, reconOwnerDecisionQuestion, type JourneyActivity, type JourneyReconResult, type JourneyResult, type JourneyStage } from "../journey/planning-journey.js";
 import {
   canonicalStringify,
+  isJourneyTokenUsage,
+  MAX_JOURNEY_TOKEN_TOTAL,
   RECORD_JOURNEY_CHECKPOINT_STAGES,
-  isRequirementRefs,
   isVerificationCheckpointPayload,
+  type CompletedSliceEvidence,
   type CommandEnvelopeV1,
+  type JourneyRecoveryOutcome,
+  type JourneyTokenBudgetState,
+  type JourneyTokenUsage,
   type RecordJourneyCheckpointPayload,
   type VerificationCheckpointPayload,
   type VerificationLayer,
@@ -57,7 +62,7 @@ import { admissibleConcurrency } from "../execution/concurrency-control.js";
 import { derivePlanningState, next, planningValidationSignal, type PlanningSignal, type PlanningValidationRecord } from "../journey/planning-state.js";
 import { planDirectoryValid } from "../journey/plan-directory.js";
 import { graderVerdict, parseGraderReport, type GraderReportFailure } from "../verification/grader.js";
-import { parseParkRangerReport, synthesizeFindings, type ParkRangerReportFailure } from "../verification/park-ranger.js";
+import { findingIdentity, parseParkRangerReport, synthesizeFindings, type ParkRangerReportFailure } from "../verification/park-ranger.js";
 import { requiredGates, resolveReviewCadence } from "../verification/review-cadence.js";
 import { assertIndependentVerification } from "../verification/verification-roles.js";
 import {
@@ -66,7 +71,7 @@ import {
   resolvePlanDirectory,
   type ConsolidationPlan,
 } from "../journey/plan-resolution.js";
-import { isFitDiagnostic, type FitAssumption, type FitDecision, type FitDiagnostic } from "../journey/repository-fit.js";
+import { canonicalizeFitOwnerAnswer, FIT_OWNER_ANSWER_REMEDY, isFitDiagnostic, type FitAssumption, type FitDecision, type FitDiagnostic } from "../journey/repository-fit.js";
 import type {
   ImprovementReport,
   ImprovementServiceFailure,
@@ -82,7 +87,18 @@ import {
   type RecommendationResult,
   type Thresholds,
 } from "../improvement/improvement-recommender.js";
-import type { TrialVerdict } from "../improvement/improvement-proposal.js";
+import {
+  buildRecommendationProposal,
+  evaluateBoundedTrial,
+  type BoundedTrialOwnerEvidence,
+  type CanonicalValue,
+  type EvaluateBoundedTrialInput,
+  type ImprovementMetricId,
+  type MetricSnapshot,
+  type OwnerAppliedRecommendation,
+  type Proposal,
+  type TrialVerdict,
+} from "../improvement/improvement-proposal.js";
 
 // ponytail: 32-byte (256-bit) tokens give 2^256 entropy; hex is URL-fragment-safe.
 const CAPABILITY_BYTES = 32;
@@ -136,6 +152,7 @@ export type ImprovementHandoffResult =
   | { readonly ok: false; readonly reason: "run_not_found" | "run_unavailable" };
 
 export type RuntimeImprovementReport = ImprovementReport<Thresholds, MetricSet, RecommendationResult> & {
+  readonly proposals: readonly Proposal[];
   readonly trialVerdicts: readonly TrialVerdict[];
 };
 
@@ -151,14 +168,43 @@ function recordField(record: OutcomeRecord, key: string): unknown {
 
 /** Adapt only fields the bounded outcome projection actually carries; missing families stay empty. */
 export function measureImprovementWindow(window: ImprovementWindow): MetricSet {
+  const coordination: MetricInputs["coordination"][number][] = [];
   const sliceAttempts: MetricInputs["sliceAttempts"][number][] = [];
   const grading: NonNullable<MetricInputs["grading"]>[number][] = [];
+  const completedSlices: MetricInputs["completedSlices"][number][] = [];
+  const reviewedSlices: NonNullable<MetricInputs["reviewedSlices"]>[number][] = [];
+  const confirmedFindings: NonNullable<MetricInputs["confirmedFindings"]>[number][] = [];
+  const tokenReports: NonNullable<MetricInputs["tokenReports"]>[number][] = [];
   const confirmedFindingSlices = new Set<string>();
+  let tokenReportsObserved = false;
 
   for (const record of window.records) {
-    if (record.signal !== "park_ranger_finding") continue;
-    const sliceRef = recordField(record, "sliceRef");
-    if (typeof sliceRef === "string" && sliceRef.length > 0) confirmedFindingSlices.add(sliceRef);
+    if (record.signal === "coordination") {
+      coordination.push({ workItems: record.workItemCount, estimatedAgents: record.estimatedAgents });
+      continue;
+    }
+    if (record.signal === "slice_completion") {
+      completedSlices.push({
+        runRef: record.runRef,
+        sliceRef: record.sliceRef,
+        sequence: record.sequence,
+        requirementRefs: record.requirementRefs,
+      });
+      continue;
+    }
+    if (record.signal === "park_ranger_finding") {
+      confirmedFindings.push({ sliceRef: record.sliceRef, sequence: record.sequence });
+      confirmedFindingSlices.add(record.sliceRef);
+      continue;
+    }
+    if (record.signal === "park_ranger_review") {
+      reviewedSlices.push({ sliceRef: record.sliceRef, sequence: record.sequence });
+      continue;
+    }
+    if (record.signal === "token_usage") {
+      tokenReports.push({ runRef: record.runRef, tokens: record.tokens });
+      tokenReportsObserved = true;
+    }
   }
   for (const record of window.records) {
     const sliceRef = recordField(record, "sliceRef");
@@ -180,15 +226,106 @@ export function measureImprovementWindow(window: ImprovementWindow): MetricSet {
   }
 
   return computeMetrics({
-    // One projected coordination value cannot represent both agents and work items.
-    coordination: [],
+    coordination,
     sliceAttempts,
     grading,
-    // Requirement references and event sequence are intentionally absent from OutcomeRecord.
-    completedSlices: [],
-    confirmedFindings: [],
-    // There is no token outcome signal in the bounded projection.
-    tokenReports: [],
+    completedSlices,
+    reviewedSlices,
+    confirmedFindings,
+    ...(tokenReportsObserved ? { tokenReports } : {}),
+    tokenCoverageComplete: window.recordsTruncated !== true,
+  });
+}
+
+function metricKey(id: ImprovementMetricId): keyof MetricSet {
+  if (id === "coordination-overhead") return "coordinationOverhead";
+  if (id === "first-pass-success") return "firstPassSuccess";
+  if (id === "grading-accuracy") return "gradingAccuracy";
+  if (id === "escaped-defects") return "escapedDefects";
+  return "costPerAcceptedCriterion";
+}
+
+function toMetricSnapshot(mv: MetricSet[keyof MetricSet], id: ImprovementMetricId): MetricSnapshot {
+  const base = {
+    id,
+    value: (mv as { value: number | null }).value,
+    numerator: (mv as { numerator: number }).numerator,
+    denominator: (mv as { denominator: number }).denominator,
+    sufficient: (mv as { sufficient: boolean }).sufficient,
+  };
+  const conf = (mv as { confusion?: unknown }).confusion;
+  return conf !== undefined ? { ...base, confusion: conf as CanonicalValue } : base;
+}
+
+const GUARD_IDS: readonly ImprovementMetricId[] = ["escaped-defects", "first-pass-success", "cost-per-accepted-criterion"];
+const TRIAL_NOISE_FLOOR = 0.05;
+const MILLISECONDS_PER_DAY = 86_400_000;
+
+// Local predicates over public Stored* fields to avoid crossing the private seam in improvement-service.
+function unreadable(entry: StoredRunListEntry): boolean {
+  return Object.hasOwn(entry, "unreadable")
+    && (entry as { readonly unreadable?: unknown }).unreadable === true;
+}
+
+function settled(state: StoredRunState): boolean {
+  const checkpoint = state.journeyCheckpoint;
+  return state.pendingDecision === null
+    && checkpoint !== null
+    && checkpoint.stage === "review"
+    && checkpoint.status === "complete";
+}
+
+interface RecordedOwnerApplication extends OwnerAppliedRecommendation {
+  readonly recordedAt: string;
+}
+
+interface TrialLedgerFacts {
+  readonly applications: readonly RecordedOwnerApplication[];
+  readonly settledRunTimes: readonly number[];
+}
+
+async function readTrialLedger(
+  store: Pick<BearingStore, "list" | "load">,
+): Promise<TrialLedgerFacts> {
+  const applications: RecordedOwnerApplication[] = [];
+  const settledRunTimes: number[] = [];
+  // Keep the application marker plus the 20-run measurement window in one bounded replay.
+  const listed = (await store.list(50)).slice(0, 50);
+  for (const entry of listed) {
+    if (unreadable(entry)) continue;
+    let state: StoredRunState;
+    try {
+      state = await store.load(entry.runId);
+    } catch (error) {
+      if (error instanceof BearingStoreError) continue;
+      throw error;
+    }
+    if (!settled(state)) continue;
+    const updatedAt = Date.parse(entry.updatedAt);
+    if (Number.isFinite(updatedAt)) settledRunTimes.push(updatedAt);
+    for (const event of state.events) {
+      if (event.type !== "ownerImprovementApplicationRecorded" || event.actor !== "owner") continue;
+      const payload = event.payload as Readonly<Record<string, unknown>>;
+      if (typeof payload.improvementProposalRef !== "string"
+        || typeof payload.externalEvidenceHash !== "string"
+        || typeof payload.surface !== "string"
+        || typeof payload.targetJson !== "string"
+        || typeof payload.valueJson !== "string") continue;
+      applications.push(Object.freeze({
+        schemaVersion: 1,
+        applicationId: event.eventId,
+        externalEvidenceHash: payload.externalEvidenceHash,
+        proposalHash: payload.improvementProposalRef,
+        surface: payload.surface,
+        target: JSON.parse(payload.targetJson) as CanonicalValue,
+        value: JSON.parse(payload.valueJson) as CanonicalValue,
+        recordedAt: event.recordedAt,
+      }));
+    }
+  }
+  return Object.freeze({
+    applications: Object.freeze(applications),
+    settledRunTimes: Object.freeze(settledRunTimes),
   });
 }
 
@@ -217,11 +354,91 @@ export async function buildImprovementReport(
   if (result.value.listedRuns > 0 && result.value.readableRuns === 0) {
     return { ok: false, reason: "store_read_failed" };
   }
+
+  const base = result.value;
+  // Canonicalize current recommendations into owner-addressable proposals.
+  const recList = (base.recommendation.status === "ready" || base.recommendation.status === "insufficient_evidence")
+    ? base.recommendation.recommendations
+    : [];
+  const proposals: Proposal[] = [];
+  for (const rec of recList) {
+    const built = buildRecommendationProposal(rec);
+    if (built.ok) proposals.push(built.value);
+  }
+  const frozenProposals = Object.freeze(proposals);
+
+  let trialLedger: TrialLedgerFacts;
+  try {
+    trialLedger = await readTrialLedger(store);
+  } catch {
+    return { ok: false, reason: "store_read_failed" };
+  }
+
+  // Evaluate only a uniquely owner-applied proposal, using evidence recorded after the application.
+  const trialVerdicts: TrialVerdict[] = [];
+  const thresholds = base.thresholds;
+  for (const proposal of proposals) {
+    const matchingApplications = trialLedger.applications.filter((application) => (
+      application.proposalHash === proposal.proposalHash
+    ));
+    if (matchingApplications.length !== 1) continue;
+    const app = matchingApplications[0];
+    if (!app) continue;
+    const appliedAt = Date.parse(app.recordedAt);
+    const generatedAt = Date.parse(base.generatedAt);
+    if (!Number.isFinite(appliedAt) || !Number.isFinite(generatedAt) || generatedAt < appliedAt) continue;
+    const trialRecords = Object.freeze(base.records.filter((record) => Date.parse(record.recordedAt) > appliedAt));
+    const trialWindow: ImprovementWindow = Object.freeze({
+      generatedAt: base.generatedAt,
+      settledRuns: trialLedger.settledRunTimes.filter((recordedAt) => recordedAt > appliedAt).length,
+      records: trialRecords,
+      recordsTruncated: base.recordsTruncated,
+    });
+    const trialMetrics = measureImprovementWindow(trialWindow);
+    const trialRecommendation = recommend({
+      window: trialWindow,
+      metrics: Object.freeze(Object.values(trialMetrics)),
+      thresholds,
+    });
+    const currentRecommendation = trialRecommendation.recommendations.find((candidate) => (
+      candidate.patternId === proposal.recommendation.patternId
+      && candidate.surface === proposal.recommendation.surface
+      && canonicalStringify(candidate.target) === canonicalStringify(proposal.recommendation.target)
+      && canonicalStringify(candidate.to) === canonicalStringify(proposal.recommendation.to)
+    ));
+    const ownerEvidence: BoundedTrialOwnerEvidence = {
+      proposalHash: proposal.proposalHash,
+      applicationHash: app.externalEvidenceHash,
+    };
+    const targetId = proposal.recommendation.baseline.id;
+    const mk = (id: ImprovementMetricId) => trialMetrics[metricKey(id)];
+    const currentTarget = toMetricSnapshot(mk(targetId), targetId);
+    const currentGuards = GUARD_IDS.map((gid) => toMetricSnapshot(mk(gid), gid));
+    const evalInput: EvaluateBoundedTrialInput = {
+      proposal,
+      currentTarget,
+      currentGuards,
+      occurrences: currentRecommendation?.evidence.occurrences ?? 0,
+      distinctRuns: currentRecommendation?.evidence.distinctRuns ?? 0,
+      ageDays: (generatedAt - appliedAt) / MILLISECONDS_PER_DAY,
+      minEffect: thresholds.minEffect,
+      noiseFloor: TRIAL_NOISE_FLOOR,
+      applications: [app],
+      ownerEvidence,
+    };
+    const ev = evaluateBoundedTrial(evalInput);
+    if (ev.ok) {
+      trialVerdicts.push(ev.value);
+    }
+    // A still-open or invalid trial emits no verdict.
+  }
+
   return {
     ok: true,
     value: Object.freeze({
-      ...result.value,
-      trialVerdicts: Object.freeze([]),
+      ...base,
+      proposals: frozenProposals,
+      trialVerdicts: Object.freeze(trialVerdicts),
     }),
   };
 }
@@ -289,12 +506,13 @@ export async function buildImprovementHandoffFacts(
   }
 
   const stageOrder = (stage: RecordJourneyCheckpointPayload["stage"]): number => RECORD_JOURNEY_CHECKPOINT_STAGES.indexOf(stage);
+  const outcomes = projectOutcomes({
+    runId: state.runId,
+    events: state.events,
+    digest: (value) => createHash("sha256").update(value).digest("hex"),
+  });
   const degradation = detectDegradation({
-    outcomes: projectOutcomes({
-      runId: state.runId,
-      events: state.events,
-      digest: (value) => createHash("sha256").update(value).digest("hex"),
-    }),
+    outcomes,
     ...(sessionContinuity === undefined ? {} : { sessionContinuity }),
   });
   return {
@@ -620,7 +838,7 @@ const NATIVE_HTML_TEMPLATE =
   '  function requestError(label, r) { throw new Error(label + " (" + r.status + "). Refresh the run state and try again."); }\n' +
   '  function readRun(id) { return fetch("/api/v1/runs/" + encodeURIComponent(id), { credentials: "same-origin" }).then(function (r) { if (!r.ok) requestError("Run could not be read", r); return r.json(); }); }\n' +
   '  function postCommand(id, state, type, payload) { var commandId = crypto.randomUUID(); return fetch("/api/v1/runs/" + encodeURIComponent(id) + "/commands", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ schemaVersion: 1, commandId: commandId, runId: id, expectedRevision: state.revision, session: { sessionId: "browser", actor: "owner" }, correlationId: commandId, type: type, payload: payload }) }).then(function (r) { if (!r.ok) requestError("Command was rejected", r); return r.json(); }); }\n' +
-  '  function persistAgentQuestion(question) { return readRun(currentRunId).then(function (state) { if (state.pendingDecision) { if (state.pendingDecision.question !== question) throw new Error("Another owner decision is already pending."); return state; } return postCommand(currentRunId, state, "requireDecision", { decisionId: "journey-" + currentStage + "-" + crypto.randomUUID(), question: question, consequential: true }).then(function () { return readRun(currentRunId); }); }); }\n' +
+  '  function persistAgentQuestion(question, decisionId) { return readRun(currentRunId).then(function (state) { if (state.pendingDecision) { if (state.pendingDecision.question !== question || (typeof decisionId === "string" && decisionId.length > 0 && state.pendingDecision.decisionId !== decisionId)) throw new Error("Another owner decision is already pending."); return state; } var id = (typeof decisionId === "string" && decisionId.length > 0 ? decisionId : "journey-" + currentStage + "-" + crypto.randomUUID()); return postCommand(currentRunId, state, "requireDecision", { decisionId: id, question: question, consequential: true }).then(function () { return readRun(currentRunId); }); }); }\n' +
   '  var phaseNames = { "repository-fit": "Repository fit", "set-bearings": "Set Bearings", "gather-supplies": "Gather Supplies", "map-route": "Map the Route", "recon": "Recon", "draft-implementation": "Draft implementation", "execute-explorer": "Explorer", "execute-expedition": "Expedition", "review": "Surveyor review" };\n' +
   '  function cacheEstimate(body) { var estimate = body && body.nextStageEstimate; if (estimate && (phaseNames[estimate.stage] || estimate.stage === "execute") && Number.isSafeInteger(estimate.minMinutes) && Number.isSafeInteger(estimate.maxMinutes) && estimate.minMinutes >= 1 && estimate.maxMinutes >= estimate.minMinutes && typeof estimate.basis === "string") waitEstimates[estimate.stage] = estimate; }\n' +
   '  function waitEstimate(stage) { return waitEstimates[stage] || (stage === "execute-explorer" || stage === "execute-expedition" ? waitEstimates.execute : null); }\n' +
@@ -658,10 +876,10 @@ const NATIVE_HTML_TEMPLATE =
   '  function renderPlanReview(body) { var review = body.planningReview; if (!review) { renderFailure({ code: "artifact_invalid" }); return; } planningPanel.hidden = true; planReviewPanel.hidden = false; var recovery = document.getElementById("recovery-report"); if (!recovery.hidden) planReviewPanel.querySelector(".panel-body").prepend(recovery); document.getElementById("plan-review-summary").textContent = body.summary; document.getElementById("review-phase-count").textContent = String(review.phases); document.getElementById("review-slice-count").textContent = String(review.slices); document.getElementById("review-route").textContent = review.assignments.length + " assigned routes"; renderArtifactList(document.getElementById("review-artifacts"), body); var target = document.getElementById("review-assignments"); target.replaceChildren(); review.assignments.forEach(function (assignment) { var row = document.createElement("tr"); [assignment.slice, assignment.role, assignment.model, assignment.reasoning].forEach(function (value) { var cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell); }); target.appendChild(row); }); var validation = body.planningValidation || {}; var verdict = validation.verdict || "NEEDS_AMENDMENT"; var findings = Array.isArray(validation.findings) ? validation.findings : []; var findingPanel = document.getElementById("review-findings-panel"); var findingList = document.getElementById("review-findings"); findingList.replaceChildren(); findings.forEach(function (finding) { var item = document.createElement("li"); item.textContent = [finding.code, finding.artifact, finding.sliceId].filter(Boolean).join(" · ") + ": " + finding.observed + " Required: " + finding.required + " Remedy: " + finding.remedy; findingList.appendChild(item); }); findingPanel.hidden = findings.length === 0; document.getElementById("review-verdict").textContent = verdict === "PASS" ? "Planning validation passed with advisory findings." : verdict === "OWNER_DECISION_REQUIRED" ? "Owner decision required before approval." : "Planning amendments required before approval."; var approve = document.getElementById("approve-plan"); approve.disabled = verdict !== "PASS"; document.getElementById("review-change").value = ""; setStatus(verdict === "PASS" ? "Review every artifact, request changes, or approve the route." : verdict === "OWNER_DECISION_REQUIRED" ? "Review the findings and record the required owner decision before approval." : "Review the findings and request the required planning amendments.", false); }\n' +
   '  function renderFailure(body) { hideWait(); planningSubmit.disabled = false; planningAnswerForm.hidden = true; document.getElementById("journey-action").hidden = true; document.getElementById("mode-choice").hidden = true; var complete = document.getElementById("journey-complete"); complete.hidden = false; complete.firstElementChild.textContent = "Journey paused"; focusAmendmentPending = body.code === "focus_amendment_required"; document.getElementById("journey-summary").textContent = body.code === "artifact_invalid" && currentStage === "draft-implementation" ? "Your questions are complete; the generated files need another validation pass." : "Bearing saved your progress and stopped before moving to the next phase."; var drift = body.focusDrift && Array.isArray(body.focusDrift.changedPlanSources) ? " Changed plan sources: " + body.focusDrift.changedPlanSources.join(", ") + "." : ""; document.getElementById("completion-summary").textContent = focusAmendmentPending ? (body.amendmentPrompt || "Review and confirm the Focus amendment.") + drift : body.continuityLost ? body.continuityDisclosure : body.escalationTarget ? "Automatic retry stopped. Escalation target: " + body.escalationTarget + "." : body.retryRefusal ? "Retry refused: " + body.retryRefusal + "." : body.code === "cancelled" ? "You stopped " + phaseNames[currentStage] + ". Any Git changes remain visible and the phase can be retried." : body.code === "interrupted" ? "Bearing stopped while " + phaseNames[currentStage] + " was running. Inspect the Git changes before deciding whether to retry the saved phase." : body.code === "token_budget" ? "This run reached its token budget before the phase completed. Retry after lowering reasoning with /model or raise the CLI budget." : body.recovery && body.recovery.status === "stopped" ? "Bearing tried one focused repair and one simpler contract-preserving repair. The same deterministic failure remains, so automatic repair stopped: " + body.code + "." : body.code === "artifact_invalid" && currentStage === "draft-implementation" ? "Your answers and planning files are saved. Bearing could not verify the generated implementation package. Retry this step; you will not repeat the questions." : "The agent could not complete " + phaseNames[currentStage] + ": " + (body.code || "request_failed") + ". No success was recorded."; document.getElementById("completion-artifacts").replaceChildren(); var retry = document.getElementById("journey-retry"); retry.textContent = focusAmendmentPending ? "Confirm amendment" : "Retry"; retry.hidden = !focusAmendmentPending && (!!body.continuityLost || !!body.escalationTarget || !!body.retryRefusal || !!(body.recovery && body.recovery.status === "stopped")); document.getElementById("new-journey").hidden = true; setStatus(focusAmendmentPending ? "Owner confirmation is required for the Focus amendment." : body.continuityLost ? "Conversation continuity was lost; review the disclosure." : body.escalationTarget ? "Automatic retry escalated to " + body.escalationTarget + "." : body.retryRefusal ? "Retry refused: " + body.retryRefusal + "." : body.code === "cancelled" ? "Journey stopped by owner." : body.code === "interrupted" ? "Journey interrupted. Inspect changes before retrying." : body.recovery && body.recovery.status === "stopped" ? "Automatic repair stopped after repeated equivalent failures." : "Journey blocked. Retry is available.", false); }\n' +
   '  function renderJourney(body) { hideWait(); planningSubmit.disabled = false; renderArtifacts(body); renderRecoveryReport(body.recovery); pendingQuestionCount = body.status === "question" && Array.isArray(body.questions) ? Math.max(0, body.questions.length - 1) : 0; document.getElementById("journey-phase").textContent = phaseNames[currentStage].toUpperCase(); document.getElementById("journey-heading").textContent = phaseNames[currentStage]; document.getElementById("journey-summary").textContent = body.status === "action" ? body.summary : currentStage === "gather-supplies" ? "Answer the planning questions before the route map is written." : "The selected agent needs an owner answer before it can continue."; document.getElementById("journey-complete").hidden = true; document.getElementById("mode-choice").hidden = true; document.getElementById("journey-action").hidden = true; if (body.status === "failure") { renderFailure(body); return; } if (body.status === "question") { document.getElementById("journey-question-box").hidden = false; document.getElementById("planning-question").textContent = body.question || ""; var help = questionHelp(body.question || ""); document.getElementById("question-help").textContent = help; document.getElementById("question-help").hidden = !help; planningAnswerForm.hidden = false; planningAnswer.value = ""; planningAnswer.focus(); setStatus(currentStage === "gather-supplies" && pendingQuestionCount ? "Question saved locally. " + pendingQuestionCount + " remaining." : phaseNames[currentStage] + " needs your answer.", false); return; } document.getElementById("journey-question-box").hidden = true; document.getElementById("question-help").hidden = true; planningAnswerForm.hidden = true; if (currentStage === "draft-implementation") { renderPlanReview(body); return; } if (currentStage === "execute-explorer" || currentStage === "execute-expedition") { invokeJourney("review"); return; } if (currentStage === "review") { document.getElementById("journey-complete").hidden = false; document.getElementById("completion-summary").textContent = body.summary; renderArtifactList(document.getElementById("completion-artifacts"), body); document.getElementById("journey-retry").hidden = true; document.getElementById("new-journey").hidden = false; setStatus("Journey complete. Review the validated evidence.", false); return; } var next = document.getElementById("journey-next"); next.textContent = currentStage === "set-bearings" ? "Gather Supplies" : "Map the Route"; document.getElementById("journey-action").hidden = false; setStatus(phaseNames[currentStage] + " complete. Owner handoff required.", false); }\n' +
-  '  var renderJourneyResponse = renderJourney; renderJourney = function (body) { cacheEstimate(body); if (body.status === "action" && currentStage === "recon" && body.recon && (body.recon.state === "OWNER_DECISION_REQUIRED" || body.recon.state === "RECON_FAILED")) { renderFailure({ code: body.recon.state === "RECON_FAILED" ? "recon_failed" : "owner_decision_required" }); return; } renderJourneyResponse(body); if (body.status === "action" && currentStage === "repository-fit") invokeJourney("set-bearings"); else if (body.status === "action" && currentStage === "gather-supplies") invokeJourney("map-route"); else if (body.status === "action" && currentStage === "map-route") invokeJourney("recon"); else if (body.status === "action" && currentStage === "recon" && body.recon && (body.recon.state === "SKIPPED" || body.recon.state === "RECON_READY")) invokeJourney("draft-implementation"); };\n' +
+  '  var renderJourneyResponse = renderJourney; renderJourney = function (body) { cacheEstimate(body); if (body.status === "action" && currentStage === "recon" && body.recon && body.recon.state === "RECON_FAILED") { renderFailure({ code: "recon_failed" }); return; } if (body.status === "action" && currentStage === "recon" && body.recon && body.recon.state === "OWNER_DECISION_REQUIRED") { if (!body.ownerDecisionId || !body.ownerDecisionQuestion) { renderFailure({ code: "owner_decision_required" }); return; } var q = body.ownerDecisionQuestion; if (body.ownerDecisionAnswered === true) { invokeJourney("draft-implementation"); } else { persistAgentQuestion(q, body.ownerDecisionId).then(function () { renderJourneyResponse(Object.assign({}, body, { status: "question", question: q })); }, function () { renderFailure({ code: "owner_decision_required" }); }); } return; } renderJourneyResponse(body); if (body.status === "action" && currentStage === "repository-fit") invokeJourney("set-bearings"); else if (body.status === "action" && currentStage === "gather-supplies") invokeJourney("map-route"); else if (body.status === "action" && currentStage === "map-route") invokeJourney("recon"); else if (body.status === "action" && currentStage === "recon" && body.recon && (body.recon.state === "SKIPPED" || body.recon.state === "RECON_READY")) invokeJourney("draft-implementation"); };\n' +
   '  function renderSavedExecution(body) { hideWait(); retryStage = "review"; planningSubmit.disabled = false; planningAnswerForm.hidden = true; document.getElementById("journey-action").hidden = true; document.getElementById("mode-choice").hidden = true; var complete = document.getElementById("journey-complete"); complete.hidden = false; complete.firstElementChild.textContent = "Implementation saved"; document.getElementById("journey-summary").textContent = "Implementation completed successfully and is durably saved."; document.getElementById("completion-summary").textContent = "The follow-on review request disconnected. Your implementation success is saved; choose Retry to start Surveyor review."; renderArtifactList(document.getElementById("completion-artifacts"), body); document.getElementById("journey-retry").hidden = false; document.getElementById("new-journey").hidden = true; setStatus("Implementation complete and saved. Review is ready when you are.", false); }\n' +
   '  function reconcileJourney() { var runId = currentRunId, stage = currentStage; clearTimeout(reconcileTimer); reconcileTimer = null; fetch("/api/v1/journey/" + encodeURIComponent(runId) + "/status", { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error("status"); return r.json(); }).then(function (body) { if (currentRunId !== runId || currentStage !== stage) return; var run = body.run; if (!run) throw new Error("unsaved"); currentStage = run.stage; if (run.status === "running") { if (document.getElementById("journey-wait").hidden || run.stage !== stage) showWait(currentStage); setStatus("Reconnected to the saved " + phaseNames[currentStage] + " action.", true); reconcileTimer = setTimeout(function () { if (currentRunId === runId && currentStage === run.stage && !document.getElementById("journey-wait").hidden) reconcileJourney(); }, 2000); return; } if (!run.lastResult) throw new Error("unsaved"); var result = Object.assign({}, run.lastResult, { artifacts: run.artifacts || [], artifactLinks: run.artifactLinks || [] }); cacheEstimate(result); if ((run.stage === "execute-explorer" || run.stage === "execute-expedition") && result.status === "action") { renderSavedExecution(result); return; } renderJourney(result); }, function () { if (currentRunId === runId && currentStage === stage) renderFailure({ code: "network_error" }); }); }\n' +
-  '  function invokeJourney(stage, extra, quiet) { currentStage = stage; if (!quiet) showWait(stage); var payload = Object.assign({ runId: currentRunId, stage: stage, workGoal: currentGoal }, extra || {}); fetch("/api/v1/journey", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify(payload) }).then(function (r) { return r.json().catch(function () { return { status: "failure", code: "request_failed" }; }).then(function (body) { if (!r.ok && body.status !== "failure") return { status: "failure", code: "request_failed" }; return body; }); }).then(function (body) { return body.status === "question" && body.question ? persistAgentQuestion(body.question).then(function () { return body; }) : body; }).then(renderJourney, reconcileJourney); }\n' +
+  '  function invokeJourney(stage, extra, quiet) { currentStage = stage; if (!quiet) showWait(stage); var payload = Object.assign({ runId: currentRunId, stage: stage, workGoal: currentGoal }, extra || {}); fetch("/api/v1/journey", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify(payload) }).then(function (r) { return r.json().catch(function () { return { status: "failure", code: "request_failed" }; }).then(function (body) { if (!r.ok && body.status !== "failure") return { status: "failure", code: "request_failed" }; return body; }); }).then(function (body) { if (body.status === "question" && body.question) { return persistAgentQuestion(body.question, body.ownerDecisionId).then(function () { return body; }); } return body; }).then(renderJourney, reconcileJourney); }\n' +
   '  function showError(error) { setStatus(error instanceof Error ? error.message : "Request failed.", false); }\n' +
   '  function showDemoStage(next) { var stages = document.querySelectorAll("[data-demo-stage]"); var progress = document.querySelectorAll(".demo-progress li"); demoStage = Math.max(0, Math.min(stages.length - 1, next)); stages.forEach(function (stage, index) { stage.hidden = index !== demoStage; }); progress.forEach(function (step, index) { if (index === demoStage) step.setAttribute("aria-current", "step"); else step.removeAttribute("aria-current"); }); document.getElementById("demo-step").textContent = "Step " + (demoStage + 1) + " of " + stages.length; document.getElementById("demo-prev").disabled = demoStage === 0; document.getElementById("demo-next").textContent = demoStage === stages.length - 1 ? (currentRunId ? "Back to journey" : "Start journey") : "Next \\u2192"; }\n' +
   '  function chooseDemoMode(mode) { demoMode = mode; ["explorer", "expedition"].forEach(function (name) { var card = document.getElementById("demo-" + name); var selected = name === mode; card.classList.toggle("selected", selected); card.setAttribute("aria-pressed", String(selected)); }); if (!mode) { document.getElementById("demo-mode-status").textContent = "Choose a card to continue the tutorial."; document.getElementById("demo-selected-mode").textContent = "Your selected execution mode appears here."; return; } document.getElementById("demo-mode-status").textContent = (mode === "explorer" ? "Explorer selected: focused execution with fewer agent sessions." : "Expedition selected: parallel execution with more coordination.") + " Tutorial only; nothing was launched."; document.getElementById("demo-selected-mode").textContent = "Tutorial selection: " + (mode === "explorer" ? "Explorer" : "Expedition") + ". In a real run, Bearing records owner approval before execution."; }\n' +
@@ -1439,6 +1657,10 @@ interface BrowserJourney {
   gatherQuestionsDiscovered: boolean;
   retryLedger: RetryLedgerEntry[];
   activityTrail: JourneyActivity[];
+  tokenTotal?: number;
+  tokenBudget?: number;
+  tokenBudgetState?: JourneyTokenBudgetState;
+  recoveryOutcome?: JourneyRecoveryOutcome;
   concurrency?: RuntimeConcurrencyDecision;
   sessionContinuity: "intact" | "lost";
   retryRefusal?: RetryRefusal;
@@ -1484,7 +1706,12 @@ function confirmedFit(state: BrowserJourney, repositoryPath: string): ConfirmedF
 type FitAnswer =
   | ConfirmedFit
   | { readonly declined: true }
-  | { readonly question: string }
+  | {
+      readonly question: string;
+      readonly validationError?: "repository_fit_answer_invalid";
+      readonly remedy?: typeof FIT_OWNER_ANSWER_REMEDY;
+      readonly correctionAction?: "decide";
+    }
   | { readonly consolidation: BoundConsolidationPlan }
   | { readonly failure: "input_invalid" | "fit_undecidable" };
 
@@ -1549,13 +1776,23 @@ async function fitAnswer(
   answer: string,
 ): Promise<FitAnswer> {
   if (assumption.repository !== repositoryPath) return { failure: "fit_undecidable" };
-  const normalized = answer.toLowerCase().replace(/[.!]+$/g, "");
-  if (["no", "decline", "declined", "stop", "cancel"].includes(normalized)) return { declined: true };
-  const confirmed = answer === assumption.planDirectory
-    || ["y", "yes", "confirm", "confirmed", "approve", "approved", "proceed", "use it", "looks good"].includes(normalized);
+  const canonical = canonicalizeFitOwnerAnswer(answer);
+  if (!canonical.ok) return {
+    question: `${assumption.repository} and ${assumption.planDirectory} still require confirmation. ${canonical.remedy}`,
+    validationError: canonical.error,
+    remedy: canonical.remedy,
+    correctionAction: canonical.correctionAction,
+  };
+  if (canonical.answer === "Decline") return { declined: true };
+  const confirmed = canonical.answer === "Confirm" || canonical.answer === assumption.planDirectory;
   let resolved;
-  try { resolved = await resolvePlanDirectory(repositoryPath, confirmed ? assumption.planDirectory : answer); }
-  catch { return { failure: "input_invalid" }; }
+  try { resolved = await resolvePlanDirectory(repositoryPath, confirmed ? assumption.planDirectory : canonical.answer); }
+  catch { return {
+    question: `${assumption.repository} and ${assumption.planDirectory} still require confirmation. ${FIT_OWNER_ANSWER_REMEDY}`,
+    validationError: "repository_fit_answer_invalid",
+    remedy: FIT_OWNER_ANSWER_REMEDY,
+    correctionAction: "decide",
+  }; }
   if (resolved.ok) {
     const consolidation = await duplicateConsolidation(repositoryPath, resolved.path);
     if (consolidation) return { consolidation };
@@ -1568,10 +1805,20 @@ async function fitAnswer(
     return { decision, resolvedPlanDirectory: resolved.path };
   }
   if (resolved.reason === "plan_directory_ambiguous") {
-    return { question: `More than one plan directory matches. Enter one exact path: ${resolved.matches.join(", ")}` };
+    return {
+      question: `More than one plan directory matches. Enter one exact path: ${resolved.matches.join(", ")}`,
+      validationError: "repository_fit_answer_invalid",
+      remedy: FIT_OWNER_ANSWER_REMEDY,
+      correctionAction: "decide",
+    };
   }
   if (resolved.reason === "plan_directory_absent") {
-    return { question: `No exact plan directory matches "${resolved.requested}". Enter a full path under docs/plans/.` };
+    return {
+      question: `No exact plan directory matches "${resolved.requested}". Enter a full path under docs/plans/.`,
+      validationError: "repository_fit_answer_invalid",
+      remedy: FIT_OWNER_ANSWER_REMEDY,
+      correctionAction: "decide",
+    };
   }
   return { failure: "input_invalid" };
 }
@@ -1586,6 +1833,46 @@ type RecoveryReport = {
   readonly version: string;
   readonly fitDiagnostic?: FitDiagnostic;
 };
+
+function boundedJourneyTokenBudget(run: ResolvedRun): number | undefined {
+  const budget = run.roles[0]?.limits.tokenBudget;
+  return typeof budget === "number"
+    && Number.isSafeInteger(budget)
+    && budget > 0
+    ? budget
+    : undefined;
+}
+
+function accumulateJourneyTokens(state: BrowserJourney, result: JourneyResult): void {
+  const tokens = result.tokens;
+  if (state.tokenBudget !== undefined) {
+    state.tokenBudgetState = result.status === "failure"
+      && result.code === "token_budget"
+      && Number.isSafeInteger(tokens)
+      && tokens > state.tokenBudget
+      ? "exhausted"
+      : "within_budget";
+  }
+  if (state.tokenTotal === undefined
+    || !Number.isSafeInteger(tokens)
+    || tokens < 0
+    || tokens > MAX_JOURNEY_TOKEN_TOTAL - state.tokenTotal) {
+    state.tokenTotal = undefined;
+    return;
+  }
+  state.tokenTotal += tokens;
+}
+
+function journeyTokenUsage(state: BrowserJourney): JourneyTokenUsage | undefined {
+  if (state.tokenTotal === undefined
+    || state.tokenBudget === undefined
+    || state.tokenBudgetState === undefined) return undefined;
+  return {
+    total: state.tokenTotal,
+    budget: state.tokenBudget,
+    state: state.tokenBudgetState,
+  };
+}
 
 function recoverableFailure(result: JourneyResult): result is FailureResult {
   return result.status === "failure" && ["result_missing", "result_malformed", "artifact_invalid", "focus_invalid", "completion_invalid", "fit_malformed"].includes(result.code);
@@ -1889,6 +2176,29 @@ function ownerAnswerRecorded(
   );
 }
 
+function ownerDecisionAnsweredForQuestion(
+  state: Awaited<ReturnType<BearingStore["load"]>>,
+  decisionId: string | undefined,
+  question: string,
+  answer?: string,
+): boolean {
+  if (decisionId === undefined) return false;
+  let required = false;
+  for (const event of state.events) {
+    if (event.type === "decisionRequired" && event.payload.decisionId === decisionId) {
+      required = event.payload.question === question;
+    }
+    if (event.type === "journeyCheckpointRecorded" && event.payload.questionDecisionId === decisionId) {
+      required = event.payload.question === question;
+    }
+    if (required
+      && event.type === "ownerAnswered"
+      && event.payload.decisionId === decisionId
+      && (answer === undefined || event.payload.answer === answer)) return true;
+  }
+  return false;
+}
+
 function lastQaAnswer(entries: readonly { question: string; answer: string }[], question: string): string | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) if (entries[index].question === question) return entries[index].answer;
   return undefined;
@@ -1957,15 +2267,40 @@ function planningStateForJourneyGate(
   readonly activeReconFailure: "RECON_FAILED" | "OWNER_DECISION_REQUIRED" | undefined;
 } {
   let activeReconFailure: "RECON_FAILED" | "OWNER_DECISION_REQUIRED" | undefined;
+  let answeredReconOwnerDecision = false;
   for (const event of durable.events) {
-    if (event.type !== "journeyCheckpointRecorded" || event.payload.stage !== "recon") continue;
+    if (event.type !== "journeyCheckpointRecorded") continue;
+    if (event.payload.stage !== "recon") {
+      if (event.payload.planningFailure === "OWNER_DECISION_REQUIRED") answeredReconOwnerDecision = false;
+      continue;
+    }
     const result = parseCheckpointJson<JourneyResult | undefined>(event.payload.lastResultJson, undefined);
     const failure = reconPlanningFailure(result);
-    if (failure) activeReconFailure = failure;
-    else if (reconSuccessfullyCompleted(result)) activeReconFailure = undefined;
+    if (failure === "RECON_FAILED") {
+      activeReconFailure = failure;
+      answeredReconOwnerDecision = false;
+    } else if (failure === "OWNER_DECISION_REQUIRED") {
+      const cpQid = result && result.status === "action" ? result.ownerDecisionId : undefined;
+      const cpQuestion = result && result.status === "action" ? result.ownerDecisionQuestion : undefined;
+      if (cpQid && cpQuestion && ownerDecisionAnsweredForQuestion(durable, cpQid, cpQuestion)) {
+        // exact ownerAnswered for this recon decision ID clears the gate; do not block
+        answeredReconOwnerDecision = true;
+        activeReconFailure = undefined;
+      } else {
+        activeReconFailure = failure;
+        answeredReconOwnerDecision = false;
+      }
+    } else if (reconSuccessfullyCompleted(result)) {
+      activeReconFailure = undefined;
+      answeredReconOwnerDecision = false;
+    }
   }
+  const derivedPlanningState = derivePlanningState(durable.events);
+  const planningState: ReturnType<typeof derivePlanningState> = answeredReconOwnerDecision && derivedPlanningState === "OWNER_DECISION_REQUIRED"
+    ? "RECON_READY"
+    : activeReconFailure ?? derivedPlanningState;
   return {
-    planningState: activeReconFailure ?? derivePlanningState(durable.events),
+    planningState,
     activeReconFailure,
   };
 }
@@ -1984,12 +2319,12 @@ function retainedPlanningFailure(state: ReturnType<typeof derivePlanningState>) 
   }
 }
 
-async function completedRequirementRefs(
+async function completedSliceEvidence(
   repositoryPath: string | undefined,
   runId: string,
   state: BrowserJourney,
   durable: Awaited<ReturnType<BearingStore["load"]>>,
-): Promise<readonly string[] | undefined> {
+): Promise<readonly CompletedSliceEvidence[] | undefined> {
   if (
     repositoryPath === undefined
     || (state.stage !== "execute-explorer" && state.stage !== "execute-expedition")
@@ -1997,6 +2332,8 @@ async function completedRequirementRefs(
     || state.lastResult.verification?.verdict !== "PASS"
     || state.planDirectory === undefined
   ) return undefined;
+  const completed = state.lastResult.verification.completedSlices;
+  if (completed === undefined) return undefined;
   const source = await executionContractSource(repositoryPath, state.planDirectory);
   if (!source.available) return undefined;
   const parsed = parseApprovedExecutionContract(source.value);
@@ -2004,8 +2341,23 @@ async function completedRequirementRefs(
   // Owner approval is an owner-authored ownerAnswered event. A bearing-authored
   // checkpoint carrying the hash is the agent vouching for its own approval.
   if (!executionContractApprovalRecorded(durable.events, parsed.value.ownerApproval.recordId, parsed.value.contentHash)) return undefined;
-  const refs = [...new Set(parsed.value.slices.flatMap((slice) => slice.requirementIds))];
-  return isRequirementRefs(refs) ? refs : undefined;
+  const approvedSlices = new Map(parsed.value.slices.map((slice) => [slice.sliceId, slice] as const));
+  const seen = new Set<string>();
+  const evidence: CompletedSliceEvidence[] = [];
+  for (const slice of completed) {
+    if (seen.has(slice.sliceId)) return undefined;
+    seen.add(slice.sliceId);
+    const approvedSlice = approvedSlices.get(slice.sliceId);
+    if (!approvedSlice) return undefined;
+    const actualRequirements = [...slice.requirementIds].sort();
+    const approvedRequirements = [...approvedSlice.requirementIds].sort();
+    if (actualRequirements.length !== approvedRequirements.length
+      || actualRequirements.some((requirementId, index) => requirementId !== approvedRequirements[index])) {
+      return undefined;
+    }
+    evidence.push({ sliceId: slice.sliceId, requirementIds: actualRequirements });
+  }
+  return evidence.sort((left, right) => left.sliceId < right.sliceId ? -1 : left.sliceId > right.sliceId ? 1 : 0);
 }
 
 class JourneyCheckpointRevisionConflict extends Error {}
@@ -2067,7 +2419,8 @@ async function persistJourneyCheckpoint(
   const checkpointResult = state.lastResult && checkpointDiagnostic
     ? { ...state.lastResult, checkpointDiagnostic }
     : state.lastResult;
-  const requirementRefs = await completedRequirementRefs(repositoryPath, runId, state, durable);
+  const completedSlices = await completedSliceEvidence(repositoryPath, runId, state, durable);
+  const tokenUsage = journeyTokenUsage(state);
   const payload = {
     stage: state.stage,
     status: state.status,
@@ -2084,10 +2437,18 @@ async function persistJourneyCheckpoint(
     ...(state.selection ? { selectionProvider: state.selection.provider, selectionModel: state.selection.model, selectionReasoning: state.selection.reasoning } : {}),
     ...(state.providerSessionId ? { providerSessionId: state.providerSessionId } : {}),
     runtimeStateJson,
+    ...(tokenUsage ? { tokenUsage } : {}),
+    ...(state.recoveryOutcome ? { recoveryOutcome: state.recoveryOutcome } : {}),
     ...(state.lastResult?.status === "action" && state.lastResult.verification !== undefined
-      ? { verification: { layer: "validator", verdict: state.lastResult.verification.verdict, findingCount: state.lastResult.verification.reasons.length } satisfies VerificationCheckpointPayload }
+      ? {
+          verification: {
+            layer: "validator",
+            verdict: state.lastResult.verification.verdict,
+            findingCount: state.lastResult.verification.reasons.length,
+            ...(completedSlices === undefined ? {} : { completedSlices }),
+          } satisfies VerificationCheckpointPayload,
+        }
       : {}),
-    ...(requirementRefs === undefined ? {} : { requirementRefs }),
     ...planningFields,
   };
   const command = { schemaVersion: 1, commandId: id, runId, expectedRevision: expectedRevision ?? durable.revision, session: { sessionId: "local-runtime", actor: "bearing" }, correlationId: id, type: "recordJourneyCheckpoint", payload } as CommandEnvelopeV1;
@@ -2126,6 +2487,7 @@ function restoreJourney(entry: { goal: string; updatedAt: string; pendingQuestio
     ? parseRuntimeState(checkpoint.runtimeStateJson)
     : undefined;
   const runtimeState = parsedRuntime?.ok ? parsedRuntime.value : undefined;
+  const tokenUsage = isJourneyTokenUsage(checkpoint.tokenUsage) ? checkpoint.tokenUsage : undefined;
   const retryOutcome = runtimeState?.retry.at(-1)?.outcome;
   const retryRefusal = retryOutcome === "retry_requires_warrant"
     || retryOutcome === "same_attempt_higher_reasoning"
@@ -2150,6 +2512,11 @@ function restoreJourney(entry: { goal: string; updatedAt: string; pendingQuestio
     gatherQuestionsDiscovered: checkpoint.gatherQuestionsDiscovered === true && !(checkpoint.stage === "gather-supplies" && staleQuestion),
     retryLedger: runtimeState ? [...runtimeState.retry] : [],
     activityTrail: runtimeState ? [...runtimeState.trace] : [],
+    ...(tokenUsage ? {
+      tokenTotal: tokenUsage.total,
+      tokenBudget: tokenUsage.budget,
+      tokenBudgetState: tokenUsage.state,
+    } : {}),
     ...(runtimeState?.concurrency ? { concurrency: runtimeState.concurrency } : {}),
     sessionContinuity: runtimeState?.sessionContinuity
       ?? (savedLastResult?.sessionContinuity === "lost" ? "lost" : "intact"),
@@ -2177,6 +2544,7 @@ type SelectedBrowserState = {
   selection: Selection | null;
   run: ResolvedRun | null;
   readonly journeys: Map<string, BrowserJourney>;
+  readonly inFlightImprovementProposals: Set<string>;
   busyLeaseQueue: Promise<void>;
   busyLeaseHeartbeat?: ReturnType<typeof setInterval>;
 };
@@ -2226,6 +2594,7 @@ function handleJourneyPost(
     const stateWasCreated = state === undefined;
     if (!state) {
       if (!value.workGoal || !ensureJourneyCapacity(selected.journeys)) { writeRejection(res, 409); return; }
+      const tokenBudget = boundedJourneyTokenBudget(run);
       state = {
         goal: value.workGoal,
         updatedAt: new Date().toISOString(),
@@ -2237,6 +2606,11 @@ function handleJourneyPost(
         gatherQuestionsDiscovered: false,
         retryLedger: [],
         activityTrail: [],
+        ...(tokenBudget === undefined ? {} : {
+          tokenTotal: 0,
+          tokenBudget,
+          tokenBudgetState: "within_budget" as const,
+        }),
         sessionContinuity: "intact",
         busy: false,
         selection,
@@ -2342,6 +2716,7 @@ function handleJourneyPost(
       escalationTarget: state.escalationTarget,
     } : undefined;
     if (stageChanged) clearRetryDecision(state);
+    state.recoveryOutcome = undefined;
     const retryFailure = failedResultForStage(durable, value.stage, state);
     if (
       retryFailure
@@ -2360,9 +2735,6 @@ function handleJourneyPost(
         state.lastResult = retryFailure;
         state.status = "failed";
         state.updatedAt = new Date().toISOString();
-        try { await persistJourneyCheckpoint(selected.store, value.runId, state, journey); }
-        catch { writeRejection(res, 503); return; }
-        const links = state.artifacts.flatMap((path, index) => /\.(?:html|md)$/i.test(path) ? [{ path, url: `/api/v1/journey/${encodeURIComponent(value.runId)}/artifacts/${index}` }] : []);
         const recovery = {
           status: "stopped",
           stage: value.stage,
@@ -2372,6 +2744,10 @@ function handleJourneyPost(
           version: BEARING_VERSION,
           ...recoveryFitDiagnostic(retryFailure),
         } satisfies RecoveryReport;
+        state.recoveryOutcome = { outcome: recovery.status, attempts: 1 };
+        try { await persistJourneyCheckpoint(selected.store, value.runId, state, journey); }
+        catch { writeRejection(res, 503); return; }
+        const links = state.artifacts.flatMap((path, index) => /\.(?:html|md)$/i.test(path) ? [{ path, url: `/api/v1/journey/${encodeURIComponent(value.runId)}/artifacts/${index}` }] : []);
         writeShowcaseJson(res, {
           ...retryFailure,
           artifacts: state.artifacts,
@@ -2382,7 +2758,7 @@ function handleJourneyPost(
         return;
       }
     }
-    if (value.answer) {
+    if (value.answer && value.stage !== "recon") {
       if (!state.question || state.questionStage !== value.stage) { writeRejection(res, 409); return; }
       const pendingResult = state.lastResult;
       const pendingConsolidation = resultConsolidation(pendingResult);
@@ -2459,11 +2835,18 @@ function handleJourneyPost(
         state.updatedAt = new Date().toISOString();
         state.busy = false;
         if ("question" in resolution) {
-          const result: JourneyResult = {
+          const result: JourneyResult & {
+            readonly validationError?: "repository_fit_answer_invalid";
+            readonly remedy?: typeof FIT_OWNER_ANSWER_REMEDY;
+            readonly correctionAction?: "decide";
+          } = {
             status: "question",
             question: resolution.question,
             fitAssumption: assumption,
             tokens: 0,
+            ...(resolution.validationError ? { validationError: resolution.validationError } : {}),
+            ...(resolution.remedy ? { remedy: resolution.remedy } : {}),
+            ...(resolution.correctionAction ? { correctionAction: resolution.correctionAction } : {}),
           };
           state.question = resolution.question;
           state.questionStage = "repository-fit";
@@ -2546,6 +2929,43 @@ function handleJourneyPost(
         return;
       }
     }
+    // Recon answers use the shared free-text form + existing command boundary (requireDecision/recordOwnerAnswer via postCommand).
+    // Require the exact durable decision ID, server-authored question, and answer text. Missing/unrecorded/stale answers remain correctable (no consume).
+    // Valid answer appends QA and falls through to normal execution of the same recon stage (re-run with durable QA); no saved short-circuit.
+    if (value.stage === "recon" && value.answer) {
+      const priorResult = state.lastResult ?? parseCheckpointJson<JourneyResult | undefined>(durable.journeyCheckpoint?.lastResultJson, undefined);
+      if (priorResult?.status === "question") {
+        const q = state.question;
+        const id = state.questionDecisionId;
+        if (state.questionStage !== "recon" || typeof q !== "string" || !id || priorResult.question !== q) {
+          writeJourneyFailure(res, 409, "input_invalid");
+          return;
+        }
+        if (!ownerDecisionAnsweredForQuestion(durable, id, q, value.answer)) {
+          writeShowcaseJson(res, { status: "question", question: q, ownerDecisionId: id, ownerDecisionQuestion: q, validationError: "owner_answer_not_recorded", tokens: 0 });
+          return;
+        }
+        appendJourneyQa(state, q, value.answer);
+        state.question = undefined;
+        state.questionStage = undefined;
+        state.questionDecisionId = undefined;
+      } else {
+        const decId = priorResult && priorResult.status === "action" ? priorResult.ownerDecisionId : undefined;
+        const priorQ = priorResult && priorResult.status === "action" ? priorResult.ownerDecisionQuestion : undefined;
+        if (!decId || !priorQ) {
+          writeJourneyFailure(res, 409, "input_invalid");
+          return;
+        }
+        if (!ownerDecisionAnsweredForQuestion(durable, decId, priorQ, value.answer)) {
+          writeShowcaseJson(res, { status: "question", question: priorQ, ownerDecisionId: decId, ownerDecisionQuestion: priorQ, validationError: "owner_answer_not_recorded", tokens: 0 });
+          return;
+        }
+        appendJourneyQa(state, priorQ, value.answer);
+        state.question = undefined;
+        state.questionStage = undefined;
+        state.questionDecisionId = undefined;
+      }
+    }
     if (value.reviewChange) {
       if (!state.planDirectory || state.question || (state.stage !== "map-route" && state.stage !== "draft-implementation")) { writeRejection(res, 409); return; }
       appendJourneyQa(state, "Requested changes during planning-package review", value.reviewChange);
@@ -2585,26 +3005,31 @@ function handleJourneyPost(
     }
     let result: JourneyResult;
     let gatherMode = value.stage === "gather-supplies" ? value.answer || value.reviewChange || state.gatherQuestionsDiscovered ? "apply" as const : "questions" as const : undefined;
-    const execute = (reviewPrompt?: string, gateFailureFingerprint?: string) => journey.execute({
-      selection,
-      run,
-      repositoryPath,
-      runId: value.runId,
-      workGoal: state!.goal,
-      stage: value.stage,
-      priorOwnerQa: state!.qa,
-      ...(value.stage === "set-bearings"
-        ? { requestedPlanDirectory: state!.resolvedPlanDirectory }
-        : state!.planDirectory
-          ? { planDirectory: state!.planDirectory }
-          : {}),
-      ...(gatherMode ? { gatherMode } : {}),
-      ...(reviewPrompt ? { reviewPrompt } : {}),
-      ...(gateFailureFingerprint ? { gateFailureFingerprint } : {}),
-      ...(value.focusAmendmentConfirmed ? { focusAmendmentConfirmed: true } : {}),
-      ...(state!.providerSessionId ? { providerSessionId: state!.providerSessionId } : {}),
-    });
+    const execute = async (reviewPrompt?: string, gateFailureFingerprint?: string): Promise<JourneyResult> => {
+      const executed = await journey.execute({
+        selection,
+        run,
+        repositoryPath,
+        runId: value.runId,
+        workGoal: state!.goal,
+        stage: value.stage,
+        priorOwnerQa: state!.qa,
+        ...(value.stage === "set-bearings"
+          ? { requestedPlanDirectory: state!.resolvedPlanDirectory }
+          : state!.planDirectory
+            ? { planDirectory: state!.planDirectory }
+            : {}),
+        ...(gatherMode ? { gatherMode } : {}),
+        ...(reviewPrompt ? { reviewPrompt } : {}),
+        ...(gateFailureFingerprint ? { gateFailureFingerprint } : {}),
+        ...(value.focusAmendmentConfirmed ? { focusAmendmentConfirmed: true } : {}),
+        ...(state!.providerSessionId ? { providerSessionId: state!.providerSessionId } : {}),
+      });
+      accumulateJourneyTokens(state!, executed);
+      return executed;
+    };
     let recoveryReport: RecoveryReport | undefined;
+    let recoveryAttempts = 0;
     try {
       result = await execute();
       const control = state.control;
@@ -2643,6 +3068,7 @@ function handleJourneyPost(
         if (!decision.ok || decision.escalation) break;
         result = await execute(recoveryGuidance(lastRetryLevel, result.code), fingerprint);
       }
+      recoveryAttempts = automaticRetries;
       if (result.status !== "failure" && firstFailure) {
         recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure.code, retryLevel: lastRetryLevel, version: BEARING_VERSION, ...recoveryFitDiagnostic(firstFailure) };
         clearRetryDecision(state);
@@ -2655,6 +3081,9 @@ function handleJourneyPost(
       state.busy = false;
       await syncBusyLease(selected).catch(() => {});
     }
+    state.recoveryOutcome = recoveryReport === undefined
+      ? undefined
+      : { outcome: recoveryReport.status, attempts: recoveryAttempts };
     if (result.sessionContinuity === "lost") {
       state.sessionContinuity = "lost";
       if (result.status === "failure" && result.code === "session_unavailable") {
@@ -2669,6 +3098,18 @@ function handleJourneyPost(
       state.providerSessionId = journey.providerSessionId(repositoryPath, value.runId, selection) ?? state.providerSessionId;
     }
     if (result.status === "question" && result.question) { state.question = result.question; state.questionStage = value.stage; state.questionDecisionId = `journey-${randomToken(12)}`; state.pendingQuestions = result.questions ? [...result.questions.slice(1)] : []; if (value.stage === "gather-supplies" && gatherMode === "questions") state.gatherQuestionsDiscovered = true; }
+    // For recon OWNER_DECISION_REQUIRED put ID and server question only on result; never set state.question*, state.questionStage, or state.questionDecisionId.
+    if (result.status === "action" && result.recon && result.recon.state === "OWNER_DECISION_REQUIRED") {
+      const q = reconOwnerDecisionQuestion(result.recon);
+      const priorResult = state.lastResult ?? parseCheckpointJson<JourneyResult | undefined>(durable.journeyCheckpoint?.lastResultJson, undefined);
+      const pId = priorResult && priorResult.status === "action" ? priorResult.ownerDecisionId : undefined;
+      const priorQ = priorResult && priorResult.status === "action" ? priorResult.ownerDecisionQuestion : undefined;
+      const priorAnswered = pId && priorQ ? ownerDecisionAnsweredForQuestion(durable, pId, priorQ) : false;
+      const carriesMatchingAnswer = !!(value.answer && pId && priorQ === q && ownerDecisionAnsweredForQuestion(durable, pId, q, value.answer));
+      const reuse = !!(pId && priorQ === q && (carriesMatchingAnswer || (!value.answer && !priorAnswered)));
+      const id = reuse && pId ? pId : `journey-${randomToken(12)}`;
+      result = { ...result, ownerDecisionId: id, ownerDecisionQuestion: q, ...(carriesMatchingAnswer ? { ownerDecisionAnswered: true as const } : {}) };
+    }
     if (result.status === "action") {
       for (const artifact of result.artifacts) if (!state.artifacts.includes(artifact)) state.artifacts.push(artifact);
       if (value.stage === "draft-implementation") {
@@ -3017,6 +3458,7 @@ function runReadFailure(code: RunReadFailure["code"]): RunReadFailure {
     prototype_pollution: { status: 422, remedy: "Submit a plain JSON report without unsafe object keys or prototypes." },
     finding_unreproduced: { status: 422, remedy: "Include bounded reproduction inputs and an observed failure for every finding." },
     finding_unreachable: { status: 422, remedy: "Include a non-empty reachable path for every finding." },
+    finding_slice_scope_invalid: { status: 422, remedy: "Include one or more approved execution slice IDs for every finding." },
     claim_unadjudicated: { status: 422, remedy: "Adjudicate every inbound readiness claim before submitting the report." },
     self_certification: { status: 422, remedy: "Use an independent verification session for the report." },
     shared_ancestry: { status: 422, remedy: "Use a verification session outside the implementation execution ancestry." },
@@ -3079,6 +3521,126 @@ async function handleImprovementReportGet(
     return;
   }
   writeRunReadJson(res, result.value);
+}
+
+function isOwnerApplicationRecordBody(v: unknown): v is { readonly runId: string; readonly proposalHash: string; readonly surface: string; readonly target: CanonicalValue; readonly value: CanonicalValue; readonly externalEvidenceHash: string } {
+  if (!isRecord(v)
+    || Object.keys(v).length !== 6
+    || !["runId", "proposalHash", "surface", "target", "value", "externalEvidenceHash"].every((key) => Object.hasOwn(v, key))
+    || typeof v.runId !== "string"
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(v.runId)) return false;
+  if (typeof v.proposalHash !== "string" || !/^[a-f0-9]{64}$/.test(v.proposalHash)) return false;
+  if (typeof v.surface !== "string" || v.surface.length === 0 || v.surface.length > 128) return false;
+  if (typeof v.externalEvidenceHash !== "string" || !/^[a-f0-9]{64}$/.test(v.externalEvidenceHash)) return false;
+  return Object.hasOwn(v, "target") && Object.hasOwn(v, "value");
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+async function handleOwnerImprovementApplication(
+  req: IncomingMessage,
+  res: ServerResponse,
+  service: LocalSessionService,
+  selected: SelectedBrowserState,
+  report: RequestHandlerOptions["improvementReport"],
+): Promise<void> {
+  if (req.headers.origin !== undefined && !service.validOrigin(req.headers.origin)) { writeRejection(res, 403); return; }
+  if (!service.authenticateRequest(req)) { writeRejection(res, 401); return; }
+  if (!hasJsonContentType(req.headers["content-type"])) { writeRejection(res, 415); return; }
+  let body: unknown;
+  try {
+    body = await readJsonBody(req, MAX_OWNER_BODY);
+  } catch {
+    writeRejection(res, 400);
+    return;
+  }
+  if (!isOwnerApplicationRecordBody(body)) { writeRejection(res, 400); return; }
+  if (!selected.store) { writeRejection(res, 409); return; }
+  if (selected.inFlightImprovementProposals.has(body.proposalHash)) { writeRejection(res, 409); return; }
+  selected.inFlightImprovementProposals.add(body.proposalHash);
+
+  try {
+  // Verify proposal present in current report (read-only) and exact surface-target-value binding.
+  const selectedReport = report ?? ((input: { readonly store: BearingStore }) => (
+    buildImprovementReport(input.store)
+  ));
+  let reportRes: Awaited<ReturnType<NonNullable<typeof report>>>;
+  try {
+    reportRes = await selectedReport({ repositoryPath: selected.repositoryPath ?? "", store: selected.store });
+  } catch {
+    writeRejection(res, 503);
+    return;
+  }
+  if (!reportRes.ok) { writeRejection(res, 503); return; }
+  const reportValue = reportRes.value as Partial<RuntimeImprovementReport>;
+  const proposals = Array.isArray(reportValue.proposals) ? reportValue.proposals : [];
+  const match = proposals.find((p) => p.proposalHash === body.proposalHash);
+  if (!match) { writeRejection(res, 400); return; }
+  if (match.recommendation.surface !== body.surface
+    || canonicalStringify(match.recommendation.target) !== canonicalStringify(body.target)
+    || canonicalStringify(match.recommendation.to) !== canonicalStringify(body.value)) {
+    writeRejection(res, 400);
+    return;
+  }
+
+  let trialLedger: TrialLedgerFacts;
+  try {
+    trialLedger = await readTrialLedger(selected.store);
+  } catch {
+    writeRejection(res, 503);
+    return;
+  }
+  if (trialLedger.applications.some((application) => application.proposalHash === body.proposalHash)) {
+    writeRejection(res, 409);
+    return;
+  }
+
+  // Append one atomic owner event that binds the proposal, exact applied value, and external evidence.
+  let durable: StoredRunState;
+  try {
+    durable = await selected.store.load(body.runId);
+  } catch {
+    writeRejection(res, 404);
+    return;
+  }
+  const appId = randomUUID();
+  const appCmd: CommandEnvelopeV1 = {
+    schemaVersion: 1,
+    commandId: appId,
+    runId: body.runId,
+    expectedRevision: durable.revision,
+    session: { sessionId: service.ownerSessionId() ?? "owner", actor: "owner" },
+    correlationId: appId,
+    type: "recordOwnerImprovementApplication",
+    payload: {
+      improvementProposalRef: body.proposalHash,
+      externalEvidenceHash: body.externalEvidenceHash,
+      surface: body.surface,
+      targetJson: canonicalStringify(body.target),
+      valueJson: canonicalStringify(body.value),
+    },
+  };
+  let appRes;
+  try {
+    appRes = await selected.store.apply(appCmd);
+  } catch {
+    writeRejection(res, 503);
+    return;
+  }
+  if (!appRes.ok) {
+    writeRejection(res, appRes.reason === "stale_revision" ? 409 : 400);
+    return;
+  }
+  if (selected.sse) {
+    selected.sse.publish(appRes.events);
+  }
+  res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ revision: appRes.state.revision }));
+  } finally {
+    selected.inFlightImprovementProposals.delete(body.proposalHash);
+  }
 }
 
 function writeImprovementHandoffFailure(
@@ -3253,6 +3815,9 @@ function parseVerificationCheckpoint(value: unknown): VerificationCheckpointPars
       verdict: value.verdict,
       ...(value.rubricVersion === undefined ? {} : { rubricVersion: value.rubricVersion }),
       ...(value.findingCount === undefined ? {} : { findingCount: value.findingCount }),
+      ...(value.completedSlices === undefined ? {} : { completedSlices: value.completedSlices }),
+      ...(value.reviewedSliceIds === undefined ? {} : { reviewedSliceIds: value.reviewedSliceIds }),
+      ...(value.confirmedFindings === undefined ? {} : { confirmedFindings: value.confirmedFindings }),
     },
   };
 }
@@ -3273,6 +3838,9 @@ async function handleVerificationReportGet(req: IncomingMessage, res: ServerResp
     readonly verdict: VerificationVerdict;
     readonly rubricVersion?: string;
     readonly findingCount?: number;
+    readonly completedSlices?: VerificationCheckpointPayload["completedSlices"];
+    readonly reviewedSliceIds?: VerificationCheckpointPayload["reviewedSliceIds"];
+    readonly confirmedFindings?: VerificationCheckpointPayload["confirmedFindings"];
   }[] = [];
   for (const event of durable.events) {
     if (event.type !== "journeyCheckpointRecorded" || event.payload.verification === undefined) continue;
@@ -3295,6 +3863,9 @@ async function handleVerificationReportGet(req: IncomingMessage, res: ServerResp
       verdict: parsed.value.verdict,
       ...(parsed.value.rubricVersion === undefined ? {} : { rubricVersion: parsed.value.rubricVersion }),
       ...(parsed.value.findingCount === undefined ? {} : { findingCount: parsed.value.findingCount }),
+      ...(parsed.value.completedSlices === undefined ? {} : { completedSlices: parsed.value.completedSlices }),
+      ...(parsed.value.reviewedSliceIds === undefined ? {} : { reviewedSliceIds: parsed.value.reviewedSliceIds }),
+      ...(parsed.value.confirmedFindings === undefined ? {} : { confirmedFindings: parsed.value.confirmedFindings }),
     });
   }
   writeRunReadJson(res, { runId, layer, entries });
@@ -3383,17 +3954,27 @@ async function handleVerificationReportPost(
         return;
       }
     }
-    const parsedReports = reports.map((report) => parseParkRangerReport(report, inboundClaims, independence));
+    const allowedSliceIds = contract.slices.map(({ sliceId }) => sliceId);
+    const parsedReports = reports.map((report) => parseParkRangerReport(report, inboundClaims, independence, allowedSliceIds));
     const refused = parsedReports.find((report) => !report.ok);
     if (refused && !refused.ok) { writeRunReadFailure(res, refused.reason); return; }
     const parsedValues = parsedReports.flatMap((report) => report.ok ? [report.value] : []);
     reportIdentity = parsedValues;
     const synthesized = synthesizeFindings(parsedValues, independence);
     if (!synthesized.ok) { writeRunReadFailure(res, synthesized.reason); return; }
+    const confirmedFindings = synthesized.value.findings
+      .map((finding) => ({
+        findingRef: createHash("sha256").update(findingIdentity(finding)).digest("hex"),
+        priority: finding.priority,
+        sliceIds: [...finding.sliceIds].sort(),
+      }))
+      .sort((left, right) => left.findingRef < right.findingRef ? -1 : left.findingRef > right.findingRef ? 1 : 0);
     verification = {
       layer,
       verdict: synthesized.value.verdict,
-      findingCount: synthesized.value.findings.length,
+      findingCount: confirmedFindings.length,
+      reviewedSliceIds: [...allowedSliceIds].sort(),
+      confirmedFindings,
     };
   }
   if (!isVerificationCheckpointPayload(verification)) { writeRunReadFailure(res, "verification_projection_invalid"); return; }
@@ -3479,7 +4060,7 @@ export function createRequestHandler(
   options: RequestHandlerOptions = {},
 ) {
   const selected: SelectedBrowserState = {
-    store: null, gateway: null, sse: null, repositoryPath: null, repositorySelecting: false, selection: null, run: null, journeys: new Map(), busyLeaseQueue: Promise.resolve(),
+    store: null, gateway: null, sse: null, repositoryPath: null, repositorySelecting: false, selection: null, run: null, journeys: new Map(), inFlightImprovementProposals: new Set(), busyLeaseQueue: Promise.resolve(),
   };
   const readiness = new ReadinessService(
     options.routeInspection ?? options.processRunner ?? { executableAvailable: () => false },
@@ -3599,6 +4180,11 @@ export function createRequestHandler(
     if (method === "GET" && path === "/api/v1/improvement/report") {
       void handleImprovementReportGet(req, res, service, selected, improvementReport)
         .catch(() => writeImprovementFailure(res, "stage_failed"));
+      return;
+    }
+    if (method === "POST" && path === "/api/v1/improvement/application") {
+      void handleOwnerImprovementApplication(req, res, service, selected, improvementReport)
+        .catch(() => writeRejection(res, 400));
       return;
     }
     const historyEntry = /^\/api\/v1\/history\/([A-Za-z0-9_-]{1,128})$/.exec(path);
@@ -3737,6 +4323,9 @@ export type HeadlessJourneyReceipt = {
     | { readonly type: "approve-route"; readonly prompt: typeof PLAN_REVIEW_QUESTION; readonly artifacts: readonly string[] }
     | { readonly type: "confirm-amendment"; readonly prompt: typeof FOCUS_AMENDMENT_PROMPT }
     | { readonly type: "select-execution"; readonly modes: readonly ["explorer", "expedition"]; readonly reviewCadences: readonly ["slice", "phase", "end"] };
+  readonly validationError?: "repository_fit_answer_invalid";
+  readonly remedy?: typeof FIT_OWNER_ANSWER_REMEDY;
+  readonly correctionAction?: "decide";
   readonly outcome?:
     | { readonly type: "running" | "waiting" | "complete" }
     | { readonly type: "stopped" | "failed"; readonly code: HeadlessJourneyFailureCode };
@@ -3923,7 +4512,7 @@ function projectHeadlessReceipt(
   run: Record<string, unknown> | undefined,
   pendingDecision: Record<string, unknown> | null | undefined,
   readinessReady: boolean,
-): Pick<HeadlessJourneyReceipt, "allowedActions" | "question" | "summary" | "artifacts" | "requiredOwnerAction" | "outcome"> {
+): Pick<HeadlessJourneyReceipt, "allowedActions" | "question" | "summary" | "artifacts" | "requiredOwnerAction" | "outcome" | "validationError" | "remedy" | "correctionAction"> {
   const allowedActions = headlessAllowedActions(run, pendingDecision, readinessReady);
   if (!run) return { allowedActions };
   const lastResult = typeof run.lastResult === "object" && run.lastResult !== null && !Array.isArray(run.lastResult)
@@ -3931,6 +4520,10 @@ function projectHeadlessReceipt(
     : undefined;
   const artifacts = headlessArtifacts(run.artifacts);
   const summary = lastResult?.status === "action" && headlessText(lastResult.summary) ? lastResult.summary : undefined;
+  const fitCorrection = lastResult?.status === "question"
+    && lastResult.validationError === "repository_fit_answer_invalid"
+    && lastResult.remedy === FIT_OWNER_ANSWER_REMEDY
+    && lastResult.correctionAction === "decide";
   const question = typeof pendingDecision?.decisionId === "string"
     && headlessText(pendingDecision.question)
     && run.question === pendingDecision.question
@@ -3955,6 +4548,7 @@ function projectHeadlessReceipt(
   return {
     allowedActions,
     ...(question ? { question, requiredOwnerAction: { type: "answer" as const, question } } : {}),
+    ...(fitCorrection ? { validationError: "repository_fit_answer_invalid" as const, remedy: FIT_OWNER_ANSWER_REMEDY, correctionAction: "decide" as const } : {}),
     ...(summary ? { summary } : {}),
     ...(artifacts.length ? { artifacts } : {}),
     ...(routeApprovalRequired

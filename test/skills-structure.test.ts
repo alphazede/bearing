@@ -72,4 +72,26 @@ describe("CMD-SKILLS-STRUCTURE", () => {
     expect(skill).toContain("Never derive, slug, or suffix a plan directory.");
     expect(skill).not.toContain("Match the supplied plan directory to the current goal.");
   });
+
+  it("navigator requires one persistent host goal for autonomous or Expedition mode with concrete resume actions and host-lifecycle completion", async () => {
+    const skill = await source("navigator");
+    const packaged = await readFile(new URL("../plugin-skills/navigator/SKILL.md", import.meta.url), "utf8");
+    const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
+    const skillNorm = normalize(skill);
+    const packagedNorm = normalize(packaged);
+    const requiredPhrases = [
+      "In autonomous Navigator or Expedition mode",
+      "create or resume one persistent host goal before execution",
+      "retain it through recoverable blockers",
+      "continue dependency-independent authorized work",
+      "store a concrete resume action for each blocked lane",
+      "complete only after all authorized slices, gates, reviews, and owner-authorized external actions",
+      "mark blocked only under hosting runtime goal threshold and status rules",
+      "never bypass owner authority",
+    ] as const;
+    for (const phrase of requiredPhrases) {
+      expect(skillNorm).toContain(phrase);
+      expect(packagedNorm).toContain(phrase);
+    }
+  });
 });

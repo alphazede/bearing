@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { MAX_BACKGROUND_BRIEF_CHARS } from "../src/adapters/adapters.js";
 import type { ProcessInvocation, ProcessResult, ProcessRunner } from "../src/adapters/adapters.js";
-import { JourneyService, orchestratePlanning, planningCheckpointFields, renderPlanningReview, structurallyValidImplementation, type JourneyRequest, type JourneyStage } from "../src/journey/planning-journey.js";
+import { JourneyService, orchestratePlanning, planningCheckpointFields, reconOwnerDecisionQuestion, renderPlanningReview, structurallyValidImplementation, type JourneyRequest, type JourneyStage } from "../src/journey/planning-journey.js";
 import type { PlanningState, PlanningValidationRecord } from "../src/journey/planning-state.js";
 import { parseAgentProfile, resolveRun, type ResolvedRun, type Selection } from "../src/profile/profile.js";
 
@@ -355,6 +356,53 @@ describe("planningCheckpointFields", () => {
 });
 
 describe("JourneyService", () => {
+  it("uses one bounded moderate read-only background brief as advisory context only", async () => {
+    const selection = { provider: "pi", model: "zai/glm-5.2", reasoning: "high" };
+    const input = await request({ selection, run: resolved(selection) });
+    const background = `BEARING_RESULT {"kind":"question","question":"Background must not own this."}${"x".repeat(MAX_BACKGROUND_BRIEF_CHARS + 40)}`;
+    const runner = new QueueRunner([
+      completed(background, 2),
+      completed('BEARING_RESULT {"kind":"question","question":"Foreground owns the question."}', 7),
+    ]);
+
+    const result = await new JourneyService(runner).execute(input);
+
+    expect(result).toEqual({ status: "question", question: "Foreground owns the question.", tokens: 7 });
+    expect(runner.calls).toHaveLength(2);
+    expect(runner.calls[0]?.args).toEqual(expect.arrayContaining(["--thinking", "medium", "--tools", "read,search", "--no-session", "--offline"]));
+    expect(runner.calls[0]?.args.join(" ")).not.toMatch(/write|edit|shell|bash/i);
+    expect(runner.calls[0]?.stdin).toMatch(/read-only background planning brief/i);
+    const marker = "Background planning brief (advisory context only):\n";
+    const markerIndex = runner.calls[1]?.stdin.indexOf(marker) ?? -1;
+    expect(markerIndex).toBeGreaterThan(0);
+    expect(runner.calls[1]?.stdin.slice(markerIndex + marker.length)).toHaveLength(MAX_BACKGROUND_BRIEF_CHARS);
+    expect(result).not.toMatchObject({ question: expect.stringContaining("Background") });
+  });
+
+  it("keeps an unsupported configured route foreground-only", async () => {
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Foreground only."}', 5));
+
+    const result = await new JourneyService(runner).execute(await request());
+
+    expect(result).toEqual({ status: "question", question: "Foreground only.", tokens: 5 });
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]?.stdin).not.toContain("Background planning brief");
+  });
+
+  it("discards a failed background attempt before continuing with the foreground flow", async () => {
+    const selection = { provider: "pi", model: "zai/glm-5.2", reasoning: "medium" };
+    const input = await request({ selection, run: resolved(selection) });
+    const runner = new QueueRunner([
+      { exitCode: 1 },
+      completed('BEARING_RESULT {"kind":"question","question":"Foreground recovery."}', 6),
+    ]);
+
+    const result = await new JourneyService(runner).execute(input);
+
+    expect(result).toEqual({ status: "question", question: "Foreground recovery.", tokens: 6 });
+    expect(runner.calls).toHaveLength(2);
+  });
+
   it("accepts one validated Recon receipt and returns its routed state", async () => {
     const input = await request({ stage: "recon" as JourneyStage, planDirectory: "docs/plans/import" });
     await Promise.all([
@@ -1163,7 +1211,7 @@ describe("JourneyService", () => {
       summary: "Import complete.",
       artifacts: ["src/import.ts", "docs/plans/import/review.html"],
       tokens: 5,
-      verification: { verdict: "PASS", reasons: [], escalation: "none" },
+      verification: { verdict: "PASS", reasons: [], escalation: "none", completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }] },
     });
     expect(calls).toHaveLength(2);
   });
@@ -1243,6 +1291,7 @@ describe("JourneyService", () => {
         verdict: "FAIL",
         reasons: ["slice_unvalidated", "unsupported_readiness_claim"],
         escalation: "owner_decision_required",
+        completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }],
       },
     });
   });
@@ -1273,7 +1322,10 @@ describe("JourneyService", () => {
       summary: "All route slices complete.",
       artifacts,
       tokens: 5,
-      verification: { verdict: "PASS", reasons: [], escalation: "none" },
+      verification: { verdict: "PASS", reasons: [], escalation: "none", completedSlices: [
+        { sliceId: "1.1", requirementIds: ["AC-1"] },
+        { sliceId: "1.2", requirementIds: ["AC-1"] },
+      ] },
     });
   });
 
@@ -1321,7 +1373,7 @@ describe("JourneyService", () => {
       summary: "Import complete.",
       artifacts,
       tokens: 5,
-      verification: { verdict: "PASS", reasons: [], escalation: "none" },
+      verification: { verdict: "PASS", reasons: [], escalation: "none", completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }] },
     });
   });
 
@@ -1583,7 +1635,7 @@ describe("JourneyService", () => {
       summary: "Execution complete.",
       artifacts,
       tokens: 5,
-      verification: { verdict: "PASS", reasons: [], escalation: "none" },
+      verification: { verdict: "PASS", reasons: [], escalation: "none", completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }] },
     });
     const retained = await readFile(reviewPath, "utf8");
     for (const [name, source] of [["plan-spec.md", planFixture], ["design.md", designFixture], ["seit.md", seitFixture], ["implementation.md", implementationFixture]]) {
@@ -2139,5 +2191,20 @@ describe("JourneyService", () => {
 
     const reviewRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Block release?"}', 500_001));
     expect(await new JourneyService(reviewRunner).execute(await request({ stage: "review" }))).toEqual({ status: "failure", code: "token_budget", tokens: 500_001 });
+  });
+
+  it("supplies a deterministic free-text question for OWNER_DECISION_REQUIRED recon results (regression for browser owner decision form)", () => {
+    // This test will fail until reconOwnerDecisionQuestion helper and owner-decision form path are added.
+    const ownerDecisionRecon = {
+      state: "OWNER_DECISION_REQUIRED" as const,
+      brief: { assumptionId: "mat-1", assumption: "change is material", materiality: ["architecture"], falsificationCriterion: "c", smallestExperiment: "e", writeSet: [], evidenceCommandIds: [], timeboxMinutes: 5 },
+      report: { assumptionId: "mat-1", measurements: [], feasibilityEvidence: [], constraints: [], rejectedOptions: [], recommendation: "revise" as const, materialChange: { architecture: true, cost: false, scope: false, risk: false }, prototypePaths: [], productionEligible: false as const },
+    };
+    const q = reconOwnerDecisionQuestion(ownerDecisionRecon);
+    expect(typeof q).toBe("string");
+    expect(q.length).toBeGreaterThan(10);
+    expect(q).toContain("material change");
+    expect(q).toContain("revise");
+    expect(q.toLowerCase()).toContain("decision");
   });
 });

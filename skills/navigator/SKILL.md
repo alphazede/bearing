@@ -20,6 +20,12 @@ resolves the current verified blocker. Reject auxiliary documents, broad
 research, unrelated refactors, and while-here changes. Do not repeat an
 identical gate failure without a new hypothesis or evidence. Preserve dirty,
 unmerged, failed, or blocked lanes and report a concrete resume action.
+In autonomous Navigator or Expedition mode, Navigator must create or resume one
+persistent host goal before execution, retain it through recoverable blockers,
+continue dependency-independent authorized work, store a concrete resume action
+for each blocked lane, complete only after all authorized slices, gates,
+reviews, and owner-authorized external actions, mark blocked only under hosting
+runtime goal threshold and status rules, and never bypass owner authority.
 
 ## Authority and prohibited actions
 
