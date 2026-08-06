@@ -326,6 +326,20 @@ describe("planning validator conformance", () => {
     expect(validatePlan({ documents: missingSeitSections, planDirectory: "docs/plans/seit" }).findings.filter((item) => item.code === "seit_section_missing")).toHaveLength(3);
   });
 
+  it("passes a whole plan whose negative case states an observable generic denial", () => {
+    const observable = { ...clean, seit: clean.seit.replace(
+      "invalid input fails closed",
+      "Invalid, expired, exhausted, replayed, revoked, or rate-limited code returns a generic denial and creates no entitlement; no code grants spend authority",
+    ) };
+    const unobservable = { ...clean, seit: clean.seit.replace("invalid input fails closed", "denial is not returned for rate-limited codes") };
+
+    expect(validatePlan({ documents: observable, planDirectory: "docs/plans/denial" }).verdict).toBe("PASS");
+    expect(validatePlan({ documents: unobservable, planDirectory: "docs/plans/unobservable" })).toMatchObject({
+      verdict: "NEEDS_AMENDMENT",
+      findings: expect.arrayContaining([expect.objectContaining({ code: "validation_missing", artifact: "seit.md" })]),
+    });
+  });
+
   it("leaves the plan directory byte-identical for every verdict", async () => {
     const fixtures = [
       ["pass", clean],

@@ -21,6 +21,11 @@ Write `implementation.md` with traceable, bounded slices and execution manifests
 that satisfy Bearing's supplied schema. Do not execute a slice or invoke another
 planning skill.
 
+Read the plan's recorded Role routes decision and honor those exact primary and
+ordered fallback agents for delegation. When the decision is missing or
+incomplete, stop before drafting `implementation.md` and report the owner-decision
+blocker instead of substituting the onboarding provider or model selection.
+
 Bearing owns deterministic `review.html` generation. Never hand-edit, summarize,
 or replace it. The final review must embed the complete current `plan-spec.md`,
 `design.md`, `seit.md`, and `implementation.md` sources with working artifact
@@ -31,6 +36,10 @@ links before the owner is asked to approve execution.
 Use approved `plan-spec.md`, lens decision, route catalog, and substep. Do not
 invent approval, IDs, routes, contracts, or results. Bearing validates artifacts
 and generates the review.
+
+The immutable WaveEnvelope's `authorRoute` and `reviewSlots` come only from the
+approved plan's Role routes decision; never invent, widen, or substitute an
+onboarding default for either.
 
 Return structured planning state, findings, and artifacts to Navigator.
 Do not invoke the next pass or record a planning transition. Bearing's TypeScript capability boundary remains the enforcement.

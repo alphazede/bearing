@@ -17,5 +17,11 @@
     "local"
   ],
   "skills": "./plugin-skills/",
-  "hooks": "./hooks/claude-codex-hooks.json"
+  "hooks": "./hooks/claude-codex-hooks.json",
+  "mcpServers": {
+    "bearing": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/cli.js", "mcp"]
+    }
+  }
 }

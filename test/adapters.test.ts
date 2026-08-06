@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BUILTIN_ROUTES, SyntheticRunner, createAgentAdapter } from "../src/adapters/adapters.js";
+import { BACKGROUND_BRIEF_CAPABILITY, BUILTIN_ROUTES, MAX_BACKGROUND_BRIEF_CHARS, SyntheticRunner, createAgentAdapter } from "../src/adapters/adapters.js";
 import { parseAgentProfile, resolveRun } from "../src/profile/profile.js";
 
 function role(overrides: Record<string, unknown> = {}, projectedRole: "navigator" | "explorer" | "crewmate" | "surveyor" = "navigator") {
@@ -14,8 +14,32 @@ function adapter(runner = new SyntheticRunner(), overrides: Record<string, unkno
 const repositoryPath = "/tmp/bearing-repository";
 
 describe("provider-neutral adapters", () => {
+  it("runs one bounded background brief only on a declared read-only capability", async () => {
+    const selection = { provider: "pi", model: "zai/glm-5.2", reasoning: "high" };
+    const runner = new SyntheticRunner(undefined, [{ exitCode: 0, events: [{ type: "done", data: { content: "x".repeat(MAX_BACKGROUND_BRIEF_CHARS + 40) } }], usage: { tokens: 2 } }]);
+    const pi = createAgentAdapter(selection, runner);
+    if (!pi) throw new Error("missing Pi adapter");
+    const brief = await pi.readOnlyBackgroundBrief({ runId: "brief", repositoryPath, role: role({ selection }), task: { prompt: "inspect" } });
+
+    expect(BUILTIN_ROUTES.find(({ provider }) => provider === "pi")?.capabilities).toContain(BACKGROUND_BRIEF_CAPABILITY);
+    expect(brief).toHaveLength(MAX_BACKGROUND_BRIEF_CHARS);
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]?.args).toEqual(expect.arrayContaining(["--thinking", "medium", "--tools", "read", "--no-session", "--offline"]));
+    expect(runner.calls[0]?.args.join(" ")).not.toMatch(/write|edit|shell|bash/i);
+  });
+
+  it("keeps unsupported routes foreground-only and never launches a background process", async () => {
+    const runner = new SyntheticRunner();
+    const codex = createAgentAdapter({ provider: "codex", model: "*", reasoning: "medium" }, runner);
+    if (!codex) throw new Error("missing Codex adapter");
+    const brief = await codex.readOnlyBackgroundBrief({ runId: "unsupported-brief", repositoryPath, role: role({ selection: { provider: "codex", model: "*", reasoning: "medium" } }), task: { prompt: "inspect" } });
+
+    expect(brief).toBeUndefined();
+    expect(runner.calls).toEqual([]);
+  });
+
   it("has the exact static routes and inspects without process initialization", () => {
-    expect(BUILTIN_ROUTES.map(({ id, provider, model, executable }) => [id, provider, model, executable])).toEqual([["codex", "codex", "*", "codex"], ["claude", "claude", "*", "claude"], ["agy", "agy", "*", "agy"], ["grok-build", "grok", "grok-build", "grok-safe"], ["opencode", "opencode", "*", "opencode"], ["pi", "pi", "*", "pi"]]);
+    expect(BUILTIN_ROUTES.map(({ id, provider, model, executable }) => [id, provider, model, executable])).toEqual([["codex", "codex", "*", "codex"], ["claude", "claude", "*", "claude"], ["agy", "agy", "*", "agy"], ["opencode", "opencode", "*", "opencode"], ["pi", "pi", "*", "pi"]]);
     const runner = new SyntheticRunner(); expect(adapter(runner).inspect().available).toBe(true); expect(runner.calls).toEqual([]);
     expect(createAgentAdapter({ provider: "codex", model: "gpt-5.6-sol", reasoning: "medium" }, runner)).toBeDefined();
     expect(createAgentAdapter({ provider: "unknown", model: "nope", reasoning: "medium" }, runner)).toBeUndefined();
@@ -33,14 +57,40 @@ describe("provider-neutral adapters", () => {
     const runner = new SyntheticRunner();
     const crewmate = role({ selection: { provider: "codex", model: "gpt-5.6-sol", reasoning: "high" } }, "crewmate");
     expect(crewmate.selection.reasoning).toBe("high");
-    expect(crewmate.reasoning.providerLevel).toBe("medium");
+    expect(crewmate.reasoning.providerLevel).toBe("high");
     const codex = createAgentAdapter(crewmate.selection, runner);
     if (!codex) throw new Error("missing adapter");
 
     await codex.execute({ runId: "role-reasoning", repositoryPath, role: crewmate, task: { prompt: "implement" } });
 
-    expect(runner.calls[0]?.args).toContain('model_reasoning_effort="medium"');
-    expect(runner.calls[0]?.args).not.toContain('model_reasoning_effort="high"');
+    expect(runner.calls[0]?.args).toContain('model_reasoning_effort="high"');
+    expect(runner.calls[0]?.args).not.toContain('model_reasoning_effort="medium"');
+  });
+
+  // Issue 89 regression: a requested tier must reach the spawned child unchanged. A role policy
+  // default (crewmate is "medium") must never silently downgrade it.
+  it("spawns every requested reasoning tier unchanged and never downgrades a high request to medium", async () => {
+    const highRunner = new SyntheticRunner();
+    const crewmateHigh = role({ selection: { provider: "codex", model: "gpt-5.6-sol", reasoning: "high" } }, "crewmate");
+    const highAdapter = createAgentAdapter(crewmateHigh.selection, highRunner);
+    if (!highAdapter) throw new Error("missing adapter");
+
+    await highAdapter.execute({ runId: "requested-high", repositoryPath, role: crewmateHigh, task: { prompt: "x" } });
+
+    expect(highRunner.calls[0]?.args).toContain('model_reasoning_effort="high"');
+    expect(highRunner.calls[0]?.args).not.toContain('model_reasoning_effort="medium"');
+
+    for (const [requested, providerLevel] of [["low", "low"], ["medium", "medium"], ["high", "high"], ["very-high", "xhigh"], ["max", "max"]] as const) {
+      const runner = new SyntheticRunner();
+      const crewmate = role({ selection: { provider: "codex", model: "gpt-5.6-sol", reasoning: requested } }, "crewmate");
+      const adapter = createAgentAdapter(crewmate.selection, runner);
+      if (!adapter) throw new Error("missing adapter");
+
+      await adapter.execute({ runId: `requested-${requested}`, repositoryPath, role: crewmate, task: { prompt: "x" } });
+
+      expect(crewmate.reasoning.providerLevel).toBe(providerLevel);
+      expect(runner.calls[0]?.args).toContain(`model_reasoning_effort="${providerLevel}"`);
+    }
   });
 
   it("refuses a malformed role reasoning projection at the adapter boundary", async () => {
@@ -79,23 +129,6 @@ describe("provider-neutral adapters", () => {
     expect(runner.calls[0]?.environment).toEqual({ BEARING_FOCUS: "1" });
     await adapter(runner).execute({ runId: "ordinary", repositoryPath, role: role(), task: { prompt: "do work" } });
     expect(runner.calls[1]?.environment).toBeUndefined();
-  });
-
-  it("allows Grok subagents only through an explicit execution request", async () => {
-    const selection = { provider: "grok", model: "grok-build", reasoning: "medium" };
-    const runner = new SyntheticRunner();
-    const grok = createAgentAdapter(selection, runner);
-    if (!grok) throw new Error("missing grok adapter");
-    await grok.execute({ runId: "grok-expedition", repositoryPath, role: role({ selection }), task: { prompt: "coordinate" }, allowSubagents: true });
-    expect(runner.calls[0].args.slice(0, 2)).toEqual(["--allow-subagents", "--"]);
-    expect(runner.calls[0].args).not.toContain("--no-subagents");
-
-    const boundedRunner = new SyntheticRunner();
-    const bounded = createAgentAdapter(selection, boundedRunner);
-    if (!bounded) throw new Error("missing grok adapter");
-    await bounded.execute({ runId: "grok-bounded", repositoryPath, role: role({ selection }), task: { prompt: "work" } });
-    expect(boundedRunner.calls[0].args[0]).toBe("--");
-    expect(boundedRunner.calls[0].args).toContain("--no-subagents");
   });
 
   it("pins non-interactive Codex approval policy through current config argv", async () => {

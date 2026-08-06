@@ -11,6 +11,8 @@ disable-model-invocation: true
 
 Validate and score a supplied grader report against the versioned rubric. Recompute the verdict; reject self-declared mismatch or extra keys. Select routes with different family preference at high risk. Never repair code or decide transitions.
 
+Grader only calculates rubric; it fills no reviewer slots.
+
 ## Authority and prohibited actions
 
 Pure function over injected report and routes. No filesystem or execution.

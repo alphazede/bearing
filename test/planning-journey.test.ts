@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { MAX_BACKGROUND_BRIEF_CHARS } from "../src/adapters/adapters.js";
 import type { ProcessInvocation, ProcessResult, ProcessRunner } from "../src/adapters/adapters.js";
-import { JourneyService, orchestratePlanning, planningCheckpointFields, renderPlanningReview, structurallyValidImplementation, type JourneyRequest, type JourneyStage } from "../src/journey/planning-journey.js";
+import { JourneyService, orchestratePlanning, planningCheckpointFields, reconOwnerDecisionQuestion, renderPlanningReview, ROLE_ROUTES_QUESTION, structurallyValidImplementation, type JourneyRequest, type JourneyStage } from "../src/journey/planning-journey.js";
 import type { PlanningState, PlanningValidationRecord } from "../src/journey/planning-state.js";
 import { parseAgentProfile, resolveRun, type ResolvedRun, type Selection } from "../src/profile/profile.js";
 
@@ -64,7 +65,7 @@ function completed(text: string, tokens = 5): ProcessResult {
   return { exitCode: 0, events: [{ type: "item.completed", data: { content: text } }], usage: { tokens } };
 }
 
-const planFixture = "---\ntype: plan-spec\nstatus: complete\n---\n\n## Acceptance criteria\n\n- **AC-1** — Bounded account data is imported.\n\n## Risks and open questions\n\n- **RISK-1** — Invalid input must fail closed.\n";
+const planFixture = "---\ntype: plan-spec\nstatus: complete\n---\n\n## Acceptance criteria\n\n- **AC-1** — Bounded account data is imported.\n\n## Risks and open questions\n\n- **RISK-1** — Invalid input must fail closed.\n\n## Role routes\n\n- **execution-author** — primary: `codex`; fallbacks: `claude`\n- **review-general** — primary: `claude`; fallbacks: none\n- **review-security** — primary: `claude`; fallbacks: `surveyor`\n";
 const designFixture = "---\ntype: design\nstatus: complete\n---\n\n## Use Cases and Communication Flows\n\nComplete flow.\n\n## Interface Option Check\n\ninterface_options: not needed - fixture\n\n## OOPDSA Implementation Design\n\n- **DES-1** — Use the existing import boundary.\n- **CONTRACT-1** — Reject invalid input without writes.\n";
 const seitFixture = "---\ntype: seit\nstatus: complete\n---\n\n## Required Commands\n\n- **CMD-UNIT** — `pnpm test`\n\n## Traceability Matrix\n\n| SEIT row ID | Acceptance/risk ID | Design/contract ID | Boundary/test layer | Positive case | Negative/failure case | Command/procedure ID | Evidence |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| SEIT-1 | AC-1 | DES-1, CONTRACT-1 | unit | valid input imports | invalid input fails closed | CMD-UNIT | test report |\n\n## Cross-cutting Checks\n\nComplete checks.\n";
 const implementationFixture = "---\ntype: implementation\nstatus: draft\nplan_spec: ./plan-spec.md\ndesign: ./design.md\nseit: ./seit.md\n---\n\n# Implementation\n\n## Phase 1 — Build\n\n### Slice 1.1 — Import\n\n**Goal.** Import bounded account data.\n\n**Requirement IDs.** AC-1\n\n**Design IDs.** DES-1, CONTRACT-1\n\n**SEIT proof rows.** SEIT-1\n\n**Type.** /tdd\n\n**Design lenses.** CDD\n\n**Implementation role.** Backend Engineer\n\n**Agent model route.** Codex agent default\n\n**Agent reasoning level.** medium.\n\n**Ponytail mode.** full\n\n**Review path.** native review\n\n### 1.1 execution manifest\n\n**Write set.** `src/import.ts` only.\n\n**Command IDs.** CMD-UNIT\n\n**Stop condition.** Stop if focused validation fails.\n\n**Human decision.** None.\n";
@@ -355,6 +356,53 @@ describe("planningCheckpointFields", () => {
 });
 
 describe("JourneyService", () => {
+  it("uses one bounded moderate read-only background brief as advisory context only", async () => {
+    const selection = { provider: "pi", model: "zai/glm-5.2", reasoning: "high" };
+    const input = await request({ selection, run: resolved(selection) });
+    const background = `BEARING_RESULT {"kind":"question","question":"Background must not own this."}${"x".repeat(MAX_BACKGROUND_BRIEF_CHARS + 40)}`;
+    const runner = new QueueRunner([
+      completed(background, 2),
+      completed('BEARING_RESULT {"kind":"question","question":"Foreground owns the question."}', 7),
+    ]);
+
+    const result = await new JourneyService(runner).execute(input);
+
+    expect(result).toEqual({ status: "question", question: "Foreground owns the question.", tokens: 7 });
+    expect(runner.calls).toHaveLength(2);
+    expect(runner.calls[0]?.args).toEqual(expect.arrayContaining(["--thinking", "medium", "--tools", "read,search", "--no-session", "--offline"]));
+    expect(runner.calls[0]?.args.join(" ")).not.toMatch(/write|edit|shell|bash/i);
+    expect(runner.calls[0]?.stdin).toMatch(/read-only background planning brief/i);
+    const marker = "Background planning brief (advisory context only):\n";
+    const markerIndex = runner.calls[1]?.stdin.indexOf(marker) ?? -1;
+    expect(markerIndex).toBeGreaterThan(0);
+    expect(runner.calls[1]?.stdin.slice(markerIndex + marker.length)).toHaveLength(MAX_BACKGROUND_BRIEF_CHARS);
+    expect(result).not.toMatchObject({ question: expect.stringContaining("Background") });
+  });
+
+  it("keeps an unsupported configured route foreground-only", async () => {
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Foreground only."}', 5));
+
+    const result = await new JourneyService(runner).execute(await request());
+
+    expect(result).toEqual({ status: "question", question: "Foreground only.", tokens: 5 });
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]?.stdin).not.toContain("Background planning brief");
+  });
+
+  it("discards a failed background attempt before continuing with the foreground flow", async () => {
+    const selection = { provider: "pi", model: "zai/glm-5.2", reasoning: "medium" };
+    const input = await request({ selection, run: resolved(selection) });
+    const runner = new QueueRunner([
+      { exitCode: 1 },
+      completed('BEARING_RESULT {"kind":"question","question":"Foreground recovery."}', 6),
+    ]);
+
+    const result = await new JourneyService(runner).execute(input);
+
+    expect(result).toEqual({ status: "question", question: "Foreground recovery.", tokens: 6 });
+    expect(runner.calls).toHaveLength(2);
+  });
+
   it("accepts one validated Recon receipt and returns its routed state", async () => {
     const input = await request({ stage: "recon" as JourneyStage, planDirectory: "docs/plans/import" });
     await Promise.all([
@@ -911,6 +959,25 @@ describe("JourneyService", () => {
     expect(runner.calls[0].stdin).toContain('"stage":"gather-supplies"');
   });
 
+  it("asks the owner for role routes before plan-spec apply when unanswered", async () => {
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"questions","questions":[]}'));
+    await new JourneyService(runner).execute(await request({ gatherMode: "questions", priorOwnerQa: [] }));
+    expect(runner.calls[0].stdin).toContain(ROLE_ROUTES_QUESTION);
+    expect(runner.calls[0].stdin).toContain("execution-author");
+    expect(runner.calls[0].stdin).toContain("review-general");
+    expect(runner.calls[0].stdin).toContain("review-security");
+    expect(runner.calls[0].stdin).toContain("Never ask for credentials.");
+  });
+
+  it("suppresses repeat role-route questioning once the owner has already answered", async () => {
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"questions","questions":[]}'));
+    await new JourneyService(runner).execute(await request({
+      gatherMode: "questions",
+      priorOwnerQa: [{ question: ROLE_ROUTES_QUESTION, answer: "execution-author: codex primary, claude fallback" }],
+    }));
+    expect(runner.calls[0].stdin).not.toContain("Ask exactly this question verbatim");
+  });
+
   it("accepts a same-stage estimate on the map-route lens question", async () => {
     const input = await request({ stage: "map-route", planDirectory: "docs/plans/import" });
     await mkdir(join(input.repositoryPath, input.planDirectory!), { recursive: true });
@@ -1042,6 +1109,8 @@ describe("JourneyService", () => {
     const previous = {
       context,
       planHashes: { "plan-spec.md": "a", "design.md": "a", "seit.md": "a", "implementation.md": "a" },
+      targetRepository: "/repo/old",
+      planDirectory: "docs/plans/import",
     };
     const candidate = {
       context: {
@@ -1058,6 +1127,8 @@ describe("JourneyService", () => {
         },
       },
       planHashes: { "plan-spec.md": "b", "design.md": "c", "seit.md": "d", "implementation.md": "e" },
+      targetRepository: "/repo/new",
+      planDirectory: "docs/plans/amended",
     };
 
     const drift = journey.focusContractDrift!(previous, candidate);
@@ -1073,6 +1144,8 @@ describe("JourneyService", () => {
       changedRemainingSlices: { previous: ["1.1", "1.2"], candidate: ["1.2", "1.3"] },
       changedObjective: { previous: "Old &lt;objective&gt;&amp;" },
       changedRole: { previous: "explorer", candidate: "navigator" },
+      changedTargetRepository: { previous: "/repo/old", candidate: "/repo/new" },
+      changedPlanDirectory: { previous: "docs/plans/import", candidate: "docs/plans/amended" },
       changedPlanSources: ["plan-spec.md", "design.md", "seit.md", "implementation.md"],
     });
     expect(drift?.changedObjective?.candidate).toMatch(/^New &lt;objective&gt;&amp;/);
@@ -1115,6 +1188,35 @@ describe("JourneyService", () => {
     expect(service.activityTrail(input.runId)).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "focus.amended", status: "confirmed" }),
     ]));
+  });
+
+  it("issue 88: a target-root amendment is one confirmed atomic Focus rebase", async () => {
+    const question = completed('BEARING_RESULT {"kind":"question","question":"Continue?"}');
+    const runner = new QueueRunner([question, question]);
+    const service = new JourneyService(runner);
+    const planningRoot = await request({ stage: "execute-explorer", planDirectory: "docs/plans/import" });
+    const targetRoot = await request({ stage: "execute-explorer", planDirectory: "docs/plans/import" });
+    await Promise.all([writePlanningPackage(planningRoot.repositoryPath), writePlanningPackage(targetRoot.repositoryPath)]);
+
+    expect((await service.execute(planningRoot)).status).toBe("question");
+    const unconfirmed = await service.execute(targetRoot);
+    expect(unconfirmed).toMatchObject({
+      status: "failure",
+      code: "focus_amendment_required",
+      focusDrift: {
+        changedTargetRepository: {
+          previous: planningRoot.repositoryPath,
+          candidate: targetRoot.repositoryPath,
+        },
+      },
+    });
+    expect(runner.calls).toHaveLength(1);
+
+    expect((await service.execute({ ...targetRoot, focusAmendmentConfirmed: true })).status).toBe("question");
+    expect(runner.calls).toHaveLength(2);
+    expect(runner.calls[1].cwd).toBe(targetRoot.repositoryPath);
+    expect(runner.calls[1].stdin).toContain('"allowedPaths":["docs/plans/import/review.html","src/import.ts"]');
+    expect(runner.calls[1].stdin).toContain('"seitCommandIds":["CMD-UNIT"]');
   });
 
   it("detects an envelope-identical plan-source edit and re-captures baseline only after confirmation", async () => {
@@ -1163,7 +1265,7 @@ describe("JourneyService", () => {
       summary: "Import complete.",
       artifacts: ["src/import.ts", "docs/plans/import/review.html"],
       tokens: 5,
-      verification: { verdict: "PASS", reasons: [], escalation: "none" },
+      verification: { verdict: "PASS", reasons: [], escalation: "none", completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }] },
     });
     expect(calls).toHaveLength(2);
   });
@@ -1243,6 +1345,7 @@ describe("JourneyService", () => {
         verdict: "FAIL",
         reasons: ["slice_unvalidated", "unsupported_readiness_claim"],
         escalation: "owner_decision_required",
+        completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }],
       },
     });
   });
@@ -1273,7 +1376,10 @@ describe("JourneyService", () => {
       summary: "All route slices complete.",
       artifacts,
       tokens: 5,
-      verification: { verdict: "PASS", reasons: [], escalation: "none" },
+      verification: { verdict: "PASS", reasons: [], escalation: "none", completedSlices: [
+        { sliceId: "1.1", requirementIds: ["AC-1"] },
+        { sliceId: "1.2", requirementIds: ["AC-1"] },
+      ] },
     });
   });
 
@@ -1321,7 +1427,7 @@ describe("JourneyService", () => {
       summary: "Import complete.",
       artifacts,
       tokens: 5,
-      verification: { verdict: "PASS", reasons: [], escalation: "none" },
+      verification: { verdict: "PASS", reasons: [], escalation: "none", completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }] },
     });
   });
 
@@ -1376,18 +1482,70 @@ describe("JourneyService", () => {
     expect(runner.calls[0].stdin).toMatch(/All grilling questions are answered/i);
   });
 
-  it("enables Grok subagents for Expedition only", async () => {
-    const selection = { provider: "grok", model: "grok-build", reasoning: "medium" };
-    const expeditionRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Proceed with both lanes?"}'));
-    const expedition = await request({ stage: "execute-expedition", selection, run: resolved(selection), planDirectory: "docs/plans/import" });
-    await writePlanningPackage(expedition.repositoryPath);
-    expect((await new JourneyService(expeditionRunner).execute(expedition)).status).toBe("question");
-    expect(expeditionRunner.calls[0].args.slice(0, 2)).toEqual(["--allow-subagents", "--"]);
-    expect(expeditionRunner.calls[0].args).not.toContain("--no-subagents");
-    expect(expeditionRunner.calls[0].stdin).toContain('{"provider":"grok","model":"grok-build","reasoning":"medium"}');
-    expect(expeditionRunner.calls[0].stdin).toMatch(/recorded Review cadence \(each slice, each phase, or end\).*enforce that cadence/);
-    expect(expeditionRunner.calls[0].stdin).toMatch(/harness-native reviewer.*Surveyor fallback/);
-    expect(expeditionRunner.calls[0].stdin).toMatch(/Keep parallel lanes until the entire phase is integrated.*Never force-remove/);
+  it("instructs apply to record the exact role-route decision in plan-spec.md, never onboarding defaults", async () => {
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"One more thing?"}'));
+    await new JourneyService(runner).execute(await request({ gatherMode: "apply" }));
+    expect(runner.calls[0].stdin).toContain(`Record the owner's exact answer to ${JSON.stringify(ROLE_ROUTES_QUESTION)}`);
+    expect(runner.calls[0].stdin).toContain('"## Role routes" section in plan-spec.md');
+    expect(runner.calls[0].stdin).toContain("Never substitute the onboarding provider or model selection for a role route the owner did not answer.");
+  });
+
+  it("issue 93: Expedition coordination is read-only, attributed, and reviewer-separated", async () => {
+    const selection = { provider: "opencode", model: "*", reasoning: "medium" };
+    const expedition = await request({ stage: "execute-expedition", selection, run: resolved(selection), planDirectory: "docs/plans/import", currentSlice: "1.1" });
+    await writeMultiSlicePlanningPackage(expedition.repositoryPath);
+    const reviewPath = join(expedition.repositoryPath, expedition.planDirectory!, "review.html");
+    const completedReview = (await readFile(reviewPath, "utf8")).replace(
+      '<section id="bearing-final-qa" data-status="pending"><h2>Actual implementation and QA</h2><p>Pending implementation and validation.</p></section>',
+      '<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: selected import slice changed.</p><p>Validation evidence: CMD-UNIT passed.</p></section>',
+    );
+    const artifacts = ["src/import.ts", "docs/plans/import/review.html"];
+    const calls: ProcessInvocation[] = [];
+    const expeditionRunner: ProcessRunner = {
+      executableAvailable: () => true,
+      run: async (invocation) => {
+        calls.push(invocation);
+        if (calls.length === 1) return completed('BEARING_RESULT {"kind":"question","question":"Coordination handoff ready."}', 3);
+        expect(await readFile(join(expedition.repositoryPath, "src/import.ts"), "utf8").then(() => true, () => false)).toBe(false);
+        await mkdir(join(expedition.repositoryPath, "src"), { recursive: true });
+        await Promise.all([
+          writeFile(join(expedition.repositoryPath, "src/import.ts"), "export const imported = true;\n"),
+          writeFile(reviewPath, completedReview),
+        ]);
+        return completed(`BEARING_RESULT ${JSON.stringify({ kind: "action", summary: "Selected Expedition slice complete.", artifacts, evidence: [{ commandId: "CMD-UNIT", status: "passed", summary: "focused tests passed" }] })}`, 5);
+      },
+    };
+    const result = await new JourneyService(expeditionRunner).execute(expedition);
+    expect(calls).toHaveLength(2);
+    expect(calls.map((call) => call.routeId)).toEqual(["opencode", "opencode"]);
+    const permission = (call: ProcessInvocation) => JSON.parse((call.environment as { OPENCODE_PERMISSION: string }).OPENCODE_PERMISSION);
+    // Call 0: the Navigator's read-only coordination handoff, with subagent delegation allowed.
+    expect(permission(calls[0])).toMatchObject({ edit: "deny", bash: "deny", task: "allow" });
+    // Call 1: the Crewmate's actual slice execution, with write access and no further delegation.
+    expect(permission(calls[1])).toMatchObject({ edit: "allow", task: "deny" });
+    expect(calls[1].stdin).toContain('"remainingSlices":["1.1"]');
+    expect(calls[1].stdin).toContain('"allowedPaths":["docs/plans/import/review.html","src/import.ts"]');
+    expect(calls[1].stdin).toContain("Navigator coordination handoff (read-only; advisory to the product author):\nBEARING_RESULT");
+    expect(result).toEqual({
+      status: "action",
+      summary: "Selected Expedition slice complete.",
+      artifacts,
+      tokens: 8,
+      selectedScope: { currentSlice: "1.1", remainingSlices: ["1.1"], allowedPaths: ["docs/plans/import/review.html", "src/import.ts"], seitCommandIds: ["CMD-UNIT"] },
+      verification: { verdict: "PASS", reasons: [], escalation: "none", completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }] },
+      implementationProvenance: {
+        workerIdentity: "bearing/journey:crewmate",
+        base: "unborn",
+        focus: "AC-1 — Bounded account data is imported.",
+        mutationStart: expect.any(String),
+      },
+    });
+    expect(calls[0].stdin).toContain("Coordinator identity: bearing/journey:navigator. Product authorship is reserved for bearing/journey:crewmate.");
+    expect(calls[0].stdin).toContain("Reviewer identity: bearing/journey:surveyor; the reviewer never implements or coordinates.");
+    expect(calls[0].stdin).toContain('{"provider":"opencode","model":"*","reasoning":"medium"}');
+    expect(calls[0].stdin).toMatch(/recorded Review cadence \(each slice, each phase, or end\).*enforce that cadence/);
+    expect(calls[0].stdin).toMatch(/harness-native reviewer.*Surveyor fallback/);
+    expect(calls[0].stdin).toMatch(/Keep parallel lanes until the entire phase is integrated.*Never force-remove/);
 
     const preserveRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Proceed?"}'));
     const preserve = await request({ stage: "execute-explorer", planDirectory: "docs/plans/import", priorOwnerQa: [{ question: "Cleanup merged worktrees", answer: "off" }] });
@@ -1397,9 +1555,272 @@ describe("JourneyService", () => {
 
     const normalRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Any constraints?"}'));
     expect((await new JourneyService(normalRunner).execute(await request({ stage: "gather-supplies", selection, run: resolved(selection) }))).status).toBe("question");
-    expect(normalRunner.calls[0].args[0]).toBe("--");
-    expect(normalRunner.calls[0].args).toContain("--no-subagents");
-    expect(normalRunner.calls[0].args).not.toContain("--allow-subagents");
+    expect(permission(normalRunner.calls[0])).toMatchObject({ task: "deny" });
+  });
+
+  it("issue 93: fails closed on a typed role-boundary violation when the coordinator mutates the write set before Crewmate dispatch, across path classes, and preserves the unexpected change for quarantine", async () => {
+    const mutations: readonly [path: string, label: string][] = [
+      ["src/product.ts", "product"],
+      ["docs/product-notes.md", "documentation"],
+      ["docs/plans/import/prompts/scratch-evidence.md", "evidence"],
+      ["dist/generated.js", "generated"],
+      ["migrations/0001_add_column.sql", "migration"],
+    ];
+    for (const [mutatedPath, label] of mutations) {
+      const input = await request({ stage: "execute-expedition", planDirectory: "docs/plans/import", runId: `role-boundary-${label}` });
+      await writePlanningPackage(input.repositoryPath);
+      const calls: ProcessInvocation[] = [];
+      const runner: ProcessRunner = {
+        executableAvailable: () => true,
+        run: async (invocation) => {
+          calls.push(invocation);
+          // Reproduces the confirmed issue 93 sequence: before Bearing ever dispatches the
+          // authorized Crewmate, the coordinator/provider session (or a subagent it spawned,
+          // e.g. through --allow-subagents) writes into the product/slice write set.
+          await mkdir(dirname(join(input.repositoryPath, mutatedPath)), { recursive: true });
+          await writeFile(join(input.repositoryPath, mutatedPath), "unauthorized coordinator write\n");
+          return completed('BEARING_RESULT {"kind":"question","question":"Coordination handoff ready."}', 3);
+        },
+      };
+      const result = await new JourneyService(runner).execute(input);
+      expect(result).toEqual({
+        status: "failure",
+        code: "role_boundary_violation",
+        mutatedPaths: [mutatedPath],
+        tokens: 3,
+        selectedScope: { currentSlice: "1.1", remainingSlices: ["1.1"], allowedPaths: ["docs/plans/import/review.html", "src/import.ts"], seitCommandIds: ["CMD-UNIT"] },
+      });
+      // The designated Crewmate must never be dispatched once pre-dispatch mutation is proven;
+      // a planner/coordinator-authored candidate cannot be promoted even though the coordinator
+      // itself reported success.
+      expect(calls).toHaveLength(1);
+      // Quarantine without destructive cleanup: the unexpected file is preserved, not reverted,
+      // so it remains available for forensic comparison.
+      await expect(readFile(join(input.repositoryPath, mutatedPath), "utf8")).resolves.toBe("unauthorized coordinator write\n");
+    }
+  });
+
+  it("issue 93: a retry against the same run keeps failing closed until the unauthorized change is resolved, then restarts cleanly from the exact base", async () => {
+    const input = await request({ stage: "execute-expedition", planDirectory: "docs/plans/import", runId: "role-boundary-retry" });
+    await writePlanningPackage(input.repositoryPath);
+    const mutatedPath = join(input.repositoryPath, "src/unauthorized.ts");
+    await mkdir(dirname(mutatedPath), { recursive: true });
+    let mutate = true;
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      run: async (invocation) => {
+        if (mutate) await writeFile(mutatedPath, "unauthorized coordinator write\n");
+        return completed('BEARING_RESULT {"kind":"question","question":"Coordination handoff ready."}', 3);
+      },
+    };
+    const service = new JourneyService(runner);
+    const first = await service.execute(input);
+    expect(first).toMatchObject({ status: "failure", code: "role_boundary_violation", mutatedPaths: ["src/unauthorized.ts"] });
+
+    // Retrying without resolving the unexpected change fails closed again against the same
+    // pinned base rather than silently accepting the now-dirty tree as a new baseline.
+    const second = await service.execute({ ...input, runId: "role-boundary-retry" });
+    expect(second).toMatchObject({ status: "failure", code: "role_boundary_violation", mutatedPaths: ["src/unauthorized.ts"] });
+
+    // Only after the owner (or their tooling) removes the unauthorized change — quarantining it
+    // elsewhere rather than Bearing destructively cleaning it up — does a restart from the exact
+    // clean base succeed again.
+    await rm(mutatedPath);
+    mutate = false;
+    const third = await service.execute({ ...input, runId: "role-boundary-retry" });
+    expect(third.status).toBe("question");
+  });
+
+  it("issue 93: rejects a review dispatch whose reviewer shares identity with the run's product author", async () => {
+    const selection = { provider: "codex", model: "*", reasoning: "medium" };
+    const run = resolved(selection);
+    const crewmateIdentity = run.roles.find((role) => role.role === "crewmate")?.identity;
+    expect(crewmateIdentity).toBeDefined();
+    const collidedRun: ResolvedRun = { ...run, roles: run.roles.map((role) => role.role === "surveyor" ? { ...role, identity: crewmateIdentity! } : role) };
+    const input = await request({ stage: "review", selection, run: collidedRun });
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"action","summary":"No findings.","artifacts":[]}'));
+    expect(await new JourneyService(runner).execute(input)).toEqual({ status: "failure", code: "role_boundary_violation", tokens: 0 });
+    expect(runner.calls).toHaveLength(0);
+  });
+
+  it("bounds the aggregate of coordinator plus Crewmate tokens by the coordinator's per-call ceiling", async () => {
+    const input = await request({ stage: "execute-expedition", planDirectory: "docs/plans/import", runId: "token-ceiling" });
+    await writePlanningPackage(input.repositoryPath);
+    const calls: ProcessInvocation[] = [];
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      run: async (invocation) => {
+        calls.push(invocation);
+        // resolved(selection) grants a 500_000 tokenBudget; the coordinator alone stays under it.
+        if (calls.length === 1) return completed('BEARING_RESULT {"kind":"question","question":"Coordination handoff ready."}', 499_995);
+        // The Crewmate's own usage (10) is well under 500_000, but summed with the coordinator's
+        // 499_995 it pushes the journey call 5 tokens over the advertised per-call ceiling.
+        return completed('BEARING_RESULT {"kind":"question","question":"Crewmate progress."}', 10);
+      },
+    };
+    expect(await new JourneyService(runner).execute(input)).toEqual({
+      status: "failure",
+      code: "token_budget",
+      tokens: 500_005,
+      selectedScope: { currentSlice: "1.1", remainingSlices: ["1.1"], allowedPaths: ["docs/plans/import/review.html", "src/import.ts"], seitCommandIds: ["CMD-UNIT"] },
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("does not dispatch the Crewmate when cancellation lands right after the coordinator returns", async () => {
+    const input = await request({ stage: "execute-expedition", planDirectory: "docs/plans/import", runId: "cancel-between-dispatches" });
+    await writePlanningPackage(input.repositoryPath);
+    const calls: ProcessInvocation[] = [];
+    let service!: JourneyService;
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      run: async (invocation) => {
+        calls.push(invocation);
+        if (calls.length === 1) {
+          // Simulate the owner (or a working cancel hook) stopping the run while the coordinator
+          // was still in flight; this.cancelled becomes true before the coordinator call returns.
+          service.cancel(input.runId);
+          return completed('BEARING_RESULT {"kind":"question","question":"Coordination handoff ready."}', 3);
+        }
+        return completed('BEARING_RESULT {"kind":"question","question":"Crewmate dispatched despite cancellation."}', 4);
+      },
+    };
+    service = new JourneyService(runner);
+    expect(await service.execute(input)).toEqual({
+      status: "failure",
+      code: "cancelled",
+      tokens: 3,
+      selectedScope: { currentSlice: "1.1", remainingSlices: ["1.1"], allowedPaths: ["docs/plans/import/review.html", "src/import.ts"], seitCommandIds: ["CMD-UNIT"] },
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("retains the Crewmate's providerSessionId so a resumed dispatch can continue it", async () => {
+    const crewmateSession = "019f8d4e-a637-7e71-8c76-af9d7ec91adf";
+    const input = await request({ stage: "execute-expedition", planDirectory: "docs/plans/import", runId: "resume-crewmate" });
+    await writePlanningPackage(input.repositoryPath);
+    const calls: ProcessInvocation[] = [];
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      run: async (invocation) => {
+        calls.push(invocation);
+        const turn = calls.length;
+        if (turn === 1 || turn === 3) return completed('BEARING_RESULT {"kind":"question","question":"Coordination handoff ready."}', 2);
+        if (turn === 2) return { ...completed('BEARING_RESULT {"kind":"question","question":"Crewmate progress."}', 3), providerSessionId: crewmateSession };
+        return completed('BEARING_RESULT {"kind":"question","question":"Crewmate resumed."}', 4);
+      },
+    };
+    const service = new JourneyService(runner);
+    expect((await service.execute(input)).status).toBe("question");
+    expect((await service.execute(input)).status).toBe("question");
+    expect(calls).toHaveLength(4);
+    expect(calls[3].providerSessionId).toBe(crewmateSession);
+  });
+
+  it("evicts only the Crewmate's stale session on session_unavailable, leaving the coordinator's session resumable", async () => {
+    const coordinatorThread = "019f8d4e-a637-7e71-8c76-af9d7ec91ad1";
+    const deadCrewmateThread = "019f8d4e-a637-7e71-8c76-af9d7ec91ad2";
+    const input = await request({ stage: "execute-expedition", planDirectory: "docs/plans/import", runId: "stale-crewmate-session" });
+    await writePlanningPackage(input.repositoryPath);
+    const calls: ProcessInvocation[] = [];
+    const staleFailure = { exitCode: 1, sideEffectFree: true, error: { stderr: `Session not found for thread_id: ${deadCrewmateThread}` } } as const;
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      run: async (invocation) => {
+        calls.push(invocation);
+        const turn = calls.length;
+        // Turn 1: coordinator's first (fresh) dispatch seeds a healthy coordinator session.
+        if (turn === 1) return { ...completed('BEARING_RESULT {"kind":"question","question":"Coordination handoff ready."}', 2), providerSessionId: coordinatorThread };
+        // Turn 2: Crewmate's first (fresh) dispatch seeds a session that will go stale.
+        if (turn === 2) return { ...completed('BEARING_RESULT {"kind":"question","question":"Crewmate progress."}', 3), providerSessionId: deadCrewmateThread };
+        // Turn 3: second top-level call resumes the coordinator's still-healthy session.
+        if (turn === 3) return completed('BEARING_RESULT {"kind":"question","question":"Coordination handoff ready."}', 2);
+        // Turns 4-5: the Crewmate's resume attempt hits the stale session and fails; the adapter's
+        // own sideEffectFree retry (maxRetries: 1) repeats the same failing resume once before
+        // surfacing session_unavailable to the journey layer.
+        if (turn === 4 || turn === 5) return staleFailure;
+        // Turn 6: the fresh-session-fallback retry re-dispatches the coordinator.
+        if (turn === 6) return completed('BEARING_RESULT {"kind":"question","question":"Coordination handoff ready."}', 2);
+        // Turn 7: the fresh-session-fallback retry re-dispatches the Crewmate.
+        return completed('BEARING_RESULT {"kind":"question","question":"Crewmate resumed fresh."}', 4);
+      },
+    };
+    const service = new JourneyService(runner);
+    expect((await service.execute(input)).status).toBe("question");
+    const result = await service.execute(input);
+    expect(result).toMatchObject({ status: "question", sessionContinuity: "lost" });
+    expect(calls).toHaveLength(7);
+    // The Crewmate's stale resume was attempted (and internally retried) against the dead session.
+    expect(calls[3]?.args).toEqual(expect.arrayContaining(["exec", "resume", deadCrewmateThread]));
+    expect(calls[4]?.args).toEqual(expect.arrayContaining(["exec", "resume", deadCrewmateThread]));
+    // The coordinator's own session was never evicted, so the fallback retry still resumes it.
+    expect(calls[5]?.args).toEqual(expect.arrayContaining(["exec", "resume", coordinatorThread]));
+    // The dead Crewmate session must be evicted, not resumed a second time.
+    expect(calls[6]?.args).not.toContain("resume");
+    expect(calls[6]?.args).not.toContain(deadCrewmateThread);
+  });
+
+  it("requires an explicit selector for multi-slice Expedition while preserving one-slice compatibility", async () => {
+    const missing = await request({ stage: "execute-expedition", planDirectory: "docs/plans/import" });
+    await writeMultiSlicePlanningPackage(missing.repositoryPath);
+    const missingRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"unused"}'));
+    expect(await new JourneyService(missingRunner).execute(missing)).toEqual({ status: "failure", code: "focus_invalid", tokens: 0 });
+    expect(missingRunner.calls).toHaveLength(0);
+
+    const invalid = { ...missing, currentSlice: "../1.2", runId: "invalid-slice" };
+    expect(await new JourneyService(missingRunner).execute(invalid)).toEqual({ status: "failure", code: "input_invalid", tokens: 0 });
+    expect(missingRunner.calls).toHaveLength(0);
+
+    const oneSlice = await request({ stage: "execute-expedition", planDirectory: "docs/plans/import", runId: "one-slice" });
+    await writePlanningPackage(oneSlice.repositoryPath);
+    const compatibleRunner = new QueueRunner([
+      completed('BEARING_RESULT {"kind":"question","question":"One-slice handoff ready."}', 2),
+      completed('BEARING_RESULT {"kind":"question","question":"Continue with the selected slice?"}', 3),
+    ]);
+    expect(await new JourneyService(compatibleRunner).execute(oneSlice)).toEqual({
+      status: "question",
+      question: "Continue with the selected slice?",
+      tokens: 5,
+      selectedScope: { currentSlice: "1.1", remainingSlices: ["1.1"], allowedPaths: ["docs/plans/import/review.html", "src/import.ts"], seitCommandIds: ["CMD-UNIT"] },
+    });
+    expect(compatibleRunner.calls).toHaveLength(2);
+  });
+
+  it("issue 59: planning-only validation excludes tracked-output mutation commands", async () => {
+    const planningRunner = new StubRunner(completed('BEARING_RESULT {"kind":"questions","questions":[]}'));
+    expect((await new JourneyService(planningRunner).execute(await request({ gatherMode: "questions", priorOwnerQa: [] }))).status).toBe("question");
+    expect(planningRunner.calls[0].stdin).toContain("Planning-only validation must not run build, dist-guard, formatters, or any command known to mutate tracked output.");
+
+    const executionRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Continue?"}'));
+    const execution = await request({ stage: "execute-explorer", planDirectory: "docs/plans/import" });
+    await writePlanningPackage(execution.repositoryPath);
+    expect((await new JourneyService(executionRunner).execute(execution)).status).toBe("question");
+    expect(executionRunner.calls[0].stdin).toContain("Run only the selected slice commands during Focus; defer build and dist-guard to integrated closeout after Focus validates.");
+  });
+
+  it("fails planning-only work closed when the delegated runner mutates tracked output", async () => {
+    const input = await request({ gatherMode: "apply", planDirectory: "docs/plans/import" });
+    await Promise.all([
+      mkdir(join(input.repositoryPath, "dist"), { recursive: true }),
+      mkdir(join(input.repositoryPath, input.planDirectory!), { recursive: true }),
+    ]);
+    await writeFile(join(input.repositoryPath, "dist/cli.js"), "export const built = 'baseline';\n");
+    await exec("git", ["add", "dist/cli.js"], { cwd: input.repositoryPath });
+    await exec("git", ["-c", "user.name=Bearing Test", "-c", "user.email=bearing@example.invalid", "commit", "-qm", "tracked baseline"], { cwd: input.repositoryPath });
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      run: async (invocation) => {
+        await mkdir(join(invocation.cwd, input.planDirectory!), { recursive: true });
+        await Promise.all([
+          writeFile(join(invocation.cwd, "dist/cli.js"), "export const built = 'mutated';\n"),
+          writeFile(join(invocation.cwd, input.planDirectory!, "plan-spec.md"), planFixture),
+        ]);
+        return completed('BEARING_RESULT {"kind":"action","summary":"Plan saved.","artifacts":["docs/plans/import/plan-spec.md"]}');
+      },
+    };
+
+    expect(await new JourneyService(runner).execute(input)).toEqual({ status: "failure", code: "completion_invalid", tokens: 5 });
+    await expect(readFile(join(input.repositoryPath, "dist/cli.js"), "utf8")).resolves.toBe("export const built = 'mutated';\n");
   });
 
   it("preserves Agy's required online authority during the actual journey", async () => {
@@ -1417,7 +1838,7 @@ describe("JourneyService", () => {
     for (const [stage, names] of Object.entries(skills) as [Exclude<JourneyStage, "review">, readonly string[]][]) {
       const runner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Continue?"}'));
       const execution = stage === "execute-explorer" || stage === "execute-expedition";
-      const input = await request({ stage, ...(execution ? { planDirectory: "docs/plans/import" } : {}) });
+      const input = await request({ stage, ...(execution ? { planDirectory: "docs/plans/import" } : {}), ...(stage === "execute-expedition" ? { currentSlice: "1.1" } : {}) });
       if (execution) await writePlanningPackage(input.repositoryPath);
       expect((await new JourneyService(runner).execute(input)).status).toBe("question");
       for (const name of names) expect(runner.calls[0].stdin).toContain(`### ${name}\n---\nname: ${name}`);
@@ -1436,12 +1857,11 @@ describe("JourneyService", () => {
   });
 
   it("uses the read-only Surveyor fallback for a harness without native review", async () => {
-    const selection = { provider: "grok", model: "grok-build", reasoning: "medium" };
+    const selection = { provider: "opencode", model: "*", reasoning: "medium" };
     const runner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Should this finding block release?"}'));
     expect((await new JourneyService(runner).execute(await request({ stage: "review", selection, run: resolved(selection), reviewPrompt: "Focus on authentication boundaries." }))).status).toBe("question");
-    expect(runner.calls[0].args).toEqual(expect.arrayContaining(["--tools", "read", "--sandbox", "strict"]));
-    expect(runner.calls[0].args).toContain("--disable-web-search");
-    expect(runner.calls[0].args.join(" ")).not.toMatch(/write|edit/);
+    const permission = JSON.parse((runner.calls[0].environment as { OPENCODE_PERMISSION: string }).OPENCODE_PERMISSION);
+    expect(permission).toMatchObject({ read: "allow", edit: "deny", bash: "deny", webfetch: "deny", websearch: "deny" });
     expect(runner.calls[0].stdin).toContain("Focus on authentication boundaries.");
   });
 
@@ -1476,6 +1896,16 @@ describe("JourneyService", () => {
     const baseline = await readFile(join(input.repositoryPath, input.planDirectory!, "review.html"), "utf8");
     expect(baseline.match(/<section id="bearing-final-qa" data-status="pending">/g)).toHaveLength(1);
     expect(baseline).not.toContain('<section id="bearing-final-qa" data-status="complete">');
+  });
+
+  it("instructs draft-implementation to honor the recorded Role routes and block as an owner decision instead of drafting when it is missing", async () => {
+    const input = await request({ stage: "draft-implementation", planDirectory: "docs/plans/import" });
+    await writeDesignPackage(input.repositoryPath);
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Which agent routes fill each role?"}'));
+    const result = await new JourneyService(runner).execute(input);
+    expect(result.status).toBe("question");
+    expect(runner.calls[0].stdin).toContain('Read the plan\'s recorded "## Role routes" decision and honor those exact primary and ordered fallback routes for delegation');
+    expect(runner.calls[0].stdin).toContain("never substitute the onboarding provider or model selection when a role route is missing");
   });
 
   it("repairs a stale final review with exact current planning sources", async () => {
@@ -1583,7 +2013,7 @@ describe("JourneyService", () => {
       summary: "Execution complete.",
       artifacts,
       tokens: 5,
-      verification: { verdict: "PASS", reasons: [], escalation: "none" },
+      verification: { verdict: "PASS", reasons: [], escalation: "none", completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }] },
     });
     const retained = await readFile(reviewPath, "utf8");
     for (const [name, source] of [["plan-spec.md", planFixture], ["design.md", designFixture], ["seit.md", seitFixture], ["implementation.md", implementationFixture]]) {
@@ -1716,7 +2146,7 @@ describe("JourneyService", () => {
     };
     const receipt = completed('BEARING_RESULT {"kind":"action","summary":"Implementation plan drafted.","artifacts":["docs/plans/import/implementation.md","docs/plans/import/review.html"]}');
 
-    for (const [model, reasoning] of [["Codex agent default", "max"], ["Codex agent default", "ultra"], ["Agy", "thinking"], ["OpenCode", "default"], ["OpenCode", "none"], ["OpenCode", "minimal"], ["Pi", "off"], ["Grok Build", "high"], ["grok-safe (grok-build)", "high"]]) {
+    for (const [model, reasoning] of [["Codex agent default", "max"], ["Codex agent default", "ultra"], ["Agy", "thinking"], ["OpenCode", "default"], ["OpenCode", "none"], ["OpenCode", "minimal"], ["Pi", "off"]]) {
       await writeSlice(model, reasoning, "full");
       expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "action", planningReview: { assignments: [{ model, reasoning }] } });
     }
@@ -1728,13 +2158,13 @@ describe("JourneyService", () => {
     }
     await writeSlice("Codex agent default", "medium", "off — documentation-only slice");
     expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "failure", code: "artifact_invalid" });
-    await writeSlice("Gork Build", "high", "full");
+    await writeSlice("Custom Modle", "high", "full");
     expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "failure", code: "artifact_invalid" });
-    await writeSlice("Grok Build", "ultra", "full");
+    await writeSlice("Custom Model", "ultra", "full");
     expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "failure", code: "artifact_invalid" });
-    await writeSlice("Grok Build", "high", "half");
+    await writeSlice("Custom Model", "high", "half");
     expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "failure", code: "artifact_invalid" });
-    await writeSlice("Grok Build", "high", "partial");
+    await writeSlice("Custom Model", "high", "partial");
     expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "failure", code: "artifact_invalid" });
   });
 
@@ -1903,7 +2333,23 @@ describe("JourneyService", () => {
     const service = new JourneyService(runner);
 
     expect((await service.execute({ ...input, stage: "gather-supplies" })).status).toBe("question");
-    expect(await service.execute(input)).toEqual({ status: "failure", code: "artifact_invalid", tokens: 7, sessionContinuity: "lost" });
+    // The fallback wrote documents with no frontmatter and no required exact heading, so the
+    // map-route failure now carries one bounded structural finding per invalid fact (issue 78).
+    expect(await service.execute(input)).toEqual({
+      status: "failure",
+      code: "artifact_invalid",
+      findings: [
+        { code: "artifact_frontmatter_invalid", severity: "amendment", artifact: "design.md", observed: "frontmatter block missing", required: "type: design and status: complete or amended", remedy: "repair the artifact frontmatter" },
+        { code: "design_section_missing", severity: "amendment", artifact: "design.md", observed: "Use Cases and Communication Flows", required: "non-empty Use Cases and Communication Flows section", remedy: "add the Use Cases and Communication Flows section" },
+        { code: "design_section_missing", severity: "amendment", artifact: "design.md", observed: "Interface Option Check", required: "non-empty Interface Option Check section", remedy: "add the Interface Option Check section" },
+        { code: "design_section_missing", severity: "amendment", artifact: "design.md", observed: "OOPDSA Implementation Design", required: "non-empty OOPDSA Implementation Design section", remedy: "add the OOPDSA Implementation Design section" },
+        { code: "artifact_frontmatter_invalid", severity: "amendment", artifact: "seit.md", observed: "frontmatter block missing", required: "type: seit and status: complete or amended", remedy: "repair the artifact frontmatter" },
+        { code: "seit_section_missing", severity: "amendment", artifact: "seit.md", observed: "Traceability Matrix", required: "non-empty Traceability Matrix section", remedy: "add the Traceability Matrix section" },
+        { code: "seit_section_missing", severity: "amendment", artifact: "seit.md", observed: "Cross-cutting Checks", required: "non-empty Cross-cutting Checks section", remedy: "add the Cross-cutting Checks section" },
+      ],
+      tokens: 7,
+      sessionContinuity: "lost",
+    });
     expect(calls).toHaveLength(4);
   });
 
@@ -2139,5 +2585,20 @@ describe("JourneyService", () => {
 
     const reviewRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Block release?"}', 500_001));
     expect(await new JourneyService(reviewRunner).execute(await request({ stage: "review" }))).toEqual({ status: "failure", code: "token_budget", tokens: 500_001 });
+  });
+
+  it("supplies a deterministic free-text question for OWNER_DECISION_REQUIRED recon results (regression for browser owner decision form)", () => {
+    // This test will fail until reconOwnerDecisionQuestion helper and owner-decision form path are added.
+    const ownerDecisionRecon = {
+      state: "OWNER_DECISION_REQUIRED" as const,
+      brief: { assumptionId: "mat-1", assumption: "change is material", materiality: ["architecture"], falsificationCriterion: "c", smallestExperiment: "e", writeSet: [], evidenceCommandIds: [], timeboxMinutes: 5 },
+      report: { assumptionId: "mat-1", measurements: [], feasibilityEvidence: [], constraints: [], rejectedOptions: [], recommendation: "revise" as const, materialChange: { architecture: true, cost: false, scope: false, risk: false }, prototypePaths: [], productionEligible: false as const },
+    };
+    const q = reconOwnerDecisionQuestion(ownerDecisionRecon);
+    expect(typeof q).toBe("string");
+    expect(q.length).toBeGreaterThan(10);
+    expect(q).toContain("material change");
+    expect(q).toContain("revise");
+    expect(q.toLowerCase()).toContain("decision");
   });
 });

@@ -20,6 +20,10 @@ const RETRY_CODES = Object.freeze([
     ...RETRY_REFUSALS,
     "escalation_required",
 ]);
+const TOKEN_BUDGET_STATES = Object.freeze(["within_budget", "exhausted"]);
+const RECOVERY_OUTCOMES = Object.freeze(["repaired", "stopped"]);
+const MAX_TOKEN_TOTAL = Number.MAX_SAFE_INTEGER;
+const MAX_RECOVERY_ATTEMPTS = 16;
 function object(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -30,16 +34,6 @@ function nonNegativeInteger(value) {
     return typeof value === "number"
         && Number.isSafeInteger(value)
         && value >= 0;
-}
-function exhaustedBudget(value) {
-    if (!object(value))
-        return false;
-    const used = own(value, "used");
-    const budget = own(value, "budget");
-    return nonNegativeInteger(used)
-        && nonNegativeInteger(budget)
-        && budget > 0
-        && used >= budget;
 }
 function retryEvidence(value) {
     if (!Array.isArray(value)) {
@@ -68,21 +62,63 @@ function retryEvidence(value) {
     }
     return { equivalentFailuresRepeated, retryRefused };
 }
+function tokenAndRecoveryEvidence(value) {
+    if (!Array.isArray(value))
+        return { tokenBudgetExhausted: false, recoveryRepeated: false };
+    let tokenEvidenceValid = true;
+    let exhaustedObserved = false;
+    let recoveryCount = 0;
+    for (const candidate of value) {
+        if (!object(candidate))
+            continue;
+        const signal = own(candidate, "signal");
+        if (signal === "token_usage") {
+            const code = own(candidate, "code");
+            const tokens = own(candidate, "tokens");
+            const budget = own(candidate, "budget");
+            if (!TOKEN_BUDGET_STATES.some((allowed) => allowed === code)
+                || !nonNegativeInteger(tokens)
+                || tokens > MAX_TOKEN_TOTAL
+                || !nonNegativeInteger(budget)
+                || budget === 0) {
+                tokenEvidenceValid = false;
+                continue;
+            }
+            if (code === "exhausted" && tokens <= budget) {
+                tokenEvidenceValid = false;
+                continue;
+            }
+            if (code === "exhausted")
+                exhaustedObserved = true;
+            continue;
+        }
+        if (signal === "recovery") {
+            const code = own(candidate, "code");
+            const attempts = own(candidate, "attempts");
+            if (RECOVERY_OUTCOMES.some((allowed) => allowed === code)
+                && nonNegativeInteger(attempts)
+                && attempts > 0
+                && attempts <= MAX_RECOVERY_ATTEMPTS)
+                recoveryCount += attempts;
+        }
+    }
+    return { tokenBudgetExhausted: tokenEvidenceValid && exhaustedObserved, recoveryRepeated: recoveryCount >= 2 };
+}
 export function detectDegradation(input) {
     if (!object(input))
         return NO_SIGNAL;
     try {
         const outcomes = own(input, "outcomes");
         const retry = retryEvidence(outcomes);
-        const recoveryCount = own(input, "recoveryCount");
+        const tokenAndRecovery = tokenAndRecoveryEvidence(outcomes);
         const reasons = [];
-        if (exhaustedBudget(own(input, "tokenBudget"))) {
+        if (tokenAndRecovery.tokenBudgetExhausted) {
             reasons.push("token_budget_exhausted");
         }
         if (retry.equivalentFailuresRepeated) {
             reasons.push("equivalent_failures_repeated");
         }
-        if (nonNegativeInteger(recoveryCount) && recoveryCount >= 2) {
+        if (tokenAndRecovery.recoveryRepeated) {
             reasons.push("recovery_repeated");
         }
         if (retry.retryRefused) {

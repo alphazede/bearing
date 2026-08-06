@@ -29,10 +29,16 @@ export interface ValidatorScope {
   readonly readinessClaims: readonly ValidatorReadinessClaim[];
 }
 
+export interface ValidatorCompletedSlice {
+  readonly sliceId: string;
+  readonly requirementIds: readonly string[];
+}
+
 export interface ValidatorReport {
   readonly verdict: ValidatorVerdict;
   readonly reasons: readonly ValidatorReason[];
   readonly escalation: ValidatorEscalation;
+  readonly completedSlices: readonly ValidatorCompletedSlice[];
 }
 
 export const INHERITED_REASON_VERDICTS: Readonly<Record<FocusCompletionReason, ValidatorVerdict>> = {
@@ -120,5 +126,18 @@ export function validateScope(scope: ValidatorScope): ValidatorReport {
   }
 
   const verdict = composeValidatorVerdict(reasons);
-  return { verdict, reasons, escalation: deriveValidatorEscalation(verdict, reasons) };
+  const completedRequirements = new Map<string, Set<string>>();
+  for (const slice of scope.slices) {
+    if (slice.completion?.ok !== true) continue;
+    const requirements = completedRequirements.get(slice.sliceId) ?? new Set<string>();
+    for (const requirementId of slice.requirementIds) requirements.add(requirementId);
+    completedRequirements.set(slice.sliceId, requirements);
+  }
+  const completedSlices = [...completedRequirements.entries()]
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([sliceId, requirementIds]) => ({
+      sliceId,
+      requirementIds: [...requirementIds].sort((left, right) => left < right ? -1 : left > right ? 1 : 0),
+    }));
+  return { verdict, reasons, escalation: deriveValidatorEscalation(verdict, reasons), completedSlices };
 }

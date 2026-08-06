@@ -589,4 +589,25 @@ describe("repository busy lease", () => {
       .rejects.toThrow(/workspace.*symlink|outside/i);
     await expect(access(join(outside, "busy-lease.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("refuses busy lease state inspection when .bearing is symlinked outside", async () => {
+    const { base, root } = await repository();
+    const outside = join(base, "outside-busy");
+    await mkdir(outside);
+    await symlink(outside, join(root, ".bearing"));
+
+    let storeCalls = 0;
+    await expect(workspacePrune({
+      repository: root,
+      policy: { maxAgeDays: 1 },
+    }, {
+      git: cleanGit(root),
+      now: () => NOW,
+      storeFactory: () => {
+        storeCalls += 1;
+        throw new Error("store must not be reached");
+      },
+    })).rejects.toThrow(/busy lease.*unreadable or ambiguous/i);
+    expect(storeCalls).toBe(0);
+  });
 });

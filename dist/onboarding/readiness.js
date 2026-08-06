@@ -26,7 +26,7 @@ const BASE_PROFILE = (() => {
         roles: ["navigator", "explorer", "crewmate", "surveyor"],
         toolAllow: ["read", "search", "write"],
         toolDeny: ["external-action"],
-        authority: { read: true, write: true, network: true, workspace: true, externalAction: false },
+        authority: { read: true, write: true, network: false, workspace: true, externalAction: false },
         enabledSkills: [],
         context: "off",
         systemPromptRef: "bearing/default",
@@ -159,14 +159,17 @@ export class ReadinessService {
             return { status: "blocked", detected: false, verified: false, code: "selection_unavailable", repair: "choose_detected_route" };
         }
         const providerSelection = { ...routeSelection, reasoning: REASONING_PROVIDER_MAP[routeSelection.reasoning][provider] };
+        const authorityRun = provider === "agy"
+            ? { ...resolved.value, roles: resolved.value.roles.map((role) => ({ ...role, authority: { ...role.authority, network: true } })) }
+            : resolved.value;
         const route = descriptor(providerSelection);
         const detected = route ? this.inspection.executableAvailable(route.executable) : false;
         const models = route && detected ? this.discover(route.id, repositoryPath, true) : undefined;
         const selectedModel = models?.find(({ model }) => model === providerSelection.model);
         const run = this.inspection.modelOptions === undefined
-            ? resolved.value
+            ? authorityRun
             : route && selectedModel
-                ? clampRunToModel(resolved.value, selectedModel.reasoningLevels.filter((level) => route.reasoningLevels.includes(level)))
+                ? clampRunToModel(authorityRun, selectedModel.reasoningLevels.filter((level) => route.reasoningLevels.includes(level)))
                 : undefined;
         if (!route || !detected || !models || !run) {
             return { status: "blocked", detected, verified: false, code: "selection_unavailable", repair: "choose_detected_route" };

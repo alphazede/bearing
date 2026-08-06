@@ -44,6 +44,7 @@ export interface MetricInputs {
     readonly groundTruth?: "pass" | "fail";
   }[];
   readonly completedSlices: readonly {
+    readonly runRef?: string;
     readonly sliceRef: string;
     readonly sequence: number;
     readonly requirementRefs: readonly string[];
@@ -52,9 +53,15 @@ export interface MetricInputs {
     readonly sliceRef: string;
     readonly sequence: number;
   }[];
-  readonly tokenReports: readonly {
+  readonly reviewedSlices?: readonly {
+    readonly sliceRef: string;
+    readonly sequence: number;
+  }[];
+  readonly tokenReports?: readonly {
+    readonly runRef?: string;
     readonly tokens: number;
   }[];
+  readonly tokenCoverageComplete?: boolean;
 }
 
 export interface MetricSet {
@@ -161,9 +168,11 @@ function gradingAccuracy(
 function acceptedCriteria(input: MetricInputs["completedSlices"]): {
   readonly denominator: number;
   readonly completedAt: ReadonlyMap<string, number>;
+  readonly contributingRunRefs: ReadonlySet<string>;
 } {
   const completedAt = new Map<string, number>();
   const requirementRefs = new Map<string, ReadonlySet<string>>();
+  const contributingRunRefs = new Set<string>();
   for (const completion of input) {
     if (!reference(completion.sliceRef)
       || !nonNegativeInteger(completion.sequence)
@@ -174,10 +183,11 @@ function acceptedCriteria(input: MetricInputs["completedSlices"]): {
     if (previous !== undefined && previous <= completion.sequence) continue;
     completedAt.set(completion.sliceRef, completion.sequence);
     requirementRefs.set(completion.sliceRef, refs);
+    contributingRunRefs.add(completion.runRef ?? "");
   }
   let denominator = 0;
   for (const refs of requirementRefs.values()) denominator += refs.size;
-  return { denominator, completedAt };
+  return { denominator, completedAt, contributingRunRefs };
 }
 
 function escapedDefects(
@@ -196,13 +206,24 @@ function escapedDefects(
 
 function costPerAcceptedCriterion(
   input: MetricInputs["tokenReports"],
-  denominator: number,
+  criteria: ReturnType<typeof acceptedCriteria>,
+  coverageComplete: boolean,
 ): MetricValue {
   let numerator = 0;
-  for (const report of input) {
-    if (nonNegativeInteger(report.tokens)) numerator += report.tokens;
+  const coveredRunRefs = new Set<string>();
+  let valid = Array.isArray(input) && coverageComplete;
+  for (const report of input ?? []) {
+    if (!nonNegativeInteger(report.tokens)
+      || report.tokens > Number.MAX_SAFE_INTEGER - numerator) {
+      valid = false;
+      continue;
+    }
+    numerator += report.tokens;
+    coveredRunRefs.add(report.runRef ?? "");
   }
-  return metric("cost-per-accepted-criterion", numerator, denominator, true);
+  const complete = valid
+    && [...criteria.contributingRunRefs].every((runRef) => coveredRunRefs.has(runRef));
+  return metric("cost-per-accepted-criterion", numerator, criteria.denominator, complete);
 }
 
 /** Pure computation of the five R6.3 metrics over structured ledger facts. */
@@ -213,6 +234,11 @@ export function computeMetrics(input: MetricInputs): MetricSet {
     : [];
   const findingSignalsAvailable = Object.hasOwn(input, "confirmedFindings")
     && Array.isArray(input.confirmedFindings);
+  const reviewed = new Set((input.reviewedSlices ?? [])
+    .filter((entry) => reference(entry.sliceRef) && nonNegativeInteger(entry.sequence))
+    .map((entry) => entry.sliceRef));
+  const reviewCoverageAvailable = criteria.completedAt.size > 0
+    && [...criteria.completedAt.keys()].every((sliceRef) => reviewed.has(sliceRef));
   return Object.freeze({
     coordinationOverhead: coordinationOverhead(input.coordination),
     firstPassSuccess: firstPassSuccess(input.sliceAttempts),
@@ -220,11 +246,12 @@ export function computeMetrics(input: MetricInputs): MetricSet {
     escapedDefects: escapedDefects(
       findingSignalsAvailable ? input.confirmedFindings : [],
       criteria,
-      findingSignalsAvailable,
+      findingSignalsAvailable && reviewCoverageAvailable,
     ),
     costPerAcceptedCriterion: costPerAcceptedCriterion(
       input.tokenReports,
-      criteria.denominator,
+      criteria,
+      input.tokenCoverageComplete !== false,
     ),
   });
 }

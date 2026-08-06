@@ -1,5 +1,6 @@
 import { posix, win32 } from "node:path";
 import { canonicalStringify, hashEvent } from "./run.js";
+import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 import { provenIndependent } from "../execution/concurrency-control.js";
 import { REASONING_TIERS } from "../profile/reasoning-policy.js";
 export const EXECUTION_CONTRACT_SCHEMA_VERSION = 1;
@@ -9,6 +10,10 @@ const MAX_SLICE_ID = 128;
 const COMMAND_ID = /^(?:CMD|PROC)-[A-Z0-9][A-Z0-9.-]*$/;
 const HASH = /^[a-f0-9]{64}$/;
 const SLICE_ID = /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/;
+/** Required delegation roles a guided run must route before wave artifacts exist. */
+export const ROLE_KINDS = ["execution-author", "review-general", "review-security"];
+/** The built-in read-only reviewer, authorized only as a review-role fallback, never a primary or author route. */
+export const SURVEYOR_FALLBACK_ROUTE = "surveyor";
 function isObject(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -99,6 +104,35 @@ function sliceShape(value) {
 function edgeShape(value) {
     return hasExactKeys(value, ["from", "to"]) && focusSliceId(value.from) && focusSliceId(value.to);
 }
+const AGENT_ROUTE_IDS = new Set(BUILTIN_ROUTES.map((route) => route.id));
+function agentRouteId(value) {
+    return typeof value === "string" && AGENT_ROUTE_IDS.has(value);
+}
+// Surveyor is a built-in read-only reviewer, never an author: it may fill a review
+// fallback slot but is refused as a primary route or as the execution-author's fallback.
+function fallbackRouteId(role, value) {
+    return agentRouteId(value) || (role !== "execution-author" && value === SURVEYOR_FALLBACK_ROUTE);
+}
+function roleRouteShape(value) {
+    if (!hasExactKeys(value, ["role", "primary", "fallbacks"]))
+        return false;
+    if (typeof value.role !== "string" || !ROLE_KINDS.includes(value.role))
+        return false;
+    const role = value.role;
+    if (!agentRouteId(value.primary))
+        return false;
+    if (!denseArray(value.fallbacks, (item) => fallbackRouteId(role, item)))
+        return false;
+    const fallbacks = value.fallbacks;
+    return !duplicate(fallbacks) && !fallbacks.includes(value.primary);
+}
+/** Exactly one route per required role: no duplicate, missing, or extra role. */
+export function roleRoutesShape(value) {
+    if (!denseArray(value, roleRouteShape) || value.length !== ROLE_KINDS.length)
+        return false;
+    const roles = new Set(value.map((route) => route.role));
+    return roles.size === ROLE_KINDS.length && ROLE_KINDS.every((kind) => roles.has(kind));
+}
 function approvalShape(value) {
     return hasExactKeys(value, ["kind", "recordedBy", "durable", "recordId", "contentHash"])
         && value.kind === "owner-approval"
@@ -115,6 +149,19 @@ function approvalShape(value) {
 export function hashExecutionContractBody(body) {
     const canonicalBody = JSON.parse(canonicalStringify(body));
     return hashEvent(canonicalBody);
+}
+/**
+ * Canonical content hash for an owner-approved legacy role-route binding.
+ *
+ * This is an unkeyed integrity binding, not a signature and not an authorization token: it
+ * proves the routes recorded durably are byte-for-byte the routes the owner approved for this
+ * run id, so nothing can be substituted between approval and the ledger. It grants no
+ * authority on its own — anyone able to reach the binding path can compute it — and the
+ * caller's owner actor plus the run's contract state are what decide admission.
+ */
+export function hashLegacyRoleRoutes(runId, roleRoutes) {
+    const canonical = JSON.parse(canonicalStringify({ runId, roleRoutes }));
+    return hashEvent(canonical);
 }
 function bodyOf(contract) {
     const { contentHash: _hash, ownerApproval: _approval, ...body } = contract;
@@ -290,10 +337,10 @@ export function parseApprovedExecutionContract(value) {
     if (value.reviewCadence !== "per-slice" && value.reviewCadence !== "per-phase" && value.reviewCadence !== "completion-only") {
         return { ok: false, reason: "invalid_review_cadence" };
     }
-    if (!hasExactKeys(value, [
+    if (!hasAllowedKeys(value, [
         "schemaVersion", "contractId", "runId", "planDirectory", "objective", "mode",
         "reviewCadence", "phases", "slices", "dependencyEdges", "contentHash", "ownerApproval",
-    ])
+    ], ["roleRoutes"])
         || !boundedText(value.contractId)
         || !boundedText(value.runId)
         || !repoRelativePath(value.planDirectory)
@@ -305,7 +352,8 @@ export function parseApprovedExecutionContract(value) {
         || !denseArray(value.dependencyEdges, edgeShape)
         || typeof value.contentHash !== "string"
         || !HASH.test(value.contentHash)
-        || !approvalShape(value.ownerApproval)) {
+        || !approvalShape(value.ownerApproval)
+        || (value.roleRoutes !== undefined && !roleRoutesShape(value.roleRoutes))) {
         return { ok: false, reason: "malformed" };
     }
     const contract = value;

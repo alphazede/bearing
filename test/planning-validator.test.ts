@@ -338,14 +338,23 @@ describe("planning validator", () => {
     "Without credentials request is rejected",
     "a run with no terminal message does not fabricate one",
     "a session id never reaches argv",
+    "Invalid, expired, exhausted, replayed, revoked, or rate-limited code returns a generic denial and creates no entitlement; no code grants spend authority",
+    "an invalid code returns a generic denial",
+    "a replayed code creates no entitlement",
+    "the request is denied",
   ])("accepts an observable negative outcome: %s", (negativeCase) => {
     const result = validate({ seit: seit.replace("invalid input fails closed", negativeCase) });
 
     expect(result.findings).not.toContainEqual(expect.objectContaining({ code: "validation_missing" }));
   });
 
-  it("rejects a negative case that explicitly says no failure occurs", () => {
-    const result = validate({ seit: seit.replace("invalid input fails closed", "No failure occurs for the seeded defect") });
+  it.each([
+    "No failure occurs for the seeded defect",
+    "invalid input does not fail closed",
+    "denial is not returned for rate-limited codes",
+    "the run produces no error",
+  ])("rejects a negative case that does not describe observable failure: %s", (negativeCase) => {
+    const result = validate({ seit: seit.replace("invalid input fails closed", negativeCase) });
 
     expect(result.findings).toContainEqual(expect.objectContaining({ code: "validation_missing" }));
   });

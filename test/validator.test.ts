@@ -73,8 +73,46 @@ describe("validator inherited boundary", () => {
 });
 
 describe("validator scope sufficiency", () => {
+  it("exposes only completion-ok slices with deterministic requirement evidence", () => {
+    const report = validateScope({
+      slices: [
+        {
+          sliceId: "2.1",
+          requirementIds: ["RISK-2", "AC-2", "AC-2"],
+          evidenceCommandIds: [],
+          completion: { ok: true, changedPaths: ["src/two.ts"] },
+          evidence: [],
+        },
+        {
+          sliceId: "1.1",
+          requirementIds: ["AC-1"],
+          evidenceCommandIds: [],
+          completion: { ok: false, reason: "artifact_missing" },
+          evidence: [],
+        },
+        {
+          sliceId: "2.1",
+          requirementIds: ["AC-1"],
+          evidenceCommandIds: [],
+          completion: { ok: true, changedPaths: ["src/two-again.ts"] },
+          evidence: [],
+        },
+      ],
+      readinessClaims: [],
+    });
+
+    expect((report as unknown as { completedSlices: unknown }).completedSlices).toEqual([
+      { sliceId: "2.1", requirementIds: ["AC-1", "AC-2", "RISK-2"] },
+    ]);
+  });
+
   it("returns PASS with no escalation for a fully proven scope", () => {
-    expect(validateScope(provenScope())).toEqual({ verdict: "PASS", reasons: [], escalation: "none" });
+    expect(validateScope(provenScope())).toEqual({
+      verdict: "PASS",
+      reasons: [],
+      escalation: "none",
+      completedSlices: [{ sliceId: "4.2", requirementIds: ["AC-4.1", "AC-4.1b"] }],
+    });
   });
 
   it("marks a contract slice without a completion record as slice_unvalidated", () => {
@@ -97,6 +135,7 @@ describe("validator scope sufficiency", () => {
       verdict: "NEEDS_MORE_EVIDENCE",
       reasons: ["slice_unvalidated", "evidence_command_uncovered"],
       escalation: "re_execute_slice",
+      completedSlices: [{ sliceId: "4.2", requirementIds: ["AC-4.1", "AC-4.1b"] }],
     });
   });
 
@@ -130,6 +169,7 @@ describe("validator scope sufficiency", () => {
       verdict: "NEEDS_MORE_EVIDENCE",
       reasons: ["evidence_command_uncovered"],
       escalation: "re_execute_slice",
+      completedSlices: [{ sliceId: "4.2", requirementIds: ["AC-4.1", "AC-4.1b"] }],
     });
   });
 
@@ -158,6 +198,10 @@ describe("validator scope sufficiency", () => {
       verdict: "NEEDS_MORE_EVIDENCE",
       reasons: ["evidence_command_uncovered"],
       escalation: "re_execute_slice",
+      completedSlices: [
+        { sliceId: "A", requirementIds: ["REQ-A"] },
+        { sliceId: "B", requirementIds: ["REQ-B"] },
+      ],
     });
   });
 
@@ -172,6 +216,7 @@ describe("validator scope sufficiency", () => {
       verdict: "FAIL",
       reasons: ["unsupported_readiness_claim"],
       escalation: "owner_decision_required",
+      completedSlices: [{ sliceId: "4.2", requirementIds: ["AC-4.1", "AC-4.1b"] }],
     });
   });
 
@@ -180,6 +225,7 @@ describe("validator scope sufficiency", () => {
       verdict: "NEEDS_MORE_EVIDENCE",
       reasons: ["slice_unvalidated"],
       escalation: "re_execute_slice",
+      completedSlices: [],
     });
   });
 });

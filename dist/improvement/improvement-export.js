@@ -1,4 +1,4 @@
-import { realpath, writeFile } from "node:fs/promises";
+import { constants, link, open, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from "node:path";
 const MAX_ITEMS = 256;
 const MAX_TOKEN = 128;
@@ -156,11 +156,55 @@ export async function exportContributionBundle(input) {
     if (!contained(repositoryRoot, destinationParent)) {
         return { ok: false, reason: "destination_invalid" };
     }
+    // Bind every remaining step to the exact directory just verified above.
+    // Opening by pathname with O_DIRECTORY | O_NOFOLLOW fails closed (instead of
+    // silently following a symlink) if anything replaced destinationParent
+    // between the containment check and this call. Once open, the held
+    // descriptor is immune to later renames or symlink swaps of that pathname:
+    // every subsequent path below is expressed relative to this descriptor via
+    // the Linux /proc/self/fd magic-link, so nothing re-resolves the original
+    // pathname the way the previous implementation did.
+    let directory;
     try {
-        await writeFile(resolve(destinationParent, basename(input.destination)), serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
-        return { ok: true, destination: input.destination };
+        directory = await open(destinationParent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     }
     catch {
-        return { ok: false, reason: "export_failed" };
+        return { ok: false, reason: "destination_invalid" };
+    }
+    try {
+        const boundParent = `/proc/self/fd/${directory.fd}`;
+        const finalName = basename(input.destination);
+        const tempName = `.${finalName}.${process.pid}-${process.hrtime.bigint()}.tmp`;
+        const tempPath = `${boundParent}/${tempName}`;
+        let file;
+        try {
+            file = await open(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+        }
+        catch {
+            return { ok: false, reason: "export_failed" };
+        }
+        try {
+            try {
+                await file.writeFile(serialized, "utf8");
+                await file.sync();
+            }
+            finally {
+                await file.close();
+            }
+            // link() atomically creates the final name only if it does not already
+            // exist (EEXIST otherwise), preserving the original no-overwrite
+            // guarantee; rename() would silently replace an existing export.
+            await link(tempPath, `${boundParent}/${finalName}`);
+            return { ok: true, destination: input.destination };
+        }
+        catch {
+            return { ok: false, reason: "export_failed" };
+        }
+        finally {
+            await unlink(tempPath).catch(() => { });
+        }
+    }
+    finally {
+        await directory.close();
     }
 }

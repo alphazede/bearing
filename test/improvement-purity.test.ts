@@ -12,7 +12,6 @@ const ALLOWED_EXPORTS: Readonly<Record<string, readonly string[]>> = Object.free
     "DegradationInput",
     "DegradationReason",
     "DegradationSignal",
-    "TokenBudgetObservation",
     "detectDegradation",
   ]),
   "improvement-export.ts": Object.freeze([
@@ -37,12 +36,16 @@ const ALLOWED_EXPORTS: Readonly<Record<string, readonly string[]>> = Object.free
     "computeMetrics",
   ]),
   "improvement-proposal.ts": Object.freeze([
+    "BoundedTrialOwnerEvidence",
     "BuildProposalResult",
     "CanonicalValue",
+    "EvaluateBoundedTrialInput",
+    "EvaluateBoundedTrialResult",
     "EvaluateTrialInput",
     "EvaluateTrialResult",
     "ImprovementMetricId",
     "MetricSnapshot",
+    "OwnerAppliedRecommendation",
     "Proposal",
     "ProposalFailure",
     "ProposalRecommendation",
@@ -53,6 +56,8 @@ const ALLOWED_EXPORTS: Readonly<Record<string, readonly string[]>> = Object.free
     "TrialVerdictStatus",
     "TrialWindow",
     "buildProposal",
+    "buildRecommendationProposal",
+    "evaluateBoundedTrial",
     "evaluateTrial",
   ]),
   "improvement-recommender.ts": Object.freeze([
@@ -121,7 +126,10 @@ const ALLOWED_IMPORTS: Readonly<Record<string, readonly string[]>> = Object.free
   "degradation.ts": Object.freeze(["./outcome-projection.js"]),
   "improvement-export.ts": Object.freeze(["node:fs/promises", "node:path"]),
   "improvement-metrics.ts": Object.freeze([]),
-  "improvement-proposal.ts": Object.freeze(["../contracts/run.js"]),
+  "improvement-proposal.ts": Object.freeze([
+    "../contracts/run.js",
+    "./improvement-recommender.js",
+  ]),
   "improvement-recommender.ts": Object.freeze([
     "./outcome-projection.js",
     "../profile/profile.js",

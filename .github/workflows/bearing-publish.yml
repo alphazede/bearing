@@ -88,7 +88,7 @@ jobs:
           const { readFileSync } = require("node:fs");
           const pages = JSON.parse(readFileSync(process.env.CHECKS_FILE, "utf8"));
           const runs = pages.flatMap((page) => page.check_runs ?? []);
-          for (const name of ["quality", "Analyze JavaScript and TypeScript", "Semgrep scan"]) {
+          for (const name of ["quality", "Semgrep scan", "Analyze (javascript-typescript)", "Analyze (actions)"]) {
             const latest = runs.filter((run) => run.name === name).sort((a, b) => b.id - a.id)[0];
             if (!latest) throw new Error(`Required check is missing: ${name}`);
             if (latest.status !== "completed" || latest.conclusion !== "success") {

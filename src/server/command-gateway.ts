@@ -37,7 +37,12 @@ export class CommandGateway {
     readJsonBody(req, MAX_COMMAND_BODY).then((body) => {
       const parsed = parseCommandEnvelope(body);
       const sessionId = this.session.ownerSessionId();
-      if (!parsed.ok || parsed.value.runId !== runId || parsed.value.session.actor !== "owner" || sessionId === null) {
+      // `approveLegacyRoleRoutes` is refused here even though it is a valid envelope: its
+      // approval is only meaningful once the run's execution-contract state has been resolved,
+      // and this generic adapter resolves none. Admitting it would let a browser command bind
+      // legacy routes on a run whose approved contract already owns them.
+      if (!parsed.ok || parsed.value.runId !== runId || parsed.value.session.actor !== "owner"
+        || parsed.value.type === "approveLegacyRoleRoutes" || sessionId === null) {
         writeRejection(res, 400);
         return;
       }

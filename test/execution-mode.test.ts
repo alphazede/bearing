@@ -6,6 +6,7 @@ import {
   recommendExecutionMode,
   recommendExecutionModeV1,
   recommendExecutionModeV2,
+  validateReviewerAuthorship,
   type ExecutionMode,
   type ModeRecommendationInput,
 } from "../src/execution/execution-mode.js";
@@ -144,6 +145,43 @@ const BOUNDED: ModeRecommendationInput = { workItems: 2, maxCrewmatesPerExplorer
 const WIDE: ModeRecommendationInput = { workItems: 5, maxCrewmatesPerExplorer: 2, perAgentTokenEstimate: 10 };
 
 describe("version 2 orchestration selection", () => {
+  it("issue 93: rejects Navigator product authorship and reviewer role overlap with typed boundaries", async () => {
+    const execution = await import("../src/execution/execution-mode.js") as typeof import("../src/execution/execution-mode.js") & {
+      validateExecutionRoleBoundary?: (input: {
+        readonly coordinator: { readonly role: string; readonly identity: string };
+        readonly productAuthor: { readonly role: string; readonly identity: string };
+        readonly reviewer: { readonly role: string; readonly identity: string };
+      }) => unknown;
+    };
+    expect(execution.validateExecutionRoleBoundary).toBeTypeOf("function");
+    expect(execution.validateExecutionRoleBoundary?.({
+      coordinator: { role: "navigator", identity: "bearing/journey:navigator" },
+      productAuthor: { role: "navigator", identity: "bearing/journey:navigator" },
+      reviewer: { role: "surveyor", identity: "bearing/journey:surveyor" },
+    })).toEqual({ ok: false, reason: "role_boundary", field: "productAuthor" });
+    expect(execution.validateExecutionRoleBoundary?.({
+      coordinator: { role: "navigator", identity: "bearing/journey:navigator" },
+      productAuthor: { role: "crewmate", identity: "bearing/journey:crewmate" },
+      reviewer: { role: "navigator", identity: "bearing/journey:navigator" },
+    })).toEqual({ ok: false, reason: "role_boundary", field: "reviewer" });
+    expect(execution.validateExecutionRoleBoundary?.({
+      coordinator: { role: "navigator", identity: "bearing/journey:navigator" },
+      productAuthor: { role: "crewmate", identity: "bearing/journey:crewmate" },
+      reviewer: { role: "surveyor", identity: "bearing/journey:surveyor" },
+    })).toEqual({ ok: true });
+  });
+
+  it("issue 93: rejects a reviewer sharing identity with the role that authored the candidate", () => {
+    expect(validateReviewerAuthorship({
+      reviewer: { role: "surveyor", identity: "bearing/journey:crewmate" },
+      author: { role: "crewmate", identity: "bearing/journey:crewmate" },
+    })).toEqual({ ok: false, reason: "role_boundary", field: "reviewer" });
+    expect(validateReviewerAuthorship({
+      reviewer: { role: "surveyor", identity: "bearing/journey:surveyor" },
+      author: { role: "crewmate", identity: "bearing/journey:crewmate" },
+    })).toEqual({ ok: true });
+  });
+
   it("exposes the closed orchestration pair, which is not a mode vocabulary", () => {
     expect([...EXECUTION_ORCHESTRATIONS]).toEqual(["explorer", "trail-boss"]);
     expect([...EXECUTION_MODES]).not.toContain("trail-boss");

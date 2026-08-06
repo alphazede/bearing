@@ -1,5 +1,5 @@
 import { posix, win32 } from "node:path";
-import { planDirectoryValid } from "./plan-directory.js";
+import { absolutePlanDirectoryPath, planDirectoryValid } from "./plan-directory.js";
 
 const MAX_TEXT = 4096;
 const MAX_EVIDENCE = 32;
@@ -84,6 +84,47 @@ export type FitDecision =
 export interface FitScope {
   readonly repository: string;
   readonly authorizedWorkspaceRoot?: string;
+}
+
+export const FIT_OWNER_ANSWER_REMEDY = 'Answer "Confirm", enter an exact docs/plans/... path, or answer "Decline".';
+
+export type CanonicalFitOwnerAnswer =
+  | { readonly ok: true; readonly answer: "Confirm" | "Decline" | string }
+  | {
+      readonly ok: false;
+      readonly error: "repository_fit_answer_invalid";
+      readonly remedy: typeof FIT_OWNER_ANSWER_REMEDY;
+      readonly correctionAction: "decide";
+    };
+
+/** Normalize only the repository-fit owner's bounded decision vocabulary. */
+export function canonicalizeFitOwnerAnswer(answer: string, repositoryRoot?: string): CanonicalFitOwnerAnswer {
+  const normalized = answer.trim().toLowerCase().replace(/[.!]+$/g, "");
+  if (["y", "yes", "confirm", "confirmed", "approve", "approved", "proceed", "use it", "looks good", "i confirm all of these"].includes(normalized)) {
+    return { ok: true, answer: "Confirm" };
+  }
+  if (["no", "decline", "declined", "stop", "cancel"].includes(normalized)) {
+    return { ok: true, answer: "Decline" };
+  }
+  const absolutePlanDirectory = repositoryRoot === undefined
+    ? undefined
+    : absolutePlanDirectoryPath(answer, repositoryRoot);
+  if (absolutePlanDirectory !== undefined) return { ok: true, answer: absolutePlanDirectory };
+  if (absolutePath(answer) || /^[A-Za-z]:/.test(answer)) return {
+    ok: false,
+    error: "repository_fit_answer_invalid",
+    remedy: FIT_OWNER_ANSWER_REMEDY,
+    correctionAction: "decide",
+  };
+  // Preserve the existing bounded basename lookup used to disambiguate known
+  // plan directories; prose is never reinterpreted as a filesystem request.
+  if (planDirectoryValid(answer) || /^[A-Za-z0-9._/-]+$/.test(answer)) return { ok: true, answer };
+  return {
+    ok: false,
+    error: "repository_fit_answer_invalid",
+    remedy: FIT_OWNER_ANSWER_REMEDY,
+    correctionAction: "decide",
+  };
 }
 
 function record(value: unknown): value is Record<string, unknown> {

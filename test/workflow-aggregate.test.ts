@@ -752,3 +752,76 @@ describe("version-dispatched selection", () => {
     expect(replay(approved.state.events).executionApproval).toEqual({ eventId: "evt-3", kind: "owner-approval", selectedMode: "expedition" });
   });
 });
+
+describe("owner improvement application", () => {
+  it("accepts one atomic owner event only after a settled review checkpoint", () => {
+    const d = deps();
+    let state = initialRunState(RUN_ID);
+    const created = decide(state, envelope({ commandId: "application-create", type: "createWorkRequest" }), d);
+    if (!created.ok) throw new Error(created.reason);
+    state = created.state;
+    const payload = {
+      improvementProposalRef: "ab".repeat(32),
+      externalEvidenceHash: "cd".repeat(32),
+      surface: "review-cadence",
+      targetJson: '{"role":"surveyor"}',
+      valueJson: '"per-slice"',
+    } as const;
+    const premature = decide(state, {
+      schemaVersion: 1,
+      commandId: "application-premature",
+      runId: RUN_ID,
+      expectedRevision: state.revision,
+      session: SESSION,
+      correlationId: "application-premature",
+      type: "recordOwnerImprovementApplication",
+      payload,
+    }, d);
+    expect(premature).toMatchObject({ ok: false, reason: "illegal_transition" });
+
+    const checkpoint = decide(state, {
+      schemaVersion: 1,
+      commandId: "application-checkpoint",
+      runId: RUN_ID,
+      expectedRevision: state.revision,
+      session: { sessionId: "bearing", actor: "bearing" },
+      correlationId: "application-checkpoint",
+      type: "recordJourneyCheckpoint",
+      payload: { stage: "review", status: "complete", artifacts: [] },
+    }, d);
+    if (!checkpoint.ok) throw new Error(checkpoint.reason);
+    state = checkpoint.state;
+
+    const nonOwner = decide(state, {
+      schemaVersion: 1,
+      commandId: "application-agent",
+      runId: RUN_ID,
+      expectedRevision: state.revision,
+      session: { sessionId: "agent", actor: "bearing" },
+      correlationId: "application-agent",
+      type: "recordOwnerImprovementApplication",
+      payload,
+    }, d);
+    expect(nonOwner).toMatchObject({ ok: false, reason: "non_owner_approval" });
+
+    const applied = decide(state, {
+      schemaVersion: 1,
+      commandId: "application-owner",
+      runId: RUN_ID,
+      expectedRevision: state.revision,
+      session: SESSION,
+      correlationId: "application-owner",
+      type: "recordOwnerImprovementApplication",
+      payload,
+    }, d);
+    if (!applied.ok) throw new Error(applied.reason);
+    expect(applied.events).toHaveLength(1);
+    expect(applied.events[0]).toMatchObject({
+      type: "ownerImprovementApplicationRecorded",
+      actor: "owner",
+      payload,
+    });
+    expect(applied.state.journeyCheckpoint).toEqual(state.journeyCheckpoint);
+    expect(replay(applied.state.events).journeyCheckpoint).toEqual(state.journeyCheckpoint);
+  });
+});

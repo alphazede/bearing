@@ -132,7 +132,7 @@ function validationFindings(model) {
             findings.push(finding("validation_missing", "amendment", "implementation.md", "no evidence command", "every slice must declare an evidence command", "add a focused command", id));
     }
     for (const [id, row] of model.traceRows) {
-        const failureEvidence = /\b(?:does\s+not(?!\s+(?:fail|reject|error|deny|block|refus|stop|escalat|prevent)\w*)|never(?!\s+(?:fail|reject|error|deny|block|refus|stop|escalat|prevent)\w*)|fail|reject|error|missing|deny|denied|block|refus|stop|cannot|unchanged|finding|non-?zero|escalat|prevent|omit|mismatch|conflict|cycle|unsafe)\w*\b/i;
+        const failureEvidence = /\b(?:does\s+not(?!\s+(?:fail|reject|error|den[iy]|block|refus|stop|escalat|prevent)\w*)|never(?!\s+(?:fail|reject|error|den[iy]|block|refus|stop|escalat|prevent)\w*)|(?:creat|grant|produc|issu|writ|record|leav)\w*\s+(?:no|zero)(?!\s+(?:fail|error|denial|rejection)\w*)|fail|reject|error|missing|den[iy]|block|refus|stop|cannot|unchanged|finding|non-?zero|escalat|prevent|omit|mismatch|conflict|cycle|unsafe)\w*\b/i;
         if (!assertsPresence(row.negativeCase, failureEvidence)) {
             findings.push(finding("validation_missing", "amendment", "seit.md", row.negativeCase, "the negative/failure case must describe an observable failure", "state how the seeded defect fails", id));
         }

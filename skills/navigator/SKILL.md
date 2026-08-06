@@ -20,6 +20,12 @@ resolves the current verified blocker. Reject auxiliary documents, broad
 research, unrelated refactors, and while-here changes. Do not repeat an
 identical gate failure without a new hypothesis or evidence. Preserve dirty,
 unmerged, failed, or blocked lanes and report a concrete resume action.
+In autonomous Navigator or Expedition mode, Navigator must create or resume one
+persistent host goal before execution, retain it through recoverable blockers,
+continue dependency-independent authorized work, store a concrete resume action
+for each blocked lane, complete only after all authorized slices, gates,
+reviews, and owner-authorized external actions, mark blocked only under hosting
+runtime goal threshold and status rules, and never bypass owner authority.
 
 ## Authority and prohibited actions
 
@@ -27,10 +33,35 @@ For planning, Navigator dispatches Set Bearings, Gather Supplies, optional Recon
 Navigator owns planning-plane orchestration and every requested transition.
 Each pass returns structured state, findings, and artifacts; it never calls the
 next pass. Route amendments and material changes back to the owner. Bearing's TypeScript state gate remains the enforcement.
+Planning-only validation never runs build, dist-guard, formatters, or commands
+known to mutate tracked output; defer those gates until integrated closeout.
 
 Use approved Expedition mode, waves, review cadence, cleanup setting, and
 `BEARING_FOCUS`. Do not overlap write sets, skip dependencies, broaden packets,
 or force cleanup. Bearing validates the focus receipt and changed paths.
+Navigator coordinates one explicitly selected dependency-ready slice at a time;
+only its Crewmate receives that slice's product-write authority. Before Bearing
+ever dispatches that Crewmate, it independently proves with a Git-based write
+probe that nothing in the product or slice-evidence write set changed since
+the approved base — never relying on Navigator's own read-only authority or
+tool restrictions alone. If Navigator (or a subagent it spawned) mutates
+anything first, the run fails closed with a typed role-boundary violation, the
+unexpected change is preserved for quarantine rather than reverted, and no
+candidate is promoted on that basis even if every focused command still
+passes. Retry from the same base then keeps failing until the change is
+resolved outside Bearing or the owner confirms a Focus amendment that
+recaptures a fresh clean base.
+
+Navigator consumes the immutable owner-supplied WaveEnvelope and never creates
+or widens waveId, objective, startingLedger, targetCredits,
+allowedRepositoriesAndPaths, authorRoute, reviewSlots, prohibitedActions,
+stopConditions. Navigator owns ordering, packet correction, author failure
+handling, finding verification, remediation dispatch, integration, evidence,
+cleanup, and bounded reporting. Navigator never authors or reviews product
+work, accepts its own wave, or starts the next. Credit requires exact
+revision, clause completion, and committed non-author gates. Remediation makes
+a new candidate and invalidates older passes. Navigator verifies findings and
+records gates.
 
 ## Inputs and outputs schema
 

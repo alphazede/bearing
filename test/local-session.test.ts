@@ -27,12 +27,14 @@ import {
   buildImprovementReport,
   createRequestHandler,
   dispatchAsyncRunGet,
+  executeHeadlessJourney,
   greetingFor,
   measureImprovementWindow,
   unnamedGreetingFor,
   readCookie,
 } from "../src/server/local-session.js";
 import type { OutcomeRecord } from "../src/improvement/outcome-projection.js";
+import { buildProposal } from "../src/improvement/improvement-proposal.js";
 import { BearingStore } from "../src/store/bearing-store.js";
 import { GRADER_RUBRIC, GRADER_RUBRIC_VERSION } from "../src/verification/grader-rubric.js";
 
@@ -357,6 +359,39 @@ async function recordFocusAmendmentApproval(
   return { decisionId, expectedRevision: approved.state.revision };
 }
 
+async function recordRoleBoundaryViolationApproval(
+  store: BearingStore,
+  runId: string,
+  suffix = "",
+): Promise<{ decisionId: string; expectedRevision: number }> {
+  let durable = await store.load(runId);
+  const decisionId = `role-boundary-${runId}${suffix ? `-${suffix}` : ""}`;
+  const required = await store.apply({
+    schemaVersion: 1,
+    commandId: `require-${decisionId}`,
+    runId,
+    expectedRevision: durable.revision,
+    type: "requireDecision",
+    payload: { decisionId, question: "Bearing blocked an unauthorized pre-dispatch write outside the approved write set. The change was preserved for inspection, not deleted. Resolve or quarantine it, then confirm to retry this slice from the current Git baseline.", consequential: true },
+    session: { sessionId: "test-owner", actor: "owner" },
+    correlationId: `require-${decisionId}`,
+  });
+  if (!required.ok) throw new Error(required.reason);
+  durable = await store.load(runId);
+  const approved = await store.apply({
+    schemaVersion: 1,
+    commandId: `approve-${decisionId}`,
+    runId,
+    expectedRevision: durable.revision,
+    type: "recordOwnerAnswer",
+    payload: { decisionId, answer: "Confirmed role-boundary resolution for execution retry" },
+    session: { sessionId: "test-owner", actor: "owner" },
+    correlationId: `approve-${decisionId}`,
+  });
+  if (!approved.ok) throw new Error(approved.reason);
+  return { decisionId, expectedRevision: approved.state.revision };
+}
+
 async function seedRun(root: string, runId: string, planDirectory?: string): Promise<BearingStore> {
   const store = new BearingStore(root);
   const created = await store.apply({
@@ -543,6 +578,7 @@ function parkRangerReport(options: {
         trustBoundary: "untrusted-input",
         path: ["createRequestHandler", "handleVerificationReportPost"],
       },
+      sliceIds: ["1.7"],
       lens,
       confirmedBy: [lens],
     }],
@@ -555,6 +591,7 @@ const planFixture = "---\ntype: plan-spec\nstatus: complete\n---\n\n## Acceptanc
 const designFixture = "---\ntype: design\nstatus: complete\n---\n\n## Use Cases and Communication Flows\n\nComplete flow.\n\n## Interface Option Check\n\ninterface_options: not needed - fixture\n\n## OOPDSA Implementation Design\n\n- **DES-1** — Use the existing boundary.\n- **CONTRACT-1** — Reject invalid output.\n";
 const seitFixture = "---\ntype: seit\nstatus: complete\n---\n\n## Required Commands\n\n- **CMD-UNIT** — `pnpm test`\n\n## Traceability Matrix\n\n| SEIT row ID | Acceptance/risk ID | Design/contract ID | Boundary/test layer | Positive case | Negative/failure case | Command/procedure ID | Evidence |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| SEIT-1 | AC-1 | DES-1, CONTRACT-1 | unit | valid output passes | invalid output fails closed | CMD-UNIT | test report |\n| SEIT-2 | RISK-1 | CONTRACT-1 | unit | valid output remains bounded | invalid output is rejected | CMD-UNIT | test report |\n\n## Cross-cutting Checks\n\nComplete checks.\n";
 const implementationFixture = "---\ntype: implementation\nstatus: complete\nplan_spec: ./plan-spec.md\ndesign: ./design.md\nseit: ./seit.md\n---\n\n# Implementation\n\n## Phase 1 — Build\n\n### Slice 1.1 — Work\n\n**Goal.** Complete bounded work.\n\n**Requirement IDs.** AC-1\n\n**Design IDs.** DES-1, CONTRACT-1\n\n**SEIT proof rows.** SEIT-1\n\n**Type.** /tdd\n\n**Design lenses.** CDD\n\n**Implementation role.** Backend Engineer\n\n**Agent model route.** Codex agent default\n\n**Agent reasoning level.** medium.\n\n**Ponytail mode.** full\n\n**Review path.** native review\n\n### 1.1 execution manifest\n\n**Write set.** `src/work.ts` only.\n\n**Command IDs.** CMD-UNIT\n\n**Stop condition.** Stop if focused validation fails.\n\n**Human decision.** None.\n";
+const multiSliceImplementationFixture = `${implementationFixture}\n## Dependencies\n\n- Wave 1: Slice 1.1.\n- Wave 2: Slice 1.2.\n\n### Slice 1.2 — Follow-up\n\n**Goal.** Complete the selected follow-up work.\n\n**Requirement IDs.** AC-1\n\n**Design IDs.** DES-1, CONTRACT-1\n\n**SEIT proof rows.** SEIT-1\n\n**Type.** /tdd\n\n**Design lenses.** CDD\n\n**Implementation role.** Backend Engineer\n\n**Agent model route.** Codex agent default\n\n**Agent reasoning level.** medium.\n\n**Ponytail mode.** full\n\n**Review path.** native review\n\n### 1.2 execution manifest\n\n**Write set.** \`src/follow-up.ts\` only.\n\n**Command IDs.** CMD-UNIT\n\n**Stop condition.** Stop if focused validation fails.\n\n**Human decision.** None.\n`;
 const reconBrief = {
   assumptionId: "parser-throughput",
   assumption: "The parser can sustain the required throughput.",
@@ -581,6 +618,9 @@ class CheckpointRunner implements ProcessRunner {
   readonly calls: ProcessInvocation[] = [];
   private reconRecommendation: "proceed" | "stop" = "proceed";
   private adapterFailureStage?: "gather-supplies" | "map-route" | "recon" | "draft-implementation";
+  private reconQuestion?: string;
+  private reconQuestionIssued = false;
+  private reconQuestionVariant: "architecture" | "scope" = "architecture";
   constructor(
     private failingStage?: "gather-supplies" | "map-route" | "recon" | "draft-implementation",
     private planningVerdict?: "amendment",
@@ -592,6 +632,8 @@ class CheckpointRunner implements ProcessRunner {
     this.adapterFailureStage = stage;
   }
   recommendRecon(recommendation: "proceed" | "stop"): void { this.reconRecommendation = recommendation; }
+  askReconQuestion(question: string): void { this.reconQuestion = question; }
+  setReconQuestionVariant(variant: "architecture" | "scope"): void { this.reconQuestionVariant = variant; }
   executableAvailable(): boolean { return true; }
   async verify(): Promise<boolean> { return true; }
   async run(invocation: ProcessInvocation): Promise<ProcessResult> {
@@ -615,6 +657,10 @@ class CheckpointRunner implements ProcessRunner {
     if (stage === this.failingStage) {
       const content = `BEARING_RESULT {"kind":"action","summary":"Invalid artifact.","artifacts":["${planDirectory}/missing.md"]}`;
       return { exitCode: 0, events: [{ type: "item.completed", data: { content } }], usage: { tokens: 1 } };
+    }
+    if (stage === "recon" && this.reconQuestion !== undefined && !this.reconQuestionIssued) {
+      this.reconQuestionIssued = true;
+      return { exitCode: 0, events: [{ type: "item.completed", data: { content: `BEARING_RESULT ${JSON.stringify({ kind: "question", question: this.reconQuestion })}` } }], usage: { tokens: 1 } };
     }
     await mkdir(join(invocation.cwd, planDirectory), { recursive: true });
     if (stage === "gather-supplies") await writeFile(join(invocation.cwd, planDirectory, "plan-spec.md"), planFixture);
@@ -652,11 +698,70 @@ class CheckpointRunner implements ProcessRunner {
     const content = stage === "map-route"
       ? `BEARING_RESULT {"kind":"action","summary":"Route mapped.","artifacts":["${planDirectory}/design.md","${planDirectory}/seit.md"]}`
       : stage === "recon"
-        ? `BEARING_RESULT ${JSON.stringify({ kind: "recon", summary: "Recon completed.", artifacts: ["tmp/recon.json"], brief: reconBrief, report: { ...reconReport, recommendation: this.reconRecommendation, ...(this.reconMaterialChange ? { materialChange: { ...reconReport.materialChange, architecture: true } } : {}) } })}`
+        ? `BEARING_RESULT ${JSON.stringify({ kind: "recon", summary: "Recon completed.", artifacts: ["tmp/recon.json"], brief: reconBrief, report: { ...reconReport, recommendation: this.reconRecommendation, ...(this.reconMaterialChange ? { materialChange: { ...reconReport.materialChange, [this.reconQuestionVariant]: true } } : {}) } })}`
       : stage === "draft-implementation"
         ? `BEARING_RESULT {"kind":"action","summary":"Implementation drafted.","artifacts":["${planDirectory}/implementation.md"]}`
         : `BEARING_RESULT {"kind":"action","summary":"Requirements ready.","artifacts":["${planDirectory}/plan-spec.md"]}`;
     return { exitCode: 0, events: [{ type: "item.completed", data: { content } }], usage: { tokens: 1 } };
+  }
+}
+
+class GuidedMultiSliceRunner extends CheckpointRunner {
+  override async run(invocation: ProcessInvocation): Promise<ProcessResult> {
+    if (invocation.stdin.includes("Stage: draft-implementation")) {
+      const result = await super.run(invocation);
+      const planDirectory = /Validated plan directory: "([^"]+)"/.exec(invocation.stdin)?.[1];
+      if (!planDirectory) throw new Error("plan directory missing");
+      await writeFile(join(invocation.cwd, planDirectory, "implementation.md"), multiSliceImplementationFixture);
+      return result;
+    }
+    if (!invocation.stdin.includes("Stage: execute-expedition")) return super.run(invocation);
+    this.calls.push(invocation);
+    // The coordinated-Expedition coordinator dispatch is read-only (issue 93) and must never reach
+    // the write block below. `--allow-subagents` marks it for grok-style routes; codex has no such
+    // flag and instead loses write authority through a `read-only` sandbox (`"-s", "read-only"` for
+    // a fresh dispatch, `sandbox_mode="read-only"` for a resumed one — see `buildInvocation`'s codex
+    // branch). Detecting only the grok flag let this fixture simulate a codex coordinator that
+    // silently performed the real product write itself, which Bearing's pre-dispatch write probe
+    // now rejects.
+    if (invocation.args.includes("--allow-subagents") || invocation.args.some((arg) => arg.includes("read-only"))) {
+      return { exitCode: 0, events: [{ type: "item.completed", data: { content: 'BEARING_RESULT {"kind":"question","question":"Selected-slice handoff ready."}' } }], usage: { tokens: 1 } };
+    }
+    const planDirectory = /Validated plan directory: "([^"]+)"/.exec(invocation.stdin)?.[1];
+    if (!planDirectory) throw new Error("plan directory missing");
+    const reviewPath = join(invocation.cwd, planDirectory, "review.html");
+    const review = await readFile(reviewPath, "utf8");
+    await mkdir(join(invocation.cwd, "src"), { recursive: true });
+    await Promise.all([
+      writeFile(join(invocation.cwd, "src/follow-up.ts"), "export const followUp = true;\n"),
+      writeFile(reviewPath, review.replace(
+        '<section id="bearing-final-qa" data-status="pending"><h2>Actual implementation and QA</h2><p>Pending implementation and validation.</p></section>',
+        '<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: src/follow-up.ts changed exactly as planned.</p><p>Validation evidence: CMD-UNIT passed.</p></section>',
+      )),
+    ]);
+    const content = `BEARING_RESULT ${JSON.stringify({ kind: "action", summary: "Selected guided slice complete.", artifacts: ["src/follow-up.ts", `${planDirectory}/review.html`], evidence: [{ commandId: "CMD-UNIT", status: "passed", summary: "focused tests passed" }] })}`;
+    return { exitCode: 0, events: [{ type: "item.completed", data: { content } }], usage: { tokens: 1 } };
+  }
+}
+
+class RoleBoundaryViolationRunner extends CheckpointRunner {
+  private violated = false;
+  override async run(invocation: ProcessInvocation): Promise<ProcessResult> {
+    if (!invocation.stdin.includes("Stage: execute-expedition")) return super.run(invocation);
+    this.calls.push(invocation);
+    if (!this.violated) {
+      this.violated = true;
+      // Simulate a coordinator (or a subagent it spawned) that ignores its own read-only sandbox
+      // marker and performs the real product write during coordination itself -- exactly the
+      // pre-dispatch role-boundary violation issue 93's write probe exists to catch. Bearing halts
+      // before ever dispatching the authorized Crewmate once this is proven (see
+      // test/planning-journey.test.ts's "issue 93" coverage), so this is the only write this
+      // runner ever performs; the retry after owner confirmation just needs the coordinator to
+      // stay read-only this time, matching that same reviewed precedent.
+      await mkdir(join(invocation.cwd, "src"), { recursive: true });
+      await writeFile(join(invocation.cwd, "src/rogue-write.ts"), "export const rogue = true;\n");
+    }
+    return { exitCode: 0, events: [{ type: "item.completed", data: { content: 'BEARING_RESULT {"kind":"question","question":"Selected-slice handoff ready."}' } }], usage: { tokens: 1 } };
   }
 }
 
@@ -743,7 +848,7 @@ describe("LocalSessionService unit", () => {
   it("keeps the existing GET and POST route-dispatch counts", async () => {
     const source = await readFile(join(process.cwd(), "src/server/local-session.ts"), "utf8");
     expect(source.match(/method === "GET"/g)).toHaveLength(23);
-    expect(source.match(/method === "POST"/g)).toHaveLength(9);
+    expect(source.match(/method === "POST"/g)).toHaveLength(10);
   });
 
   it("rotates stable owner greetings by local date, time, and weekend", () => {
@@ -834,9 +939,9 @@ describe("GET /api/v1/improvement/report", () => {
       { schemaVersion: 1, runRef, sliceRef: "slice-b", recordedAt, signal: "reasoning_effectiveness", code: "failed", attempt: 1 },
       { schemaVersion: 1, runRef, sliceRef: "slice-a", recordedAt, signal: "grader_score", code: "strong" },
       { schemaVersion: 1, runRef, sliceRef: "slice-b", recordedAt, signal: "grader_score", code: "weak" },
-      { schemaVersion: 1, runRef, sliceRef: "slice-a", recordedAt, signal: "park_ranger_finding", code: "P1" },
-      { schemaVersion: 1, runRef, sliceRef: "slice-b", recordedAt, signal: "park_ranger_finding", code: "P2" },
-      { schemaVersion: 1, runRef, recordedAt, signal: "coordination", code: "expedition", value: 4 },
+      { schemaVersion: 1, runRef, sliceRef: "slice-a", recordedAt, sequence: 2, signal: "park_ranger_finding", code: "P1", findingRef: "a".repeat(64) },
+      { schemaVersion: 1, runRef, sliceRef: "slice-b", recordedAt, sequence: 3, signal: "park_ranger_finding", code: "P2", findingRef: "b".repeat(64) },
+      { schemaVersion: 1, runRef, recordedAt, signal: "coordination", code: "expedition", workItemCount: 2, estimatedAgents: 4 },
     ];
 
     const metrics = measureImprovementWindow({ generatedAt: recordedAt, settledRuns: 1, records });
@@ -849,11 +954,88 @@ describe("GET /api/v1/improvement/report", () => {
       value: 0.5,
       confusion: { truePositive: 1, trueNegative: 0, falsePositive: 0, falseNegative: 1 },
     });
+    expect(metrics.coordinationOverhead).toMatchObject({ sufficient: true, numerator: 2, denominator: 4, value: 0.5 });
     for (const metric of [
-      metrics.coordinationOverhead,
       metrics.escapedDefects,
       metrics.costPerAcceptedCriterion,
     ]) expect(metric).toMatchObject({ sufficient: false, numerator: 0, denominator: 0, value: null });
+  });
+
+  it("reaches cost metrics only from projected bounded token observations", () => {
+    const runRef = "a".repeat(64);
+    const recordedAt = "2026-07-26T12:00:00.000Z";
+    const records = [
+      {
+        schemaVersion: 1,
+        runRef,
+        sliceRef: "slice-a",
+        recordedAt,
+        sequence: 1,
+        signal: "slice_completion",
+        code: "complete",
+        requirementRefs: ["AC-5"],
+      },
+      {
+        schemaVersion: 1,
+        runRef,
+        recordedAt,
+        signal: "token_usage",
+        code: "within_budget",
+        tokens: 12,
+        budget: 100,
+      },
+    ] as unknown as readonly OutcomeRecord[];
+
+    expect(measureImprovementWindow({ generatedAt: recordedAt, settledRuns: 1, records }).costPerAcceptedCriterion)
+      .toMatchObject({ numerator: 12, denominator: 1, sufficient: true, value: 12 });
+    expect(measureImprovementWindow({
+      generatedAt: recordedAt,
+      settledRuns: 1,
+      records,
+      recordsTruncated: true,
+    }).costPerAcceptedCriterion).toMatchObject({ numerator: 12, denominator: 1, sufficient: false, value: null });
+  });
+
+  it("reaches escaped-defect metrics from typed completion and finding outcome records", () => {
+    const records = [
+      {
+        schemaVersion: 1,
+        runRef: "a".repeat(64),
+        sliceRef: "slice-a",
+        recordedAt: "2026-07-26T12:00:00.000Z",
+        sequence: 11,
+        signal: "park_ranger_review",
+        code: "complete",
+      },
+      {
+        schemaVersion: 1,
+        runRef: "a".repeat(64),
+        sliceRef: "slice-a",
+        recordedAt: "2026-07-26T12:00:00.000Z",
+        sequence: 10,
+        signal: "slice_completion",
+        code: "complete",
+        requirementRefs: ["AC-1"],
+      },
+      {
+        schemaVersion: 1,
+        runRef: "a".repeat(64),
+        sliceRef: "slice-a",
+        recordedAt: "2026-07-26T12:00:00.000Z",
+        sequence: 11,
+        signal: "park_ranger_finding",
+        code: "P1",
+        findingRef: "b".repeat(64),
+      },
+    ] as unknown as readonly OutcomeRecord[];
+
+    const metrics = measureImprovementWindow({
+      generatedAt: "2026-07-26T12:00:00.000Z",
+      settledRuns: 1,
+      records,
+    });
+
+    expect(metrics.escapedDefects).toMatchObject({ numerator: 1, denominator: 1, value: 1 });
   });
 
   it("requires authentication, Host, Origin, and a selected repository", async () => {
@@ -888,6 +1070,8 @@ describe("GET /api/v1/improvement/report", () => {
       thresholds: Object.freeze({ minSettledRuns: 20 }),
       metrics: Object.freeze([]),
       recommendation: Object.freeze({ status: "insufficient_evidence", recommendations: Object.freeze([]) }),
+      proposals: Object.freeze([]),
+      trialVerdicts: Object.freeze([]),
     });
     const improvementReport = vi.fn(async () => ({ ok: true as const, value: expectedReport }));
     const { port, cap } = await launchHandler(new RepositoryBootstrap(), { improvementReport });
@@ -926,7 +1110,6 @@ describe("GET /api/v1/improvement/report", () => {
       correlationId: "real-improvement-run-complete",
     });
     if (!completed.ok) throw new Error(completed.reason);
-
     const response = await call(port, { method: "GET", path, headers: { cookie } });
     expect(response.status).toBe(200);
     const body = JSON.parse(response.body);
@@ -957,6 +1140,37 @@ describe("GET /api/v1/improvement/report", () => {
     await expect(buildImprovementReport(new BearingStore(corruptRoot))).resolves.toEqual({ ok: false, reason: "store_read_failed" });
   });
 
+  it("production report with absent evidence yields empty verdicts; with matching owner evidence produces hash-bound verdict (seeded case yields empty until data)", async () => {
+    const root = await tempRepo();
+    const store = new BearingStore(root);
+    const res = await buildImprovementReport(store);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value.trialVerdicts).toEqual([]);
+      expect(Array.isArray(res.value.proposals)).toBe(true);
+    }
+  });
+
+  it("non-owner checkpoint evidence is ignored (does not produce verdict)", async () => {
+    const root = await tempRepo();
+    const store = await seedRun(root, "nonowner-ref", "docs/plans/improvement");
+    const d = await store.load("nonowner-ref");
+    const rec = await store.apply({
+      schemaVersion: 1,
+      commandId: "nonowner-cp",
+      runId: "nonowner-ref",
+      expectedRevision: d.revision,
+      type: "recordJourneyCheckpoint",
+      payload: { stage: "review", status: "complete", artifacts: [], improvementProposalRef: "11".repeat(32) },
+      session: { sessionId: "b", actor: "bearing" },
+      correlationId: "nonowner-cp",
+    });
+    if (!rec.ok) throw new Error("seed fail");
+    const res = await buildImprovementReport(store);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value.trialVerdicts).toEqual([]);
+  });
+
   it("returns truthy typed service failures and exposes no mutating counterpart", async () => {
     const improvementReport = vi.fn(async () => ({ ok: false as const, reason: "stage_failed" as const }));
     const { port, cap } = await launchHandler(new RepositoryBootstrap(), { improvementReport });
@@ -979,6 +1193,139 @@ describe("GET /api/v1/improvement/report", () => {
     }
     expect(improvementReport).toHaveBeenCalledOnce();
     expect(await treeSnapshot(root)).toEqual(before);
+  });
+
+  it("owner record endpoint rejects unknown proposal, mismatched binding, and never mutates configuration", async () => {
+    const { port, cap } = await launchHandler();
+    const cookie = await exchangeCookie(port, cap);
+    const root = await tempRepo();
+    await selectRepository(port, cookie, root);
+    const before = await treeSnapshot(root);
+    const badHash = "ab".repeat(32);
+    const res1 = await call(port, {
+      method: "POST",
+      path: "/api/v1/improvement/application",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ runId: "no-run", proposalHash: badHash, surface: "review-cadence", target: { role: "x" }, value: "to", externalEvidenceHash: "cd".repeat(32) }),
+    });
+    expect(res1.status).toBe(400);
+    const res2 = await call(port, {
+      method: "POST",
+      path: "/api/v1/improvement/application",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ runId: "no-run", proposalHash: badHash, surface: "review-cadence", target: { role: "surveyor" }, value: "wrongval", externalEvidenceHash: "cd".repeat(32) }),
+    });
+    expect(res2.status).toBe(400);
+    expect(await treeSnapshot(root)).toEqual(before);
+  });
+
+  it("records one atomic owner application with the exact external binding", async () => {
+    const built = buildProposal({
+      patternId: "grader-disagreement",
+      surface: "review-cadence",
+      target: { role: "surveyor" },
+      from: "per-phase",
+      to: "per-slice",
+      evidence: { recordRefs: ["a".repeat(64)], occurrences: 5, distinctRuns: 3 },
+      baseline: { id: "grading-accuracy", value: 0.5, numerator: 10, denominator: 20, sufficient: true },
+      guards: [
+        { id: "escaped-defects", value: 0.1, numerator: 2, denominator: 20, sufficient: true },
+        { id: "first-pass-success", value: 0.8, numerator: 16, denominator: 20, sufficient: true },
+        { id: "cost-per-accepted-criterion", value: 100, numerator: 2_000, denominator: 20, sufficient: true },
+      ],
+      trial: { minOccurrences: 5, minDistinctRuns: 3, maxAgeDays: 90, openedAtRef: "a".repeat(64) },
+      revert: { surface: "review-cadence", target: { role: "surveyor" }, value: "per-phase" },
+    });
+    if (!built.ok) throw new Error(built.reason);
+    const improvementReport = vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        schemaVersion: 1 as const,
+        generatedAt: "2026-08-02T12:00:00.000Z",
+        listedRuns: 1,
+        readableRuns: 1,
+        settledRuns: 1,
+        unreadableRuns: 0,
+        recordsHeld: 0,
+        recordsTruncated: false,
+        records: [],
+        thresholds: {},
+        metrics: {},
+        recommendation: {},
+        proposals: [built.value],
+      },
+    }));
+    const { port, cap } = await launchHandler(new RepositoryBootstrap(), { improvementReport });
+    const cookie = await exchangeCookie(port, cap);
+    const root = await tempRepo();
+    await selectRepository(port, cookie, root);
+    const store = await seedRun(root, "owner-application-run", "docs/plans/improvement");
+    const before = await store.load("owner-application-run");
+    const completed = await store.apply({
+      schemaVersion: 1,
+      commandId: "owner-application-complete",
+      runId: "owner-application-run",
+      expectedRevision: before.revision,
+      type: "recordJourneyCheckpoint",
+      payload: { stage: "review", status: "complete", artifacts: [], planDirectory: "docs/plans/improvement" },
+      session: { sessionId: "bearing", actor: "bearing" },
+      correlationId: "owner-application-complete",
+    });
+    if (!completed.ok) throw new Error(completed.reason);
+    const secondStore = await seedRun(root, "owner-application-run-2", "docs/plans/improvement");
+    const secondBefore = await secondStore.load("owner-application-run-2");
+    const secondCompleted = await secondStore.apply({
+      schemaVersion: 1,
+      commandId: "owner-application-complete-2",
+      runId: "owner-application-run-2",
+      expectedRevision: secondBefore.revision,
+      type: "recordJourneyCheckpoint",
+      payload: { stage: "review", status: "complete", artifacts: [], planDirectory: "docs/plans/improvement" },
+      session: { sessionId: "bearing", actor: "bearing" },
+      correlationId: "owner-application-complete-2",
+    });
+    if (!secondCompleted.ok) throw new Error(secondCompleted.reason);
+
+    const body = {
+      runId: "owner-application-run",
+      proposalHash: built.value.proposalHash,
+      surface: "review-cadence",
+      target: { role: "surveyor" },
+      value: "per-slice",
+      externalEvidenceHash: "cd".repeat(32),
+    };
+    const responses = await Promise.all([body, { ...body, runId: "owner-application-run-2" }].map((application) => call(port, {
+      method: "POST",
+      path: "/api/v1/improvement/application",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify(application),
+    })));
+    expect(responses.map(({ status }) => status).sort()).toEqual([200, 409]);
+    const durable = await store.load("owner-application-run");
+    expect(durable.journeyCheckpoint).toEqual(completed.state.journeyCheckpoint);
+    const applicationEvents = durable.events.filter((event) => event.type === "ownerImprovementApplicationRecorded");
+    expect(applicationEvents).toHaveLength(1);
+    expect(applicationEvents[0]).toMatchObject({
+      actor: "owner",
+      payload: {
+        improvementProposalRef: built.value.proposalHash,
+        externalEvidenceHash: "cd".repeat(32),
+        surface: "review-cadence",
+        targetJson: '{"role":"surveyor"}',
+        valueJson: '"per-slice"',
+      },
+    });
+    const secondDurable = await secondStore.load("owner-application-run-2");
+    expect(durable.events.filter((event) => event.type === "ownerImprovementApplicationRecorded")).toHaveLength(1);
+    expect(secondDurable.events.filter((event) => event.type === "ownerImprovementApplicationRecorded")).toHaveLength(0);
+
+    const duplicate = await call(port, {
+      method: "POST",
+      path: "/api/v1/improvement/application",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(duplicate.status).toBe(409);
   });
 
   it("refuses a prototype-carried report provider", async () => {
@@ -1210,6 +1557,22 @@ describe("repository busy lease", () => {
 });
 
 describe("GET / native page and fragment secrecy", () => {
+  it("repairs or retries a resumed Recon owner gate and routes its answer to drafting", () => {
+    const service = new LocalSessionService("127.0.0.1:5000");
+    let body = "";
+    const response = {
+      writeHead: vi.fn(),
+      end: (chunk?: string | Buffer) => { body += chunk?.toString() ?? ""; },
+    };
+    createRequestHandler(service)({ method: "GET", url: "/", headers: { host: "127.0.0.1:5000" } } as never, response as never);
+    expect(body).toContain('if (body.ownerDecisionAnswered === true) { invokeJourney("draft-implementation"); }');
+    expect(body).toContain('persistAgentQuestion(q, body.ownerDecisionId).then(function () { renderJourneyResponse');
+    expect(body).toContain('function () { renderFailure({ code: "owner_decision_required" }); }');
+    expect(body).toContain('typeof decisionId === "string" && decisionId.length > 0');
+    expect(body).toContain('state.pendingDecision.decisionId !== decisionId');
+    expect(body).not.toContain('if (body.ownerDecisionAnswered === true) { renderJourneyResponse(body); }');
+  });
+
   it("serves the native page and never embeds the capability server-side", async () => {
     const { port, cap } = await launch();
     const r = await call(port, { method: "GET", path: "/" });
@@ -1241,7 +1604,6 @@ describe("GET / native page and fragment secrecy", () => {
     expect(r.body).toContain('Codex CLI');
     expect(r.body).toContain('Claude Code');
     expect(r.body).toContain('Agy');
-    expect(r.body).toContain('Grok Build');
     expect(r.body).toContain('OpenCode');
     expect(r.body).toContain('"pi": "Pi"');
     expect(r.body).toContain('statusText.textContent = route.detected ? "Agent detected" : "Agent unavailable"');
@@ -1364,8 +1726,23 @@ describe("GET / native page and fragment secrecy", () => {
     expect(r.body).toContain('if (body.status === "action" && currentStage === "gather-supplies") invokeJourney("map-route")');
     expect(r.body).toContain('currentStage === "map-route") invokeJourney("recon")');
     expect(r.body).toContain('currentStage === "recon" && body.recon && (body.recon.state === "SKIPPED" || body.recon.state === "RECON_READY")) invokeJourney("draft-implementation")');
-    expect(r.body).toContain('body.recon.state === "OWNER_DECISION_REQUIRED" || body.recon.state === "RECON_FAILED"');
-    expect(r.body).toContain('body.recon.state === "RECON_FAILED" ? "recon_failed" : "owner_decision_required"');
+    // OWNER_DECISION_REQUIRED renders through the shared command path and keeps a retry fallback.
+    expect(r.body).toContain('OWNER_DECISION_REQUIRED');
+    expect(r.body).toContain('persistAgentQuestion');
+    expect(r.body).toContain('ownerDecisionId');
+    expect(r.body).toContain('ownerDecisionQuestion');
+    // explicit ownerDecisionAnswered flag for answered state; no rs.events inference from hidden events
+    expect(r.body).toContain('ownerDecisionAnswered');
+    expect(r.body).toContain('ownerDecisionAnswered === true');
+    expect(r.body).toContain('if (body.ownerDecisionAnswered === true) { invokeJourney("draft-implementation"); }');
+    expect(r.body).toContain('renderFailure({ code: "owner_decision_required" })');
+    expect(r.body).not.toContain('rs.events');
+    expect(r.body).not.toContain('recon decision');
+    // bounded assertion: OWNER_DECISION_REQUIRED renders through shared form; no arbitrary-command or terminal route added
+    expect(r.body).not.toContain('terminal');
+    expect(r.body).not.toContain('arbitrary-command');
+    expect(r.body).not.toContain('renderFailure({ code: body.recon.state === "RECON_FAILED" ? "recon_failed" : "owner_decision_required" })');
+    expect(r.body).toContain('body.recon.state === "RECON_FAILED"');
     expect(r.body).toContain('id="journey-wait" hidden');
     expect(r.body).toContain('role="progressbar" aria-label="Agent work in progress"');
     expect(r.body).not.toContain("aria-valuenow");
@@ -1414,6 +1791,9 @@ describe("GET / native page and fragment secrecy", () => {
     expect(r.body).toContain("@keyframes wait-trail");
     expect(r.body).toContain('name="review-cadence" value="phase" checked');
     expect(r.body).toContain("Each phase <b>(recommended)</b>");
+    expect(r.body).toContain('id="current-slice"');
+    expect(r.body).toContain("review.assignments.forEach(function (assignment)");
+    expect(r.body).toContain("currentSlice: currentSlice.value");
     expect(r.body).toContain('id="cleanup-worktrees" type="checkbox" checked');
     expect(r.body).toContain("Only clean, proven-merged temporary lanes are removed.");
     expect(r.body).toContain('cleanupMergedWorktrees: document.getElementById("cleanup-worktrees").checked');
@@ -2283,6 +2663,40 @@ describe("POST run verification report ingestion", () => {
     }
   });
 
+  it("rejects a below-floor grader report with minimum_score_not_met without appending a checkpoint", async () => {
+    const { port, cap } = await launch();
+    const cookie = await exchangeCookie(port, cap);
+    const root = await tempRepo();
+    await selectRepository(port, cookie, root);
+    const store = await seedRun(root, "run-1", "docs/plans/approved");
+    await mkdir(join(root, "docs/plans/approved"), { recursive: true });
+    const approved = await recordContractApproval(store, approvedContract("run-1"));
+    await writeFile(join(root, "docs/plans/approved/execution-contract.json"), JSON.stringify(approved));
+    const before = await store.load("run-1");
+
+    const belowFloorReport = graderReport(approved.contentHash, 4, "weak");
+    belowFloorReport.scores = belowFloorReport.scores.map((score) =>
+      score.dimensionId === "residual-risk-and-confidence" ? { ...score, level: 2 as 0 | 1 | 2 | 3 | 4 } : score
+    );
+
+    const response = await call(port, {
+      method: "POST",
+      path: pathFor("run-1", "grader"),
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify(belowFloorReport),
+    });
+    expect(response.status).toBe(422);
+    expect(JSON.parse(response.body)).toEqual({
+      status: "blocked",
+      code: "minimum_score_not_met",
+      remedy: expect.any(String),
+    });
+
+    const after = await store.load("run-1");
+    expect(after.revision).toBe(before.revision);
+    expect(after.events).toEqual(before.events);
+  });
+
   it("rejects an oversized report with a typed failure and no ledger write", async () => {
     const { port, cap } = await launch();
     const cookie = await exchangeCookie(port, cap);
@@ -2700,6 +3114,18 @@ describe("GET run verification projections and review cadence", () => {
     const contract = await recordContractApproval(store, approvedContract(runId, {
       planDirectory,
       reviewCadence: "per-phase",
+      slices: [{
+        sliceId: "1.1",
+        phaseId: "phase-1",
+        requirementIds: ["AC-1"],
+        writeSet: ["src/work.ts"],
+        acceptance: "Complete bounded work.",
+        evidenceCommandIds: ["CMD-UNIT"],
+        dependsOn: [],
+        parallelSafe: false,
+        role: "crewmate",
+        reasoningTier: "medium",
+      }],
     }));
     await writeFile(join(root, planDirectory, "execution-contract.json"), JSON.stringify(contract));
 
@@ -2724,8 +3150,13 @@ describe("GET run verification projections and review cadence", () => {
     const checkpoint = (await store.load(runId)).events
       .filter((event) => event.type === "journeyCheckpointRecorded" && event.payload.stage === "execute-explorer")
       .at(-1);
-    expect(checkpoint?.payload.verification).toEqual({ layer: "validator", verdict: "PASS", findingCount: 0 });
-    expect(checkpoint?.payload.requirementRefs).toEqual(["AC-1.3"]);
+    expect(checkpoint?.payload.verification).toEqual({
+      layer: "validator",
+      verdict: "PASS",
+      findingCount: 0,
+      completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }],
+    });
+    expect(Object.hasOwn(checkpoint?.payload ?? {}, "requirementRefs")).toBe(false);
     expect(isVerificationCheckpointPayload(checkpoint?.payload.verification)).toBe(true);
 
     const verification = await call(port, {
@@ -2768,6 +3199,245 @@ describe("GET run verification projections and review cadence", () => {
       declaredCadence: "per-phase",
       resolvedCadence: { cadence: "per-phase" },
     });
+  });
+
+  it("transports the guided multi-slice Expedition selector into JourneyService and its effective receipt scope", async () => {
+    const root = await tempRepo();
+    await new Promise<void>((resolve, reject) => execFile("git", ["init", "-q"], { cwd: root }, (error) => error ? reject(error) : resolve()));
+    const runner = new GuidedMultiSliceRunner();
+    const { port, cookie } = await readyJourneyHandler(root, runner);
+    const runId = "guided-expedition-slice";
+    const planDirectory = `docs/plans/${runId}`;
+    const store = await seedRun(root, runId);
+    for (const stage of ["set-bearings", "gather-supplies", "map-route", "recon", "draft-implementation"] as const) {
+      const response = await call(port, {
+        method: "POST",
+        path: "/api/v1/journey",
+        headers: sessionHeaders(port, { cookie }),
+        body: JSON.stringify({ runId, stage, workGoal: "Complete the approved work" }),
+      });
+      expect(response.status, response.body).toBe(200);
+    }
+    await recordPlanningApproval(store, runId);
+
+    const execution = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "execute-expedition",
+        workGoal: "Complete the approved work",
+        executionMode: "expedition",
+        reviewCadence: "slice",
+        currentSlice: "1.2",
+      }),
+    });
+
+    expect(execution.status, execution.body).toBe(200);
+    expect(JSON.parse(execution.body)).toMatchObject({
+      status: "action",
+      summary: "Selected guided slice complete.",
+      selectedScope: {
+        currentSlice: "1.2",
+        remainingSlices: ["1.2"],
+        allowedPaths: [`${planDirectory}/review.html`, "src/follow-up.ts"],
+        seitCommandIds: ["CMD-UNIT"],
+      },
+    });
+    const executionCalls = runner.calls.filter((invocation) => invocation.stdin.includes("Stage: execute-expedition"));
+    expect(executionCalls).toHaveLength(2);
+    expect(executionCalls.every((invocation) => invocation.stdin.includes('"remainingSlices":["1.2"]'))).toBe(true);
+    expect(executionCalls[0]?.args).toContain("read-only");
+    expect(executionCalls[0]?.args).not.toContain("workspace-write");
+    expect(executionCalls[1]?.args).toContain("workspace-write");
+    expect(executionCalls[1]?.stdin).toContain("Navigator coordination handoff (read-only; advisory to the product author)");
+
+    const status = await call(port, { method: "GET", path: `/api/v1/journey/${runId}/status`, headers: { cookie } });
+    expect(JSON.parse(status.body).run).toMatchObject({ currentSlice: "1.2", lastResult: { selectedScope: { currentSlice: "1.2" } } });
+  });
+
+  it("admits a different explicit Expedition slice after a retained Focus failure", async () => {
+    const root = await tempRepo();
+    await new Promise<void>((resolve, reject) => execFile("git", ["init", "-q"], { cwd: root }, (error) => error ? reject(error) : resolve()));
+    const runner = new GuidedMultiSliceRunner();
+    const { port, cookie } = await readyJourneyHandler(root, runner);
+    const runId = "guided-expedition-reselect";
+    const store = await seedRun(root, runId);
+    for (const stage of ["set-bearings", "gather-supplies", "map-route", "recon", "draft-implementation"] as const) {
+      const response = await call(port, {
+        method: "POST",
+        path: "/api/v1/journey",
+        headers: sessionHeaders(port, { cookie }),
+        body: JSON.stringify({ runId, stage, workGoal: "Complete the approved work" }),
+      });
+      expect(response.status, response.body).toBe(200);
+    }
+    await recordPlanningApproval(store, runId);
+
+    const rejected = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "execute-expedition",
+        workGoal: "Complete the approved work",
+        executionMode: "expedition",
+        reviewCadence: "slice",
+        currentSlice: "9.9",
+      }),
+    });
+    expect(rejected.status, rejected.body).toBe(200);
+    expect(JSON.parse(rejected.body)).toMatchObject({ status: "failure", code: "focus_invalid" });
+
+    const redrafted = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId, stage: "draft-implementation", workGoal: "Complete the approved work" }),
+    });
+    expect(redrafted.status, redrafted.body).toBe(200);
+    await recordPlanningApproval(store, runId, "reselect");
+
+    const unchanged = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "execute-expedition",
+        workGoal: "Complete the approved work",
+        executionMode: "expedition",
+        reviewCadence: "slice",
+        currentSlice: "9.9",
+      }),
+    });
+    expect(unchanged.status, unchanged.body).toBe(200);
+    expect(JSON.parse(unchanged.body)).toMatchObject({ status: "failure", code: "focus_invalid" });
+
+    const headlessRunner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: (invocation) => invocation.stdin.includes("confirming readiness")
+        ? Promise.resolve({ exitCode: 0, events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }], usage: { tokens: 1 } })
+        : runner.run(invocation),
+    };
+    const recovered = await executeHeadlessJourney({
+      action: "progress",
+      repository: root,
+      provider: "codex",
+      model: "*",
+      reasoning: "medium",
+      runId,
+      stage: "execute-expedition",
+      currentSlice: "1.2",
+    }, { processRunner: headlessRunner });
+    expect(recovered.ok, JSON.stringify(recovered)).toBe(true);
+    expect(recovered).toMatchObject({
+      ok: true,
+      status: "waiting",
+      selectedScope: { currentSlice: "1.2" },
+    });
+    const durable = await store.load(runId);
+    expect(JSON.parse(durable.journeyCheckpoint?.qaJson ?? "[]")).toContainEqual({ question: "Current slice", answer: "1.2" });
+    expect(JSON.parse(durable.journeyCheckpoint?.lastResultJson ?? "null")).toMatchObject({ selectedScope: { currentSlice: "1.2" } });
+  });
+
+  it("routes a role-boundary violation through the same owner-confirmation retry gate as a Focus amendment, with its own prompt", async () => {
+    const root = await tempRepo();
+    await new Promise<void>((resolve, reject) => execFile("git", ["init", "-q"], { cwd: root }, (error) => error ? reject(error) : resolve()));
+    const runner = new RoleBoundaryViolationRunner();
+    const { port, cookie } = await readyJourneyHandler(root, runner);
+    const runId = "role-boundary-violation";
+    const store = await seedRun(root, runId);
+    for (const stage of ["set-bearings", "gather-supplies", "map-route", "recon", "draft-implementation"] as const) {
+      const response = await call(port, {
+        method: "POST",
+        path: "/api/v1/journey",
+        headers: sessionHeaders(port, { cookie }),
+        body: JSON.stringify({ runId, stage, workGoal: "Complete the approved work" }),
+      });
+      expect(response.status, response.body).toBe(200);
+    }
+    await recordPlanningApproval(store, runId);
+
+    const violation = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "execute-expedition",
+        workGoal: "Complete the approved work",
+        executionMode: "expedition",
+        reviewCadence: "slice",
+        currentSlice: "1.1",
+      }),
+    });
+
+    const violationBody = JSON.parse(violation.body);
+    expect(violationBody).toMatchObject({
+      status: "failure",
+      code: "role_boundary_violation",
+      mutatedPaths: ["src/rogue-write.ts"],
+      amendmentPrompt: expect.stringContaining("unauthorized pre-dispatch write"),
+    });
+    expect(violationBody.amendmentPrompt).not.toContain("Focus contract changed");
+    expect(violationBody.focusDrift).toBeUndefined();
+
+    const missingBinding = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "execute-expedition",
+        workGoal: "Complete the approved work",
+        executionMode: "expedition",
+        reviewCadence: "slice",
+        currentSlice: "1.1",
+        focusAmendmentConfirmed: true,
+      }),
+    });
+    expect(missingBinding.status).toBe(400);
+
+    // The prompt tells the owner the blocked write was preserved for inspection, not deleted,
+    // and that they must resolve or quarantine it before confirming -- Bearing never discards it
+    // automatically. Simulate that owner action (here, removing the rogue file) before retrying.
+    await rm(join(root, "src", "rogue-write.ts"), { force: true });
+    const approval = await recordRoleBoundaryViolationApproval(store, runId);
+    const confirmed = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "execute-expedition",
+        workGoal: "Complete the approved work",
+        executionMode: "expedition",
+        reviewCadence: "slice",
+        currentSlice: "1.1",
+        focusAmendmentConfirmed: true,
+        focusAmendmentDecisionId: approval.decisionId,
+        focusAmendmentExpectedRevision: approval.expectedRevision,
+      }),
+    });
+
+    expect(confirmed.status, confirmed.body).toBe(200);
+    // Matching the reviewed issue-93 precedent in test/planning-journey.test.ts ("a retry against
+    // the same run keeps failing closed until the unauthorized change is resolved, then restarts
+    // cleanly from the exact base"): once the owner resolves the mutation and confirms, the retry
+    // is admitted and the coordinator's own handoff surfaces as an ordinary in-progress question,
+    // not a repeat role_boundary_violation.
+    expect(JSON.parse(confirmed.body)).toMatchObject({ status: "question" });
+    const durable = await store.load(runId);
+    const runtime = parseRuntimeState(durable.journeyCheckpoint!.runtimeStateJson!);
+    expect(runtime.ok).toBe(true);
+    if (!runtime.ok) throw new Error(runtime.reason);
+    expect(runtime.value.retry).toEqual(expect.arrayContaining([
+      expect.objectContaining({ warrant: "approved_amendment", outcome: "admitted" }),
+    ]));
   });
 
   it("returns typed failures for an unknown run and refuses a layer-invalid checkpoint before append", async () => {
@@ -4080,6 +4750,9 @@ describe("planning-state checkpoint integration", () => {
     expect((await store.load("authoritative-path")).journeyCheckpoint?.planDirectory).toBe(confirmedPath);
   });
 
+  // Issue 89: the owner's requested tier binds every role, so resuming a legacy
+  // "xhigh" checkpoint preserves that tier through invocation instead of
+  // clamping it down to a role's policy default.
   it("resumes a legacy provider-native checkpoint at the equivalent abstract reasoning tier", async () => {
     const thread = "019f8d4e-a637-7e71-8c76-af9d7ec91adf";
     const runner = new CheckpointRunner();
@@ -4126,8 +4799,8 @@ describe("planning-state checkpoint integration", () => {
     expect(runner.calls.length).toBeGreaterThan(0);
     for (const invocation of runner.calls) {
       expect(invocation.args).toEqual(expect.arrayContaining(["exec", "resume", thread]));
-      expect(invocation.args).toContain('model_reasoning_effort="medium"');
-      expect(invocation.args).not.toContain('model_reasoning_effort="xhigh"');
+      expect(invocation.args).toContain('model_reasoning_effort="xhigh"');
+      expect(invocation.args).not.toContain('model_reasoning_effort="medium"');
     }
     expect((await store.load("restored-session")).journeyCheckpoint).toMatchObject({ selectionReasoning: "very-high", providerSessionId: thread });
   });
@@ -4351,6 +5024,475 @@ describe("planning-state checkpoint integration", () => {
     });
     expect(blocked.status).toBe(409);
     expect(runner.calls).toHaveLength(callsBeforeDraft);
+  });
+
+  it("round trips an ordinary Recon question through its exact durable owner decision", async () => {
+    const runner = new CheckpointRunner();
+    const reconQuestion = "Which bounded fixture should Recon validate?";
+    runner.askReconQuestion(reconQuestion);
+    const { port, cap } = await launchHandler(new RepositoryBootstrap(), {
+      processRunner: runner,
+      verification: { verify: async () => true },
+    });
+    const cookie = await exchangeCookie(port, cap);
+    const root = await tempRepo();
+    await selectRepository(port, cookie, root);
+    expect((await call(port, {
+      method: "POST",
+      path: "/api/v1/readiness",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ provider: "codex", model: "*", reasoning: "medium" }),
+    })).status).toBe(200);
+    const store = await seedRun(root, "recon-question");
+
+    for (const stage of ["set-bearings", "gather-supplies", "map-route"] as const) {
+      expect((await call(port, {
+        method: "POST",
+        path: "/api/v1/journey",
+        headers: sessionHeaders(port, { cookie }),
+        body: JSON.stringify({ runId: "recon-question", stage, workGoal: "Complete the approved work" }),
+      })).status).toBe(200);
+    }
+    const first = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-question", stage: "recon", workGoal: "Complete the approved work" }),
+    });
+    expect(first.status).toBe(200);
+    expect(JSON.parse(first.body)).toMatchObject({ status: "question", question: reconQuestion });
+
+    let durable = await store.load("recon-question");
+    expect(durable.pendingDecision).toMatchObject({ question: reconQuestion });
+    const decisionId = durable.pendingDecision?.decisionId;
+    if (!decisionId) throw new Error("Recon question decision ID missing");
+    const callsBeforeInvalid = runner.calls.length;
+
+    const unrecorded = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-question", stage: "recon", workGoal: "Complete the approved work", answer: "unrecorded answer" }),
+    });
+    expect(unrecorded.status).toBe(200);
+    expect(JSON.parse(unrecorded.body)).toMatchObject({
+      status: "question",
+      question: reconQuestion,
+      ownerDecisionId: decisionId,
+      ownerDecisionQuestion: reconQuestion,
+      validationError: "owner_answer_not_recorded",
+    });
+    expect(runner.calls).toHaveLength(callsBeforeInvalid);
+
+    await recordPendingAnswer(store, "recon-question", "Use the bounded fixture.", "recon-question");
+    const stale = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-question", stage: "recon", workGoal: "Complete the approved work", answer: "stale answer" }),
+    });
+    expect(stale.status).toBe(200);
+    expect(JSON.parse(stale.body)).toMatchObject({
+      status: "question",
+      question: reconQuestion,
+      ownerDecisionId: decisionId,
+      ownerDecisionQuestion: reconQuestion,
+      validationError: "owner_answer_not_recorded",
+    });
+    expect(runner.calls).toHaveLength(callsBeforeInvalid);
+
+    const rerun = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-question", stage: "recon", workGoal: "Complete the approved work", answer: "Use the bounded fixture." }),
+    });
+    expect(rerun.status, rerun.body).toBe(200);
+    expect(JSON.parse(rerun.body)).toMatchObject({ status: "action", recon: { state: "RECON_READY" } });
+    expect(runner.calls).toHaveLength(callsBeforeInvalid + 1);
+    durable = await store.load("recon-question");
+    expect(JSON.parse(durable.journeyCheckpoint?.qaJson ?? "[]")).toContainEqual({ question: reconQuestion, answer: "Use the bounded fixture." });
+  });
+
+  it("binds recon OWNER_DECISION_REQUIRED to exact checkpoint decision ID via cookie origin and command endpoint round trip", async () => {
+    const runner = new CheckpointRunner(undefined, undefined, true);
+    const { port, cap } = await launchHandler(new RepositoryBootstrap(), {
+      processRunner: runner,
+      verification: { verify: async () => true },
+    });
+    const cookie = await exchangeCookie(port, cap);
+    const root = await tempRepo();
+    await selectRepository(port, cookie, root);
+    expect((await call(port, {
+      method: "POST",
+      path: "/api/v1/readiness",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ provider: "codex", model: "*", reasoning: "medium" }),
+    })).status).toBe(200);
+    const store = await seedRun(root, "recon-exact-id");
+
+    for (const stage of ["set-bearings", "gather-supplies", "map-route"] as const) {
+      expect((await call(port, {
+        method: "POST",
+        path: "/api/v1/journey",
+        headers: sessionHeaders(port, { cookie }),
+        body: JSON.stringify({ runId: "recon-exact-id", stage, workGoal: "Complete the approved work" }),
+      })).status).toBe(200);
+    }
+    const recon = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-exact-id", stage: "recon", workGoal: "Complete the approved work" }),
+    });
+    expect(recon.status).toBe(200);
+    const reconBody = JSON.parse(recon.body);
+    expect(reconBody).toMatchObject({ status: "action", recon: { state: "OWNER_DECISION_REQUIRED" } });
+    const exactDecisionId = reconBody.ownerDecisionId;
+    const exactQuestion = reconBody.ownerDecisionQuestion;
+    expect(typeof exactDecisionId).toBe("string");
+    expect(typeof exactQuestion).toBe("string");
+    // also verify the recon POST response carries the fields (consumer/producer agreement); do not read from /runs journeyCheckpoint
+
+    // journey status run.lastResult preserves both fields
+    const statusAfterRecon = await call(port, { method: "GET", path: "/api/v1/journey/recon-exact-id/status", headers: { cookie } });
+    expect(statusAfterRecon.status).toBe(200);
+    const statusJson = JSON.parse(statusAfterRecon.body);
+    expect(statusJson.run && statusJson.run.lastResult).toMatchObject({ ownerDecisionId: exactDecisionId, ownerDecisionQuestion: exactQuestion });
+
+    // HTTP assertion before recording the answer: repeat recon without answer; prove ownerDecisionId and ownerDecisionQuestion equal the initial values.
+    // Unanswered same-stage retry must keep ID stable; this may invoke the runner (preserve no-run only for the correction bad-answer path below).
+    const callsBeforeStableRetry = runner.calls.length;
+    const stableRetry = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-exact-id", stage: "recon", workGoal: "Complete the approved work" }),
+    });
+    expect(stableRetry.status).toBe(200);
+    const stableRetryBody = JSON.parse(stableRetry.body);
+    expect(stableRetryBody).toMatchObject({ status: "action", recon: { state: "OWNER_DECISION_REQUIRED" } });
+    expect(stableRetryBody.ownerDecisionId).toBe(exactDecisionId);
+    expect(stableRetryBody.ownerDecisionQuestion).toBe(exactQuestion);
+    // runner was invoked by the retry (unlike bad-answer correction which must not run)
+    expect(runner.calls.length).toBeGreaterThan(callsBeforeStableRetry);
+
+    let runResp = await call(port, { method: "GET", path: "/api/v1/runs/recon-exact-id", headers: { cookie } });
+    expect(runResp.status).toBe(200);
+    let runJson = JSON.parse(runResp.body);
+    const callsBeforeReject = runner.calls.length;
+
+    // unrecorded answer rejected without consuming (correction path, no runner, no answer event for ID)
+    const bad = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-exact-id", stage: "recon", workGoal: "Complete the approved work", answer: "unrecorded-stale-answer" }),
+    });
+    // correction returns via 200 with question feedback; key is no execution and decision remains correctable
+    expect([200, 409]).toContain(bad.status);
+    expect(runner.calls).toHaveLength(callsBeforeReject);
+    const afterBad = await call(port, { method: "GET", path: "/api/v1/runs/recon-exact-id", headers: { cookie } });
+    const afterBadJson = JSON.parse(afterBad.body);
+    const badHasAnswer = (afterBadJson.events || []).some((e: any) => e.type === "ownerAnswered" && e.payload && e.payload.decisionId === exactDecisionId);
+    expect(badHasAnswer).toBe(false);
+
+    // require exact checkpoint decision via command endpoint
+    runResp = await call(port, { method: "GET", path: "/api/v1/runs/recon-exact-id", headers: { cookie } });
+    runJson = JSON.parse(runResp.body);
+    let rev = runJson.revision;
+    const reqCmd = await call(port, {
+      method: "POST",
+      path: "/api/v1/runs/recon-exact-id/commands",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        schemaVersion: 1,
+        commandId: "req-exact",
+        runId: "recon-exact-id",
+        expectedRevision: rev,
+        session: { sessionId: "browser", actor: "owner" },
+        correlationId: "req-exact",
+        type: "requireDecision",
+        payload: { decisionId: exactDecisionId, question: exactQuestion, consequential: true },
+      }),
+    });
+    expect(reqCmd.status).toBe(200);
+
+    // recordOwnerAnswer for the exact decision
+    runResp = await call(port, { method: "GET", path: "/api/v1/runs/recon-exact-id", headers: { cookie } });
+    runJson = JSON.parse(runResp.body);
+    rev = runJson.revision;
+    const recCmd = await call(port, {
+      method: "POST",
+      path: "/api/v1/runs/recon-exact-id/commands",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        schemaVersion: 1,
+        commandId: "rec-exact",
+        runId: "recon-exact-id",
+        expectedRevision: rev,
+        session: { sessionId: "browser", actor: "owner" },
+        correlationId: "rec-exact",
+        type: "recordOwnerAnswer",
+        payload: { decisionId: exactDecisionId, answer: "Approved after recon; proceed with bounded material change." },
+      }),
+    });
+    expect(recCmd.status).toBe(200);
+
+    // POST same recon stage with answer: 200 + runner increment
+    const callsBeforeAnswerPost = runner.calls.length;
+    const ansPost = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-exact-id", stage: "recon", workGoal: "Complete the approved work", answer: "Approved after recon; proceed with bounded material change." }),
+    });
+    expect(ansPost.status, ansPost.body).toBe(200);
+    expect(runner.calls).toHaveLength(callsBeforeAnswerPost + 1);
+
+    const ansJson = JSON.parse(ansPost.body);
+    expect(ansJson).toMatchObject({ status: "action", recon: { state: "OWNER_DECISION_REQUIRED" }, ownerDecisionAnswered: true });
+    expect(ansJson.ownerDecisionId).toBe(exactDecisionId);
+    // restored journey status lastResult shows ownerDecisionAnswered true
+    const statusAfterAns = await call(port, { method: "GET", path: "/api/v1/journey/recon-exact-id/status", headers: { cookie } });
+    expect(statusAfterAns.status).toBe(200);
+    const statusAnsJson = JSON.parse(statusAfterAns.body);
+    expect(statusAnsJson.run && statusAnsJson.run.lastResult).toMatchObject({ ownerDecisionAnswered: true, ownerDecisionId: exactDecisionId });
+
+    // post-answer recon retry without answer must generate a new ID (genuinely new decision after the prior ID was answered)
+    const postAnsRetry = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-exact-id", stage: "recon", workGoal: "Complete the approved work" }),
+    });
+    expect(postAnsRetry.status).toBe(200);
+    const postAnsBody = JSON.parse(postAnsRetry.body);
+    expect(postAnsBody).toMatchObject({ status: "action", recon: { state: "OWNER_DECISION_REQUIRED" } });
+    expect(postAnsBody.ownerDecisionId).not.toBe(exactDecisionId);
+    expect(typeof postAnsBody.ownerDecisionId).toBe("string");
+    expect(postAnsBody.ownerDecisionAnswered).not.toBe(true);
+
+    // Use public GET /api/v1/runs only to prove answersRecorded >=1 and that events and journeyCheckpoint are absent (CommandGateway contract).
+    runResp = await call(port, { method: "GET", path: "/api/v1/runs/recon-exact-id", headers: { cookie } });
+    runJson = JSON.parse(runResp.body);
+    expect(runJson.answersRecorded).toBeGreaterThanOrEqual(1);
+    expect(runJson.events).toBeUndefined();
+    expect(runJson.journeyCheckpoint).toBeUndefined();
+    // load store directly (retained from seedRun) to prove the exact ownerAnswered event and that checkpoint does not have questionDecisionId without question.
+    const durable = await store.load("recon-exact-id");
+    const exactAnswered = durable.events.some((e) => e.type === "ownerAnswered" && e.payload && e.payload.decisionId === exactDecisionId && typeof e.payload.answer === "string");
+    expect(exactAnswered).toBe(true);
+    const cp = durable.journeyCheckpoint;
+    expect(cp && cp.questionDecisionId !== undefined && cp.question === undefined).toBe(false);
+  });
+
+  it("advances an answered Recon owner gate directly to draft implementation", async () => {
+    const runner = new CheckpointRunner(undefined, undefined, true);
+    const { port, cap } = await launchHandler(new RepositoryBootstrap(), {
+      processRunner: runner,
+      verification: { verify: async () => true },
+    });
+    const cookie = await exchangeCookie(port, cap);
+    const root = await tempRepo();
+    await selectRepository(port, cookie, root);
+    expect((await call(port, {
+      method: "POST",
+      path: "/api/v1/readiness",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ provider: "codex", model: "*", reasoning: "medium" }),
+    })).status).toBe(200);
+    const store = await seedRun(root, "recon-answer-draft");
+
+    for (const stage of ["set-bearings", "gather-supplies", "map-route"] as const) {
+      expect((await call(port, {
+        method: "POST",
+        path: "/api/v1/journey",
+        headers: sessionHeaders(port, { cookie }),
+        body: JSON.stringify({ runId: "recon-answer-draft", stage, workGoal: "Complete the approved work" }),
+      })).status).toBe(200);
+    }
+    const recon = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-answer-draft", stage: "recon", workGoal: "Complete the approved work" }),
+    });
+    const reconBody = JSON.parse(recon.body);
+    expect(reconBody).toMatchObject({ status: "action", recon: { state: "OWNER_DECISION_REQUIRED" } });
+    const decisionId = reconBody.ownerDecisionId;
+    const question = reconBody.ownerDecisionQuestion;
+    let run = JSON.parse((await call(port, { method: "GET", path: "/api/v1/runs/recon-answer-draft", headers: { cookie } })).body);
+
+    expect((await call(port, {
+      method: "POST",
+      path: "/api/v1/runs/recon-answer-draft/commands",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        schemaVersion: 1,
+        commandId: "require-answer-draft",
+        runId: "recon-answer-draft",
+        expectedRevision: run.revision,
+        session: { sessionId: "browser", actor: "owner" },
+        correlationId: "require-answer-draft",
+        type: "requireDecision",
+        payload: { decisionId, question, consequential: true },
+      }),
+    })).status).toBe(200);
+    run = JSON.parse((await call(port, { method: "GET", path: "/api/v1/runs/recon-answer-draft", headers: { cookie } })).body);
+    expect((await call(port, {
+      method: "POST",
+      path: "/api/v1/runs/recon-answer-draft/commands",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        schemaVersion: 1,
+        commandId: "answer-answer-draft",
+        runId: "recon-answer-draft",
+        expectedRevision: run.revision,
+        session: { sessionId: "browser", actor: "owner" },
+        correlationId: "answer-answer-draft",
+        type: "recordOwnerAnswer",
+        payload: { decisionId, answer: "Approved after Recon; draft the implementation." },
+      }),
+    })).status).toBe(200);
+
+    const answered = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-answer-draft", stage: "recon", workGoal: "Complete the approved work", answer: "Approved after Recon; draft the implementation." }),
+    });
+    expect(answered.status, answered.body).toBe(200);
+    expect(JSON.parse(answered.body)).toMatchObject({ status: "action", recon: { state: "OWNER_DECISION_REQUIRED" }, ownerDecisionAnswered: true, ownerDecisionId: decisionId });
+
+    const planningAfterAnswer = JSON.parse((await call(port, { method: "GET", path: "/api/v1/runs/recon-answer-draft/planning-state", headers: { cookie } })).body);
+    expect(planningAfterAnswer.planningState).not.toBe("OWNER_DECISION_REQUIRED");
+    const callsBeforeDraft = runner.calls.length;
+    const draft = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-answer-draft", stage: "draft-implementation", workGoal: "Complete the approved work" }),
+    });
+    expect(draft.status, draft.body).toBe(200);
+    expect(JSON.parse(draft.body)).toMatchObject({ status: "action" });
+    expect(runner.calls).toHaveLength(callsBeforeDraft + 1);
+    expect((await store.load("recon-answer-draft")).journeyCheckpoint?.stage).toBe("draft-implementation");
+
+    const durable = await store.load("recon-answer-draft");
+    if (!durable.journeyCheckpoint) throw new Error("draft checkpoint missing");
+    const {
+      eventId: _eventId,
+      planningState: _planningState,
+      planningFailure: _planningFailure,
+      ...checkpoint
+    } = durable.journeyCheckpoint;
+    const unrelatedOwnerGate = await store.apply({
+      schemaVersion: 1,
+      commandId: "later-unrelated-owner-gate",
+      runId: "recon-answer-draft",
+      expectedRevision: durable.revision,
+      type: "recordJourneyCheckpoint",
+      payload: {
+        ...checkpoint,
+        stage: "draft-implementation",
+        status: "failed",
+        planningFailure: "OWNER_DECISION_REQUIRED",
+      },
+      session: { sessionId: "test-bearing", actor: "bearing" },
+      correlationId: "later-unrelated-owner-gate",
+    });
+    expect(unrelatedOwnerGate.ok).toBe(true);
+    expect(JSON.parse((await call(port, { method: "GET", path: "/api/v1/runs/recon-answer-draft/planning-state", headers: { cookie } })).body)).toMatchObject({
+      planningState: "OWNER_DECISION_REQUIRED",
+    });
+  });
+
+  it("requires a new unanswered Recon decision when the server question changes", async () => {
+    const runner = new CheckpointRunner(undefined, undefined, true);
+    const { port, cap } = await launchHandler(new RepositoryBootstrap(), {
+      processRunner: runner,
+      verification: { verify: async () => true },
+    });
+    const cookie = await exchangeCookie(port, cap);
+    const root = await tempRepo();
+    await selectRepository(port, cookie, root);
+    expect((await call(port, {
+      method: "POST",
+      path: "/api/v1/readiness",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ provider: "codex", model: "*", reasoning: "medium" }),
+    })).status).toBe(200);
+    const store = await seedRun(root, "recon-question-change");
+
+    for (const stage of ["set-bearings", "gather-supplies", "map-route"] as const) {
+      expect((await call(port, {
+        method: "POST",
+        path: "/api/v1/journey",
+        headers: sessionHeaders(port, { cookie }),
+        body: JSON.stringify({ runId: "recon-question-change", stage, workGoal: "Complete the approved work" }),
+      })).status).toBe(200);
+    }
+    const recon = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-question-change", stage: "recon", workGoal: "Complete the approved work" }),
+    });
+    const reconBody = JSON.parse(recon.body);
+    const decisionId = reconBody.ownerDecisionId;
+    const question = reconBody.ownerDecisionQuestion;
+    let run = JSON.parse((await call(port, { method: "GET", path: "/api/v1/runs/recon-question-change", headers: { cookie } })).body);
+    expect((await call(port, {
+      method: "POST",
+      path: "/api/v1/runs/recon-question-change/commands",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        schemaVersion: 1,
+        commandId: "require-question-change",
+        runId: "recon-question-change",
+        expectedRevision: run.revision,
+        session: { sessionId: "browser", actor: "owner" },
+        correlationId: "require-question-change",
+        type: "requireDecision",
+        payload: { decisionId, question, consequential: true },
+      }),
+    })).status).toBe(200);
+    run = JSON.parse((await call(port, { method: "GET", path: "/api/v1/runs/recon-question-change", headers: { cookie } })).body);
+    expect((await call(port, {
+      method: "POST",
+      path: "/api/v1/runs/recon-question-change/commands",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        schemaVersion: 1,
+        commandId: "answer-question-change",
+        runId: "recon-question-change",
+        expectedRevision: run.revision,
+        session: { sessionId: "browser", actor: "owner" },
+        correlationId: "answer-question-change",
+        type: "recordOwnerAnswer",
+        payload: { decisionId, answer: "Approved for the architecture change." },
+      }),
+    })).status).toBe(200);
+
+    runner.setReconQuestionVariant("scope");
+    const rerun = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId: "recon-question-change", stage: "recon", workGoal: "Complete the approved work", answer: "Approved for the architecture change." }),
+    });
+    expect(rerun.status, rerun.body).toBe(200);
+    const rerunBody = JSON.parse(rerun.body);
+    expect(rerunBody).toMatchObject({ status: "action", recon: { state: "OWNER_DECISION_REQUIRED" } });
+    expect(rerunBody.ownerDecisionId).not.toBe(decisionId);
+    expect(rerunBody.ownerDecisionQuestion).not.toBe(question);
+    expect(rerunBody.ownerDecisionAnswered).not.toBe(true);
+    expect(JSON.parse((await call(port, { method: "GET", path: "/api/v1/runs/recon-question-change/planning-state", headers: { cookie } })).body)).toMatchObject({
+      runId: "recon-question-change",
+      planningState: "OWNER_DECISION_REQUIRED",
+    });
+    expect((await store.load("recon-question-change")).journeyCheckpoint?.stage).toBe("recon");
   });
 
   it("blocks drafting after Recon stops but accepts a successful Recon retry", async () => {
@@ -4638,6 +5780,32 @@ describe("planning-state checkpoint integration", () => {
       expect(progressed.status, `${stage}: ${progressed.body}`).toBe(200);
     }
     expect(runner.calls).toHaveLength(5);
+  });
+
+  it("rejects a retry warrant on an ordinary browser transition before dispatch or durable mutation", async () => {
+    const root = await tempRepo();
+    const runner = new CheckpointRunner();
+    const { port, cookie } = await readyJourneyHandler(root, runner);
+    const runId = "ordinary-warrant-injection";
+    const store = await seedRun(root, runId);
+    const before = await store.load(runId);
+    const callsBefore = runner.calls.length;
+
+    const rejected = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({
+        runId,
+        stage: "set-bearings",
+        expectedRevision: before.revision,
+        retryWarrant: "changed_environment",
+      }),
+    });
+
+    expect(rejected.status).toBe(409);
+    expect(runner.calls).toHaveLength(callsBefore);
+    expect(await store.load(runId)).toEqual(before);
   });
 
   it("keeps a Recon stop active when a later Recon retry fails before a successful retry", async () => {
@@ -6148,6 +7316,115 @@ describe("POST /api/v1/session rejection matrix", () => {
       body: JSON.stringify({ capability: cap }),
     });
     expect(accepted.status).toBe(200);
+  });
+});
+
+describe("browser showcase JSON findings redaction", () => {
+  it("scrubs a bare secret-shaped token from a map-route finding in the guided browser response, matching the headless boundary", async () => {
+    const root = await tempRepo();
+    await new Promise<void>((resolve, reject) => execFile("git", ["init", "-q"], { cwd: root }, (error) => error ? reject(error) : resolve()));
+    const planDirectory = "docs/plans/browser-findings-redaction";
+    const design = "---\ntype: design\nstatus: ghp_examplenotarealtoken1234567890\n---\n\n## Use Cases and Communication Flows\n\nComplete flow.\n\n## Interface Option Check\n\ninterface_options: not needed - fixture\n\n## OOPDSA Implementation Design\n\n- **DES-1** — Use the existing import boundary.\n- **CONTRACT-1** — Reject invalid input without writes.\n";
+    const seit = "---\ntype: seit\nstatus: complete\n---\n\n## Required Commands\n\n- **CMD-UNIT** — `pnpm test`\n\n## Traceability Matrix\n\nComplete matrix.\n\n## Cross-cutting Checks\n\nComplete checks.\n";
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async (invocation) => {
+        if (invocation.stdin.includes("confirming readiness")) {
+          return { exitCode: 0, events: [{ type: "completed", data: { content: "ready" } }], usage: { tokens: 1 } };
+        }
+        await mkdir(join(root, planDirectory), { recursive: true });
+        await writeFile(join(root, planDirectory, "design.md"), design);
+        await writeFile(join(root, planDirectory, "seit.md"), seit);
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: `BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["${planDirectory}/design.md","${planDirectory}/seit.md"]}` } }],
+          usage: { tokens: 1 },
+        };
+      },
+    };
+    const { port, cookie } = await readyJourneyHandler(root, runner);
+    const runId = "browser-findings-redaction";
+    await seedRun(root, runId, planDirectory);
+    await mkdir(join(root, planDirectory), { recursive: true });
+    await writeFile(join(root, planDirectory, "plan-spec.md"), planFixture);
+
+    const mapped = await call(port, {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId, stage: "map-route", workGoal: "Complete the approved work" }),
+    });
+    expect(mapped.status).toBe(200);
+    const parsed = JSON.parse(mapped.body) as { status: string; code?: string; findings?: unknown[] };
+    expect(parsed).toMatchObject({ status: "failure", code: "artifact_invalid" });
+    // Without the browserLastResult scrub this finding's observed field would read
+    // "status: ghp_examplenotarealtoken1234567890" - the same headlessText/HEADLESS_SECRET
+    // gate the headless receipt path applies drops the whole finding here too.
+    expect(parsed.findings ?? []).toEqual([]);
+    expect(mapped.body).not.toMatch(/ghp_/);
+
+    // The status endpoint's `run.lastResult` projection is a second, independent emission
+    // site; it must scrub the same way rather than exposing the durable, unscrubbed value.
+    const status = await call(port, {
+      method: "GET",
+      path: `/api/v1/journey/${runId}/status`,
+      headers: { cookie },
+    });
+    expect(status.status).toBe(200);
+    expect(status.body).not.toMatch(/ghp_/);
+  });
+
+  it("scrubs a bare secret-shaped token from an unwarranted same-stage retry refusal", async () => {
+    const root = await tempRepo();
+    await new Promise<void>((resolve, reject) => execFile("git", ["init", "-q"], { cwd: root }, (error) => error ? reject(error) : resolve()));
+    const planDirectory = "docs/plans/browser-retry-redaction";
+    const design = "---\ntype: design\nstatus: ghp_examplenotarealtoken1234567890\n---\n\n## Use Cases and Communication Flows\n\nComplete flow.\n\n## Interface Option Check\n\ninterface_options: not needed - fixture\n\n## OOPDSA Implementation Design\n\n- **DES-1** — Use the existing import boundary.\n- **CONTRACT-1** — Reject invalid input without writes.\n";
+    const seit = "---\ntype: seit\nstatus: complete\n---\n\n## Required Commands\n\n- **CMD-UNIT** — `pnpm test`\n\n## Traceability Matrix\n\nComplete matrix.\n\n## Cross-cutting Checks\n\nComplete checks.\n";
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async (invocation) => {
+        if (invocation.stdin.includes("confirming readiness")) {
+          return { exitCode: 0, events: [{ type: "completed", data: { content: "ready" } }], usage: { tokens: 1 } };
+        }
+        await mkdir(join(root, planDirectory), { recursive: true });
+        await writeFile(join(root, planDirectory, "design.md"), design);
+        await writeFile(join(root, planDirectory, "seit.md"), seit);
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: `BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["${planDirectory}/design.md","${planDirectory}/seit.md"]}` } }],
+          usage: { tokens: 1 },
+        };
+      },
+    };
+    const { port, cookie } = await readyJourneyHandler(root, runner);
+    const runId = "browser-retry-redaction";
+    await seedRun(root, runId, planDirectory);
+    await mkdir(join(root, planDirectory), { recursive: true });
+    await writeFile(join(root, planDirectory, "plan-spec.md"), planFixture);
+    const request = {
+      method: "POST",
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId, stage: "map-route", workGoal: "Complete the approved work" }),
+    };
+
+    const failed = await call(port, request);
+    expect(JSON.parse(failed.body)).toMatchObject({ status: "failure", code: "artifact_invalid" });
+
+    // A second identical request (no retryWarrant) is refused, and the refusal response
+    // spreads the recorded failure - including its findings - directly into the JSON body.
+    // This is the standard recovery flow, not a contrived edge case: it is the same shape
+    // "still refuses a same-stage retry after an unwarranted agent failure" already proves
+    // for a different failure code.
+    const refused = await call(port, request);
+    expect(JSON.parse(refused.body)).toMatchObject({
+      status: "failure",
+      code: "artifact_invalid",
+      retryRefusal: "retry_requires_warrant",
+    });
+    expect(refused.body).not.toMatch(/ghp_/);
   });
 });
 

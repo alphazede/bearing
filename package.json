@@ -1,7 +1,21 @@
 {
   "name": "@alphazede/bearing",
   "version": "0.1.6",
-  "description": "Local browser control room for evidence-backed agent workflows.",
+  "description": "Harness-agnostic orchestration for AI coding agents: approved plans, DAG-scheduled routes, bounded execution, and reviewable evidence.",
+  "keywords": [
+    "ai-agents",
+    "coding-agent",
+    "agent-orchestration",
+    "claude-code",
+    "codex",
+    "developer-tools",
+    "local-first",
+    "workflow-automation",
+    "dag",
+    "evidence",
+    "code-review",
+    "cli"
+  ],
   "author": "William Rumph / AlphaZede",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -21,6 +35,7 @@
   "files": [
     "dist/",
     "assets/",
+    ".mcp.json",
     ".claude-plugin/",
     ".codex-plugin/",
     "plugin-skills/",
@@ -52,5 +67,10 @@
     "@types/node": "22.19.17",
     "typescript": "5.9.3",
     "vitest": "4.1.5"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": ">=8.5.23"
+    }
   }
 }

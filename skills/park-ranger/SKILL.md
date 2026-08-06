@@ -11,13 +11,15 @@ disable-model-invocation: true
 
 Detect concrete introduced defects with reproduction. Reject unreproduced suspicions from becoming findings. Apply test-strength, reachability, and priority clamp. Synthesize across lenses with total order. Never self-certify.
 
+Park Ranger only adjudicates/deduplicates; it fills no reviewer slots.
+
 ## Authority and prohibited actions
 
 Receives lens reports as data. Runs no processes itself.
 
 ## Inputs and outputs schema
 
-parseParkRangerReport rejects unreproduced findings (empty inputs or observedFailure) and empty reachability. Unreproduced go to questions only. synthesizeFindings dedupes and orders stably; single-lens P0 is demoted.
+parseParkRangerReport rejects unreproduced findings (empty inputs or observedFailure), empty reachability, and findings without a non-empty bounded `sliceIds` scope. Every slice ID must belong to the approved execution contract. Missing or empty finding scope returns `finding_slice_scope_invalid`. Unreproduced go to questions only. synthesizeFindings dedupes and orders stably; single-lens P0 is demoted.
 
 ## State read and written
 
@@ -36,7 +38,7 @@ Enter after validator or at cadence. Exit with findings, questions, and verdict.
 
 ## Evidence requirements
 
-Every finding carries reproduction, reachability path, priority justification, and confirming lenses.
+Every finding carries reproduction, reachability path, priority justification, confirming lenses, and one or more approved execution slice IDs.
 
 ## Failure taxonomy
 

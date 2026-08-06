@@ -1,30 +1,41 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { constants, readFileSync } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basename, isAbsolute, posix, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RepositoryBootstrap, ignoresBearingDirectory } from "../repository/bootstrap.js";
 import { RepositoryChoiceService, type RepositoryChoiceResult } from "../repository/choice.js";
 import { assessRepositorySafety } from "../repository/safety.js";
 import { writeWorkspaceBusyLease } from "../repository/workspace-tools.js";
 import { BUILTIN_ROUTES, type ProcessRunner } from "../adapters/adapters.js";
-import { BearingStore } from "../store/bearing-store.js";
+import { BearingStore, BearingStoreError, isCompactedRunState, type StoredRunListEntry, type StoredRunState } from "../store/bearing-store.js";
 import { AdapterVerification, ReadinessService, REASONING_LEVELS, type RouteInspectionPort, type VerificationPort } from "../onboarding/readiness.js";
 import { normalizeReasoningTier, type ResolvedRun, type RunOverrides, type Selection } from "../profile/profile.js";
 import { CommandGateway } from "./command-gateway.js";
 import { SseProjection } from "./sse.js";
 import { MAX_SHOWCASE_JSON, MAX_SHOWCASE_REPORT, listWorkflowShowcases, projectWorkflowShowcase, renderWorkflowReport } from "../workflows/showcase.js";
-import { JourneyService, currentPlanningVerdict, planningCheckpointFields, type JourneyActivity, type JourneyResult, type JourneyStage } from "../journey/planning-journey.js";
+import { JourneyService, currentPlanningVerdict, planningCheckpointFields, reconOwnerDecisionQuestion, type JourneyActivity, type JourneyReconResult, type JourneyResult, type JourneySelectedScope, type JourneyStage } from "../journey/planning-journey.js";
 import {
   canonicalStringify,
+  isJourneyTokenUsage,
+  MAX_JOURNEY_TOKEN_TOTAL,
   RECORD_JOURNEY_CHECKPOINT_STAGES,
-  isRequirementRefs,
+  isReviewRecord,
   isVerificationCheckpointPayload,
+  type CompletedSliceEvidence,
   type CommandEnvelopeV1,
+  type JourneyRecoveryOutcome,
+  type JourneyTokenBudgetState,
+  type JourneyTokenUsage,
   type RecordJourneyCheckpointPayload,
+  type ReviewClass,
+  type ReviewCommandEvidence,
+  type ReviewFinding,
+  type ReviewRecord,
+  type ReviewVerdict,
   type VerificationCheckpointPayload,
   type VerificationLayer,
   type VerificationVerdict,
@@ -38,13 +49,22 @@ import {
 } from "../contracts/runtime-state.js";
 import {
   deriveFocusEnvelope,
+  hashExecutionContractBody,
+  hashLegacyRoleRoutes,
   parseApprovedExecutionContract,
+  roleRoutesShape,
   type ApprovedExecutionContract,
+  type ExecutionContractBody,
+  type ExecutionContractFailure,
   type ExecutionContractParseResult,
+  type RoleKind,
+  type RoleRoute,
 } from "../contracts/execution-contract.js";
 import {
   admitRetry,
   failureFingerprint,
+  RETRY_WARRANTS,
+  retryWarrantAllowed,
   type EscalationScope,
   type EscalationTarget,
   type FocusCompletionErrorSignature,
@@ -55,9 +75,12 @@ import {
 } from "../execution/retry-control.js";
 import { admissibleConcurrency } from "../execution/concurrency-control.js";
 import { derivePlanningState, next, planningValidationSignal, type PlanningSignal, type PlanningValidationRecord } from "../journey/planning-state.js";
+import type { Finding } from "../journey/planning-validator.js";
 import { planDirectoryValid } from "../journey/plan-directory.js";
+import { createFocusContext, snapshotGitState } from "../journey/focus-mode.js";
+import { focusRequest } from "../journey/standalone-focus.js";
 import { graderVerdict, parseGraderReport, type GraderReportFailure } from "../verification/grader.js";
-import { parseParkRangerReport, synthesizeFindings, type ParkRangerReportFailure } from "../verification/park-ranger.js";
+import { findingIdentity, parseParkRangerReport, synthesizeFindings, type ParkRangerReportFailure } from "../verification/park-ranger.js";
 import { requiredGates, resolveReviewCadence } from "../verification/review-cadence.js";
 import { assertIndependentVerification } from "../verification/verification-roles.js";
 import {
@@ -66,7 +89,7 @@ import {
   resolvePlanDirectory,
   type ConsolidationPlan,
 } from "../journey/plan-resolution.js";
-import { isFitDiagnostic, type FitAssumption, type FitDecision, type FitDiagnostic } from "../journey/repository-fit.js";
+import { canonicalizeFitOwnerAnswer, FIT_OWNER_ANSWER_REMEDY, isFitDiagnostic, type FitAssumption, type FitDecision, type FitDiagnostic } from "../journey/repository-fit.js";
 import type {
   ImprovementReport,
   ImprovementServiceFailure,
@@ -82,7 +105,18 @@ import {
   type RecommendationResult,
   type Thresholds,
 } from "../improvement/improvement-recommender.js";
-import type { TrialVerdict } from "../improvement/improvement-proposal.js";
+import {
+  buildRecommendationProposal,
+  evaluateBoundedTrial,
+  type BoundedTrialOwnerEvidence,
+  type CanonicalValue,
+  type EvaluateBoundedTrialInput,
+  type ImprovementMetricId,
+  type MetricSnapshot,
+  type OwnerAppliedRecommendation,
+  type Proposal,
+  type TrialVerdict,
+} from "../improvement/improvement-proposal.js";
 
 // ponytail: 32-byte (256-bit) tokens give 2^256 entropy; hex is URL-fragment-safe.
 const CAPABILITY_BYTES = 32;
@@ -103,6 +137,8 @@ const PLAN_REVIEW_APPROVAL = "Approved for execution-mode selection";
 const CONSOLIDATION_APPROVAL = "Approve consolidation";
 const FOCUS_AMENDMENT_PROMPT = "The approved Focus contract changed. Review the drift summary. Confirm the Focus amendment to adopt the updated plan and recapture the Git baseline.";
 const FOCUS_AMENDMENT_APPROVAL = "Confirmed Focus amendment for execution retry";
+const ROLE_BOUNDARY_VIOLATION_PROMPT = "Bearing blocked an unauthorized pre-dispatch write outside the approved write set. The change was preserved for inspection, not deleted. Resolve or quarantine it, then confirm to retry this slice from the current Git baseline.";
+const ROLE_BOUNDARY_VIOLATION_APPROVAL = "Confirmed role-boundary resolution for execution retry";
 const CONTINUITY_LOST_DISCLOSURE = "The prior provider conversation is unavailable; conversation continuity was lost and context may need to be supplied again.";
 const BEARING_VERSION = (JSON.parse(readFileSync(fileURLToPath(new URL("../../package.json", import.meta.url)), "utf8")) as { readonly version: string }).version;
 const SIGNATURE_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/bearing-office.png", import.meta.url)));
@@ -136,6 +172,7 @@ export type ImprovementHandoffResult =
   | { readonly ok: false; readonly reason: "run_not_found" | "run_unavailable" };
 
 export type RuntimeImprovementReport = ImprovementReport<Thresholds, MetricSet, RecommendationResult> & {
+  readonly proposals: readonly Proposal[];
   readonly trialVerdicts: readonly TrialVerdict[];
 };
 
@@ -151,14 +188,43 @@ function recordField(record: OutcomeRecord, key: string): unknown {
 
 /** Adapt only fields the bounded outcome projection actually carries; missing families stay empty. */
 export function measureImprovementWindow(window: ImprovementWindow): MetricSet {
+  const coordination: MetricInputs["coordination"][number][] = [];
   const sliceAttempts: MetricInputs["sliceAttempts"][number][] = [];
   const grading: NonNullable<MetricInputs["grading"]>[number][] = [];
+  const completedSlices: MetricInputs["completedSlices"][number][] = [];
+  const reviewedSlices: NonNullable<MetricInputs["reviewedSlices"]>[number][] = [];
+  const confirmedFindings: NonNullable<MetricInputs["confirmedFindings"]>[number][] = [];
+  const tokenReports: NonNullable<MetricInputs["tokenReports"]>[number][] = [];
   const confirmedFindingSlices = new Set<string>();
+  let tokenReportsObserved = false;
 
   for (const record of window.records) {
-    if (record.signal !== "park_ranger_finding") continue;
-    const sliceRef = recordField(record, "sliceRef");
-    if (typeof sliceRef === "string" && sliceRef.length > 0) confirmedFindingSlices.add(sliceRef);
+    if (record.signal === "coordination") {
+      coordination.push({ workItems: record.workItemCount, estimatedAgents: record.estimatedAgents });
+      continue;
+    }
+    if (record.signal === "slice_completion") {
+      completedSlices.push({
+        runRef: record.runRef,
+        sliceRef: record.sliceRef,
+        sequence: record.sequence,
+        requirementRefs: record.requirementRefs,
+      });
+      continue;
+    }
+    if (record.signal === "park_ranger_finding") {
+      confirmedFindings.push({ sliceRef: record.sliceRef, sequence: record.sequence });
+      confirmedFindingSlices.add(record.sliceRef);
+      continue;
+    }
+    if (record.signal === "park_ranger_review") {
+      reviewedSlices.push({ sliceRef: record.sliceRef, sequence: record.sequence });
+      continue;
+    }
+    if (record.signal === "token_usage") {
+      tokenReports.push({ runRef: record.runRef, tokens: record.tokens });
+      tokenReportsObserved = true;
+    }
   }
   for (const record of window.records) {
     const sliceRef = recordField(record, "sliceRef");
@@ -180,15 +246,106 @@ export function measureImprovementWindow(window: ImprovementWindow): MetricSet {
   }
 
   return computeMetrics({
-    // One projected coordination value cannot represent both agents and work items.
-    coordination: [],
+    coordination,
     sliceAttempts,
     grading,
-    // Requirement references and event sequence are intentionally absent from OutcomeRecord.
-    completedSlices: [],
-    confirmedFindings: [],
-    // There is no token outcome signal in the bounded projection.
-    tokenReports: [],
+    completedSlices,
+    reviewedSlices,
+    confirmedFindings,
+    ...(tokenReportsObserved ? { tokenReports } : {}),
+    tokenCoverageComplete: window.recordsTruncated !== true,
+  });
+}
+
+function metricKey(id: ImprovementMetricId): keyof MetricSet {
+  if (id === "coordination-overhead") return "coordinationOverhead";
+  if (id === "first-pass-success") return "firstPassSuccess";
+  if (id === "grading-accuracy") return "gradingAccuracy";
+  if (id === "escaped-defects") return "escapedDefects";
+  return "costPerAcceptedCriterion";
+}
+
+function toMetricSnapshot(mv: MetricSet[keyof MetricSet], id: ImprovementMetricId): MetricSnapshot {
+  const base = {
+    id,
+    value: (mv as { value: number | null }).value,
+    numerator: (mv as { numerator: number }).numerator,
+    denominator: (mv as { denominator: number }).denominator,
+    sufficient: (mv as { sufficient: boolean }).sufficient,
+  };
+  const conf = (mv as { confusion?: unknown }).confusion;
+  return conf !== undefined ? { ...base, confusion: conf as CanonicalValue } : base;
+}
+
+const GUARD_IDS: readonly ImprovementMetricId[] = ["escaped-defects", "first-pass-success", "cost-per-accepted-criterion"];
+const TRIAL_NOISE_FLOOR = 0.05;
+const MILLISECONDS_PER_DAY = 86_400_000;
+
+// Local predicates over public Stored* fields to avoid crossing the private seam in improvement-service.
+function unreadable(entry: StoredRunListEntry): boolean {
+  return Object.hasOwn(entry, "unreadable")
+    && (entry as { readonly unreadable?: unknown }).unreadable === true;
+}
+
+function settled(state: StoredRunState): boolean {
+  const checkpoint = state.journeyCheckpoint;
+  return state.pendingDecision === null
+    && checkpoint !== null
+    && checkpoint.stage === "review"
+    && checkpoint.status === "complete";
+}
+
+interface RecordedOwnerApplication extends OwnerAppliedRecommendation {
+  readonly recordedAt: string;
+}
+
+interface TrialLedgerFacts {
+  readonly applications: readonly RecordedOwnerApplication[];
+  readonly settledRunTimes: readonly number[];
+}
+
+async function readTrialLedger(
+  store: Pick<BearingStore, "list" | "load">,
+): Promise<TrialLedgerFacts> {
+  const applications: RecordedOwnerApplication[] = [];
+  const settledRunTimes: number[] = [];
+  // Keep the application marker plus the 20-run measurement window in one bounded replay.
+  const listed = (await store.list(50)).slice(0, 50);
+  for (const entry of listed) {
+    if (unreadable(entry)) continue;
+    let state: StoredRunState;
+    try {
+      state = await store.load(entry.runId);
+    } catch (error) {
+      if (error instanceof BearingStoreError) continue;
+      throw error;
+    }
+    if (!settled(state)) continue;
+    const updatedAt = Date.parse(entry.updatedAt);
+    if (Number.isFinite(updatedAt)) settledRunTimes.push(updatedAt);
+    for (const event of state.events) {
+      if (event.type !== "ownerImprovementApplicationRecorded" || event.actor !== "owner") continue;
+      const payload = event.payload as Readonly<Record<string, unknown>>;
+      if (typeof payload.improvementProposalRef !== "string"
+        || typeof payload.externalEvidenceHash !== "string"
+        || typeof payload.surface !== "string"
+        || typeof payload.targetJson !== "string"
+        || typeof payload.valueJson !== "string") continue;
+      applications.push(Object.freeze({
+        schemaVersion: 1,
+        applicationId: event.eventId,
+        externalEvidenceHash: payload.externalEvidenceHash,
+        proposalHash: payload.improvementProposalRef,
+        surface: payload.surface,
+        target: JSON.parse(payload.targetJson) as CanonicalValue,
+        value: JSON.parse(payload.valueJson) as CanonicalValue,
+        recordedAt: event.recordedAt,
+      }));
+    }
+  }
+  return Object.freeze({
+    applications: Object.freeze(applications),
+    settledRunTimes: Object.freeze(settledRunTimes),
   });
 }
 
@@ -217,11 +374,91 @@ export async function buildImprovementReport(
   if (result.value.listedRuns > 0 && result.value.readableRuns === 0) {
     return { ok: false, reason: "store_read_failed" };
   }
+
+  const base = result.value;
+  // Canonicalize current recommendations into owner-addressable proposals.
+  const recList = (base.recommendation.status === "ready" || base.recommendation.status === "insufficient_evidence")
+    ? base.recommendation.recommendations
+    : [];
+  const proposals: Proposal[] = [];
+  for (const rec of recList) {
+    const built = buildRecommendationProposal(rec);
+    if (built.ok) proposals.push(built.value);
+  }
+  const frozenProposals = Object.freeze(proposals);
+
+  let trialLedger: TrialLedgerFacts;
+  try {
+    trialLedger = await readTrialLedger(store);
+  } catch {
+    return { ok: false, reason: "store_read_failed" };
+  }
+
+  // Evaluate only a uniquely owner-applied proposal, using evidence recorded after the application.
+  const trialVerdicts: TrialVerdict[] = [];
+  const thresholds = base.thresholds;
+  for (const proposal of proposals) {
+    const matchingApplications = trialLedger.applications.filter((application) => (
+      application.proposalHash === proposal.proposalHash
+    ));
+    if (matchingApplications.length !== 1) continue;
+    const app = matchingApplications[0];
+    if (!app) continue;
+    const appliedAt = Date.parse(app.recordedAt);
+    const generatedAt = Date.parse(base.generatedAt);
+    if (!Number.isFinite(appliedAt) || !Number.isFinite(generatedAt) || generatedAt < appliedAt) continue;
+    const trialRecords = Object.freeze(base.records.filter((record) => Date.parse(record.recordedAt) > appliedAt));
+    const trialWindow: ImprovementWindow = Object.freeze({
+      generatedAt: base.generatedAt,
+      settledRuns: trialLedger.settledRunTimes.filter((recordedAt) => recordedAt > appliedAt).length,
+      records: trialRecords,
+      recordsTruncated: base.recordsTruncated,
+    });
+    const trialMetrics = measureImprovementWindow(trialWindow);
+    const trialRecommendation = recommend({
+      window: trialWindow,
+      metrics: Object.freeze(Object.values(trialMetrics)),
+      thresholds,
+    });
+    const currentRecommendation = trialRecommendation.recommendations.find((candidate) => (
+      candidate.patternId === proposal.recommendation.patternId
+      && candidate.surface === proposal.recommendation.surface
+      && canonicalStringify(candidate.target) === canonicalStringify(proposal.recommendation.target)
+      && canonicalStringify(candidate.to) === canonicalStringify(proposal.recommendation.to)
+    ));
+    const ownerEvidence: BoundedTrialOwnerEvidence = {
+      proposalHash: proposal.proposalHash,
+      applicationHash: app.externalEvidenceHash,
+    };
+    const targetId = proposal.recommendation.baseline.id;
+    const mk = (id: ImprovementMetricId) => trialMetrics[metricKey(id)];
+    const currentTarget = toMetricSnapshot(mk(targetId), targetId);
+    const currentGuards = GUARD_IDS.map((gid) => toMetricSnapshot(mk(gid), gid));
+    const evalInput: EvaluateBoundedTrialInput = {
+      proposal,
+      currentTarget,
+      currentGuards,
+      occurrences: currentRecommendation?.evidence.occurrences ?? 0,
+      distinctRuns: currentRecommendation?.evidence.distinctRuns ?? 0,
+      ageDays: (generatedAt - appliedAt) / MILLISECONDS_PER_DAY,
+      minEffect: thresholds.minEffect,
+      noiseFloor: TRIAL_NOISE_FLOOR,
+      applications: [app],
+      ownerEvidence,
+    };
+    const ev = evaluateBoundedTrial(evalInput);
+    if (ev.ok) {
+      trialVerdicts.push(ev.value);
+    }
+    // A still-open or invalid trial emits no verdict.
+  }
+
   return {
     ok: true,
     value: Object.freeze({
-      ...result.value,
-      trialVerdicts: Object.freeze([]),
+      ...base,
+      proposals: frozenProposals,
+      trialVerdicts: Object.freeze(trialVerdicts),
     }),
   };
 }
@@ -289,12 +526,13 @@ export async function buildImprovementHandoffFacts(
   }
 
   const stageOrder = (stage: RecordJourneyCheckpointPayload["stage"]): number => RECORD_JOURNEY_CHECKPOINT_STAGES.indexOf(stage);
+  const outcomes = projectOutcomes({
+    runId: state.runId,
+    events: state.events,
+    digest: (value) => createHash("sha256").update(value).digest("hex"),
+  });
   const degradation = detectDegradation({
-    outcomes: projectOutcomes({
-      runId: state.runId,
-      events: state.events,
-      digest: (value) => createHash("sha256").update(value).digest("hex"),
-    }),
+    outcomes,
     ...(sessionContinuity === undefined ? {} : { sessionContinuity }),
   });
   return {
@@ -554,7 +792,7 @@ const NATIVE_HTML_TEMPLATE =
   '<form class="panel setup-sheet" id="route-form" hidden><div class="panel-head"><h2>Choose your agent</h2><div><span class="step">AGENT SETTINGS</span><button class="compact-back" id="close-route-config" type="button">Close</button></div></div><div class="panel-body"><fieldset class="route-fieldset"><legend>Installed agents</legend><p class="support-note">Bearing runs locally and requires no Bearing account. Selected agent CLIs may use external providers under their own accounts, credentials, and data policies.</p><p class="model-note"><span>Choose a discovered model and a reasoning level that agent supports.</span><button id="refresh-routes" type="button">Refresh</button></p><p id="detected-routes">Checking agent and model settings\u2026</p><div class="route-options" id="route-options"></div><div class="route-config" id="route-config" hidden><div><label for="model-choice">Model</label><select id="model-choice" required></select></div><div><label for="reasoning-choice">Reasoning</label><select id="reasoning-choice" required></select></div></div></fieldset><div class="route-details"><div><label for="owner-name">What should we call you?</label><input id="owner-name" type="text" required autocomplete="name" maxlength="80"></div></div><div class="actions actions-end"><button class="primary" id="launch-bearing" disabled>Apply settings</button></div></div></form>\n' +
   '<form class="panel prompt-panel chat-landing journey-surface" id="work-form"><div class="chat-heading"><p class="eyebrow">Ready for a new journey</p><h2 id="work-greeting">__BEARING_INITIAL_GREETING__</h2></div><div class="panel-body"><div class="prompt-shell"><div class="context-bar" aria-label="Current workspace and agent settings"><button class="context-chip" id="workspace-chip" type="button" aria-haspopup="dialog"><small>Workspace</small><strong id="workspace-chip-label">Choose repository</strong></button><button class="context-chip" id="work-back" type="button" aria-haspopup="dialog"><small>Agent</small><strong id="agent-chip-label">Choose agent</strong></button><button class="context-chip" id="model-chip" type="button" aria-haspopup="dialog"><small>Model</small><strong id="model-chip-label">Agent default</strong></button><button class="context-chip" id="reasoning-chip" type="button" aria-haspopup="dialog"><small>Reasoning</small><strong id="reasoning-chip-label">Default</strong></button></div><label class="sr-only" for="work-goal">Describe the work</label><textarea id="work-goal" required maxlength="4096" placeholder="What are we working on?"></textarea><div class="prompt-footer"><div class="starter-row" aria-label="Example requests"><button class="starter" type="button" data-starter="Add a feature to this codebase.">Add a feature</button><button class="starter" type="button" data-starter="Investigate a problem in this codebase and propose a fix.">Investigate a problem</button><button class="starter" type="button" data-starter="Assess this codebase for launch readiness and create an investor-ready summary and infographic.">Prepare for launch</button></div><button class="primary">Embark</button></div></div><p class="hint">Bearing plans first. You choose Explorer or Expedition after implementation.md is ready.</p></div></form>\n' +
   '<section class="panel journey-surface" id="history-panel" hidden><div class="panel-head"><h2>Journey history</h2><div class="panel-head-actions"><button class="compact-back history-clear" id="clear-history" type="button">Clear history</button><button class="compact-back" id="close-history" type="button">\u2190 Back</button></div></div><div class="panel-body"><p>Saved locally in this repository. Removing history does not delete generated files.</p><div class="history-list" id="history-list"></div></div></section>\n' +
-  '<section class="panel journey-surface" id="planning-panel" hidden aria-live="polite"><div class="panel-head"><h2>Journey</h2><span class="step" id="journey-phase">SET BEARINGS</span></div><div class="panel-body" id="journey-body" aria-busy="false"><div class="wait-panel" id="journey-wait" hidden><strong id="wait-phase">Set Bearings</strong><p id="wait-help">Your selected agent is working. Bearing will show only validated results.</p><div class="wait-trail" role="progressbar" aria-label="Agent work in progress"></div><div class="wait-meta"><span id="wait-status" role="status" aria-live="polite">Waiting for the agent\u2026</span><span id="wait-elapsed">0s elapsed</span></div><div class="wait-guidance"><strong id="wait-range">Typical time: about 3 minutes</strong><span id="wait-activity">Last activity: phase started just now.</span><span class="wait-slow" id="wait-slow" hidden>Still active; this is taking longer than usual.</span><p>Large repositories, higher reasoning, and model speed can extend this phase.</p><p>Safe to leave\u2014resume this journey from History.</p><ol class="trail-log" id="trail-log" aria-label="Recent journey activity"></ol></div><ul class="artifact-checklist" id="artifact-checklist"><li>No validated artifacts yet.</li></ul></div><div id="journey-content"><h3 id="journey-heading">Set Bearings</h3><p id="journey-summary">Bearing is preparing the bounded journey before gathering owner decisions.</p><aside class="blocker-note" id="recovery-report" hidden><strong id="recovery-heading">Bearing repaired a recoverable agent error.</strong><p id="recovery-summary"></p><p>Share only the redacted diagnostic below. For suspected vulnerabilities, use a private vulnerability report.</p><div class="journey-actions"><button id="dismiss-recovery-report" type="button">Not now</button><a id="private-vulnerability-report" href="https://github.com/alphazede/bearing/security/advisories/new" target="_blank" rel="noopener noreferrer">Report vulnerability privately</a><button id="report-recovery-bug" type="button">Open redacted GitHub issue</button></div></aside><div class="demo-example" id="journey-question-box" hidden><strong>Agent question</strong><br><span id="planning-question"></span><p class="question-help" id="question-help" hidden></p></div><form class="question-form" id="planning-answer-form" hidden><label for="planning-answer">Your answer</label><textarea id="planning-answer" required maxlength="4096" placeholder="Type your answer here\u2026"></textarea><div class="journey-actions"><button id="journey-back" type="button">\u2190 Back</button><button class="primary" type="submit">Continue</button></div></form><div id="journey-action" hidden><div class="journey-actions"><button id="journey-action-back" type="button">\u2190 Back</button><button id="journey-next" class="primary" type="button">Map the Route</button></div></div><div id="mode-choice" hidden><h3>Choose the crew</h3><p>The plan is ready. Choose the execution shape and how often Surveyor reviews it.</p><div class="mode-grid"><button class="mode-card" id="journey-explorer" type="button" aria-pressed="false"><img src="/assets/bearing-explorer-card.png" alt="Two bears following one focused mountain route."><span class="mode-copy"><strong>Explorer</strong><span class="mode-kicker">Focused route \u00b7 fewer sessions</span><span class="mode-line"><b>Best for:</b> compact or mostly sequential plans.</span><span class="mode-line"><b>Tradeoff:</b> less parallelism.</span></span></button><button class="mode-card" id="journey-expedition" type="button" aria-pressed="false"><img src="/assets/bearing-expedition-card.png" alt="Five bears coordinating multiple mountain activities."><span class="mode-copy"><strong>Expedition</strong><span class="mode-kicker">Parallel ascent \u00b7 more sessions</span><span class="mode-line"><b>Best for:</b> independent lanes or multiple phases.</span><span class="mode-line"><b>Tradeoff:</b> higher token and coordination cost.</span></span></button></div><fieldset class="cadence"><legend>Review cadence</legend><div class="cadence-options"><label><input type="radio" name="review-cadence" value="slice">Each slice<span>Fast feedback; highest review cost.</span></label><label><input type="radio" name="review-cadence" value="phase" checked>Each phase <b>(recommended)</b><span>Balanced safety, cost, and recovery.</span></label><label><input type="radio" name="review-cadence" value="end">End only<span>Lowest review cost; issues surface later.</span></label></div></fieldset><label class="cleanup-option"><input id="cleanup-worktrees" type="checkbox" checked> Cleanup merged worktrees <b>(recommended)</b><span>Only clean, proven-merged temporary lanes are removed. Dirty, blocked, failed, or unmerged lanes stay available for recovery.</span></label><div class="journey-actions"><button id="mode-back" type="button">\u2190 Back</button><button id="execute-journey" class="primary" type="button" disabled>Continue</button></div></div><div id="journey-complete" hidden><h3>Evidence complete</h3><p id="completion-summary"></p><ul class="artifact-checklist" id="completion-artifacts"></ul><div class="journey-actions"><button id="completion-back" type="button">\u2190 Back</button><button id="journey-retry" type="button" hidden>Retry</button><button id="new-journey" class="primary" type="button">Start another journey</button></div></div></div></div></section>\n' +
+  '<section class="panel journey-surface" id="planning-panel" hidden aria-live="polite"><div class="panel-head"><h2>Journey</h2><span class="step" id="journey-phase">SET BEARINGS</span></div><div class="panel-body" id="journey-body" aria-busy="false"><div class="wait-panel" id="journey-wait" hidden><strong id="wait-phase">Set Bearings</strong><p id="wait-help">Your selected agent is working. Bearing will show only validated results.</p><div class="wait-trail" role="progressbar" aria-label="Agent work in progress"></div><div class="wait-meta"><span id="wait-status" role="status" aria-live="polite">Waiting for the agent\u2026</span><span id="wait-elapsed">0s elapsed</span></div><div class="wait-guidance"><strong id="wait-range">Typical time: about 3 minutes</strong><span id="wait-activity">Last activity: phase started just now.</span><span class="wait-slow" id="wait-slow" hidden>Still active; this is taking longer than usual.</span><p>Large repositories, higher reasoning, and model speed can extend this phase.</p><p>Safe to leave\u2014resume this journey from History.</p><ol class="trail-log" id="trail-log" aria-label="Recent journey activity"></ol></div><ul class="artifact-checklist" id="artifact-checklist"><li>No validated artifacts yet.</li></ul></div><div id="journey-content"><h3 id="journey-heading">Set Bearings</h3><p id="journey-summary">Bearing is preparing the bounded journey before gathering owner decisions.</p><aside class="blocker-note" id="recovery-report" hidden><strong id="recovery-heading">Bearing repaired a recoverable agent error.</strong><p id="recovery-summary"></p><p>Share only the redacted diagnostic below. For suspected vulnerabilities, use a private vulnerability report.</p><div class="journey-actions"><button id="dismiss-recovery-report" type="button">Not now</button><a id="private-vulnerability-report" href="https://github.com/alphazede/bearing/security/advisories/new" target="_blank" rel="noopener noreferrer">Report vulnerability privately</a><button id="report-recovery-bug" type="button">Open redacted GitHub issue</button></div></aside><div class="demo-example" id="journey-question-box" hidden><strong>Agent question</strong><br><span id="planning-question"></span><p class="question-help" id="question-help" hidden></p></div><form class="question-form" id="planning-answer-form" hidden><label for="planning-answer">Your answer</label><textarea id="planning-answer" required maxlength="4096" placeholder="Type your answer here\u2026"></textarea><div class="journey-actions"><button id="journey-back" type="button">\u2190 Back</button><button class="primary" type="submit">Continue</button></div></form><div id="journey-action" hidden><div class="journey-actions"><button id="journey-action-back" type="button">\u2190 Back</button><button id="journey-next" class="primary" type="button">Map the Route</button></div></div><div id="mode-choice" hidden><h3>Choose the crew</h3><p>The plan is ready. Choose the execution shape and how often Surveyor reviews it.</p><div class="mode-grid"><button class="mode-card" id="journey-explorer" type="button" aria-pressed="false"><img src="/assets/bearing-explorer-card.png" alt="Two bears following one focused mountain route."><span class="mode-copy"><strong>Explorer</strong><span class="mode-kicker">Focused route \u00b7 fewer sessions</span><span class="mode-line"><b>Best for:</b> compact or mostly sequential plans.</span><span class="mode-line"><b>Tradeoff:</b> less parallelism.</span></span></button><button class="mode-card" id="journey-expedition" type="button" aria-pressed="false"><img src="/assets/bearing-expedition-card.png" alt="Five bears coordinating multiple mountain activities."><span class="mode-copy"><strong>Expedition</strong><span class="mode-kicker">Parallel ascent \u00b7 more sessions</span><span class="mode-line"><b>Best for:</b> independent lanes or multiple phases.</span><span class="mode-line"><b>Tradeoff:</b> higher token and coordination cost.</span></span></button></div><fieldset class="cadence"><legend>Review cadence</legend><div class="cadence-options"><label><input type="radio" name="review-cadence" value="slice">Each slice<span>Fast feedback; highest review cost.</span></label><label><input type="radio" name="review-cadence" value="phase" checked>Each phase <b>(recommended)</b><span>Balanced safety, cost, and recovery.</span></label><label><input type="radio" name="review-cadence" value="end">End only<span>Lowest review cost; issues surface later.</span></label></div></fieldset><label class="cleanup-option" id="slice-choice" hidden>Expedition slice<select id="current-slice"></select><span>Expedition executes only the selected approved slice in this pass.</span></label><label class="cleanup-option"><input id="cleanup-worktrees" type="checkbox" checked> Cleanup merged worktrees <b>(recommended)</b><span>Only clean, proven-merged temporary lanes are removed. Dirty, blocked, failed, or unmerged lanes stay available for recovery.</span></label><div class="journey-actions"><button id="mode-back" type="button">\u2190 Back</button><button id="execute-journey" class="primary" type="button" disabled>Continue</button></div></div><div id="journey-complete" hidden><h3>Evidence complete</h3><p id="completion-summary"></p><ul class="artifact-checklist" id="completion-artifacts"></ul><div class="journey-actions"><button id="completion-back" type="button">\u2190 Back</button><button id="journey-retry" type="button" hidden>Retry</button><button id="new-journey" class="primary" type="button">Start another journey</button></div></div></div></div></section>\n' +
   '<section class="panel journey-surface" id="plan-review-panel" hidden aria-labelledby="plan-review-heading"><div class="panel-head"><h2 id="plan-review-heading">Review your route</h2><span class="step">04 / APPROVE</span></div><div class="panel-body"><p id="plan-review-summary">Review the complete planning package before any implementation begins.</p><section class="blocker-note" id="review-findings-panel" hidden><strong id="review-verdict"></strong><ul id="review-findings"></ul></section><div class="review-overview"><div><strong id="review-phase-count">0</strong><span>phases</span></div><div><strong id="review-slice-count">0</strong><span>slices</span></div><div><strong id="review-route">\u2014</strong><span>shared model and reasoning</span></div></div><h3>Planning artifacts</h3><p>The review HTML contains the complete planning package. Each source artifact also opens separately.</p><ul class="artifact-checklist" id="review-artifacts"></ul><h3>Slice assignments</h3><table class="assignment-table"><thead><tr><th>Slice</th><th>Role</th><th>Model route</th><th>Reasoning</th></tr></thead><tbody id="review-assignments"></tbody></table><p class="blocker-note"><strong>Execution can pause.</strong> If an agent reaches a blocker or needs authorization, Bearing saves the journey and shows what stopped, why, the recommended next step, and the decision it needs from you.</p><div class="review-change"><label for="review-change">Want something changed?</label><textarea id="review-change" maxlength="4096" placeholder="Describe the planning changes you want before approval."></textarea></div><div class="journey-actions"><button id="review-back" type="button">\u2190 Back</button><button id="request-plan-changes" type="button">Request changes</button><button id="approve-plan" class="primary" type="button">Approve route</button></div></div></section>\n' +
   '<section class="panel demo-panel" id="demo-panel" hidden aria-labelledby="demo-heading"><div class="panel-head"><div><h2 id="demo-heading">How Bearing works</h2><span class="step" id="demo-step" aria-live="polite">Step 1 of 4</span></div><div class="panel-head-actions"><span class="step">NO TOKENS</span><button class="compact-back" id="close-demo" type="button">Close</button></div></div><div class="panel-body"><ol class="demo-progress" aria-label="Tutorial progress"><li aria-current="step">Why Bearing</li><li>Your request</li><li>Choose the crew</li><li>Your evidence</li></ol><div class="demo-stage" data-demo-stage="0"><h3>Stay in control while agents do the work</h3><p>Bearing is a local control room that turns a complex request into an approved plan, bounded agent work, and evidence you can review.</p><ul class="benefit-list"><li><strong>You stay in charge:</strong> choose the repository, model, plan, execution mode, and consequential actions.</li><li><strong>Bearing runs locally:</strong> No Bearing account is required. A selected agent CLI may use an external provider under its own account, credentials, and data policy.</li><li><strong>You can step away:</strong> agents keep moving inside the approved boundaries and stop when they need your decision.</li></ul></div><div class="demo-stage" data-demo-stage="1" hidden><h3>Describe the outcome in your own words</h3><p>Choose the repository and tell Bearing what you want to accomplish. Before planning, it checks whether the source files are here and asks whether there are reference documents it should use.</p><div class="demo-example"><strong>Example request</strong><br>Add bulk customer onboarding with validation, duplicate handling, a dry-run preview, tests, and independent review.</div><p>Bearing asks only the questions needed to remove important ambiguity. Safe defaults are recorded as assumptions, and you can end questions at any point.</p></div><div class="demo-stage" data-demo-stage="2" hidden><h3>Review the plan, then choose the crew</h3><p>Nothing executes until <code>implementation.md</code> is ready for your review. Then you choose the work style. More bears mean more parallel work, coordination, and token use.</p><div class="mode-grid"><button class="mode-card" id="demo-explorer" type="button" aria-pressed="false"><img src="/assets/bearing-explorer-card.png" alt="Two bears following one focused mountain route."><span class="mode-copy"><strong>Explorer</strong><span class="mode-kicker">Focused route \u00b7 fewer agent sessions</span><span class="mode-line"><b>Use when:</b> the plan is compact, mostly sequential, or has one clear workstream.</span><span class="mode-line"><b>Pros:</b> lower token use and simpler coordination.</span><span class="mode-line"><b>Tradeoff:</b> less parallelism on broad plans.</span></span></button><button class="mode-card" id="demo-expedition" type="button" aria-pressed="false"><img src="/assets/bearing-expedition-card.png" alt="Five bears coordinating multiple mountain activities."><span class="mode-copy"><strong>Expedition</strong><span class="mode-kicker">Parallel ascent \u00b7 more agent sessions</span><span class="mode-line"><b>Use when:</b> the plan has several independent lanes, specialties, or waves.</span><span class="mode-line"><b>Pros:</b> more parallel progress and dedicated coordination.</span><span class="mode-line"><b>Tradeoff:</b> higher token use and coordination overhead.</span></span></button></div><p id="demo-mode-status" role="status">Choose a card to continue the tutorial.</p></div><div class="demo-stage" data-demo-stage="3" hidden><h3>Come back to evidence, not just “done”</h3><p id="demo-selected-mode">Your selected execution mode appears here.</p><p>Agents execute only approved slices and stop at owner decisions. An independent Surveyor then checks the result against the plan, tests, and recorded evidence.</p><div class="demo-example"><strong>Your final view</strong><br>What changed \u00b7 what passed \u00b7 what deviated \u00b7 what is blocked \u00b7 what still needs your decision</div></div><div class="demo-actions"><button id="demo-prev" type="button" disabled>\u2190 Previous</button><button class="primary" id="demo-next" type="button">Next \u2192</button></div></div></section>\n' +
   '<dialog class="glossary-dialog" id="glossary-dialog" aria-labelledby="glossary-heading"><div class="panel-head"><h2 id="glossary-heading">Bearing glossary</h2><button class="compact-back" id="close-glossary" type="button">Close</button></div><div class="panel-body"><dl class="glossary-list"><dt>CDD</dt><dd>Contract-Driven Design defines interface behavior, compatibility, validation, and tests before implementation.</dd><dt>SecDD</dt><dd>Security-Driven Design examines threats, trust boundaries, authentication, secrets, sensitive data, and abuse cases.</dd><dt>OOPDSA</dt><dd>Implementation-design hardening that assigns ownership and examines patterns, data structures, algorithms, complexity, and edge cases.</dd><dt>SEIT</dt><dd>The verification and validation plan describing what must be tested, proven, and recorded as evidence.</dd><dt>Explorer</dt><dd>A focused execution route using fewer agent sessions for compact or mostly sequential work.</dd><dt>Expedition</dt><dd>A parallel execution route for plans with independent lanes, specialties, or phases.</dd><dt>Surveyor</dt><dd>An independent reviewer that checks the completed work against the approved route and evidence.</dd></dl></div></dialog>\n' +
@@ -614,13 +852,13 @@ const NATIVE_HTML_TEMPLATE =
   '  function syncEndQuestions() { endQuestions.hidden = planningAnswerForm.hidden || currentStage !== "gather-supplies"; if (!endQuestions.hidden) endQuestions.disabled = false; }\n' +
   '  new MutationObserver(syncEndQuestions).observe(planningAnswerForm, { attributes: true, attributeFilter: ["hidden"] }); new MutationObserver(syncEndQuestions).observe(document.getElementById("planning-question"), { childList: true });\n' +
   '  function setStatus(message, busy) { status.textContent = message; status.classList.toggle("busy", !!busy); }\n' +
-  '  function routeName(id) { return ({ "codex": "Codex CLI", "claude": "Claude Code", "agy": "Agy", "grok-build": "Grok Build", "opencode": "OpenCode", "pi": "Pi" })[id] || id || "Choose agent"; }\n' +
+  '  function routeName(id) { return ({ "codex": "Codex CLI", "claude": "Claude Code", "agy": "Agy", "opencode": "OpenCode", "pi": "Pi" })[id] || id || "Choose agent"; }\n' +
   '  function syncShellSummary() { var workspace = document.getElementById("workspace-chip-label"); workspace.textContent = selectedRepositoryPath ? selectedRepositoryPath.split(/[\\\\/]/).filter(Boolean).pop() || selectedRepositoryPath : "Choose repository"; workspace.parentElement.title = selectedRepositoryPath; document.getElementById("agent-chip-label").textContent = selectedRoute ? routeName(selectedRoute.id) : "Choose agent"; document.getElementById("model-chip-label").textContent = selectedRoute ? (selectedRoute.model === "*" ? "Agent default" : selectedRoute.model) : "Agent default"; document.getElementById("reasoning-chip-label").textContent = selectedRoute ? selectedRoute.reasoning : "Default"; }\n' +
   '  function fail(msg) { setStatus("Session could not start: " + msg, false); }\n' +
   '  function requestError(label, r) { throw new Error(label + " (" + r.status + "). Refresh the run state and try again."); }\n' +
   '  function readRun(id) { return fetch("/api/v1/runs/" + encodeURIComponent(id), { credentials: "same-origin" }).then(function (r) { if (!r.ok) requestError("Run could not be read", r); return r.json(); }); }\n' +
   '  function postCommand(id, state, type, payload) { var commandId = crypto.randomUUID(); return fetch("/api/v1/runs/" + encodeURIComponent(id) + "/commands", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ schemaVersion: 1, commandId: commandId, runId: id, expectedRevision: state.revision, session: { sessionId: "browser", actor: "owner" }, correlationId: commandId, type: type, payload: payload }) }).then(function (r) { if (!r.ok) requestError("Command was rejected", r); return r.json(); }); }\n' +
-  '  function persistAgentQuestion(question) { return readRun(currentRunId).then(function (state) { if (state.pendingDecision) { if (state.pendingDecision.question !== question) throw new Error("Another owner decision is already pending."); return state; } return postCommand(currentRunId, state, "requireDecision", { decisionId: "journey-" + currentStage + "-" + crypto.randomUUID(), question: question, consequential: true }).then(function () { return readRun(currentRunId); }); }); }\n' +
+  '  function persistAgentQuestion(question, decisionId) { return readRun(currentRunId).then(function (state) { if (state.pendingDecision) { if (state.pendingDecision.question !== question || (typeof decisionId === "string" && decisionId.length > 0 && state.pendingDecision.decisionId !== decisionId)) throw new Error("Another owner decision is already pending."); return state; } var id = (typeof decisionId === "string" && decisionId.length > 0 ? decisionId : "journey-" + currentStage + "-" + crypto.randomUUID()); return postCommand(currentRunId, state, "requireDecision", { decisionId: id, question: question, consequential: true }).then(function () { return readRun(currentRunId); }); }); }\n' +
   '  var phaseNames = { "repository-fit": "Repository fit", "set-bearings": "Set Bearings", "gather-supplies": "Gather Supplies", "map-route": "Map the Route", "recon": "Recon", "draft-implementation": "Draft implementation", "execute-explorer": "Explorer", "execute-expedition": "Expedition", "review": "Surveyor review" };\n' +
   '  function cacheEstimate(body) { var estimate = body && body.nextStageEstimate; if (estimate && (phaseNames[estimate.stage] || estimate.stage === "execute") && Number.isSafeInteger(estimate.minMinutes) && Number.isSafeInteger(estimate.maxMinutes) && estimate.minMinutes >= 1 && estimate.maxMinutes >= estimate.minMinutes && typeof estimate.basis === "string") waitEstimates[estimate.stage] = estimate; }\n' +
   '  function waitEstimate(stage) { return waitEstimates[stage] || (stage === "execute-explorer" || stage === "execute-expedition" ? waitEstimates.execute : null); }\n' +
@@ -655,20 +893,20 @@ const NATIVE_HTML_TEMPLATE =
   '  function renderRecoveryReport(recovery) { var panel = document.getElementById("recovery-report"); document.getElementById("journey-summary").after(panel); panel.hidden = !recovery || (recovery.status !== "repaired" && recovery.status !== "stopped"); if (panel.hidden) return; var fitDiagnosticFields = {scope_repository:["repository","authorizedWorkspaceRoot"],receipt_shape:["receipt"],receipt_reason:["reason"],receipt_ok:["ok"],question_text:["question"],assumption_shape:["assumption"],assumption_repository:["repository"],assumption_plan_directory:["planDirectory"],assumption_rationale:["rationale"],assumption_evidence:["evidence"],evidence_shape:["evidence"],evidence_kind:["kind"],evidence_path:["path"],evidence_detail:["detail"],evidence_containment:["path"],result_envelope:["assistantText","envelope"]}; var fitDiagnostic = recovery.fitDiagnostic; var fields = fitDiagnostic && typeof fitDiagnostic.check === "string" && typeof fitDiagnostic.field === "string" ? fitDiagnosticFields[fitDiagnostic.check] : undefined; var hasFitDiagnostic = Array.isArray(fields) && fields.indexOf(fitDiagnostic.field) !== -1; var diagnosticSummary = hasFitDiagnostic ? " Repository fit check: " + fitDiagnostic.check + "; field: " + fitDiagnostic.field + "." : ""; document.getElementById("recovery-heading").textContent = recovery.status === "repaired" ? "Bearing repaired a recoverable agent error." : "Bearing stopped a repeated recoverable agent error."; document.getElementById("recovery-summary").textContent = "Stage " + recovery.stage + (recovery.status === "repaired" ? " recovered from " : " stopped after ") + recovery.code + " using " + recovery.retryLevel + "." + diagnosticSummary; document.getElementById("report-recovery-bug").onclick = function () { var title = "Bearing " + recovery.version + ": " + recovery.code + " during " + recovery.stage; var body = ["Bearing version: " + recovery.version, "Stage: " + recovery.stage, "Failure class: " + recovery.failureClass, "Failure code: " + recovery.code, "Retry level: " + recovery.retryLevel].concat(hasFitDiagnostic ? ["Repository fit check: " + fitDiagnostic.check, "Repository fit field: " + fitDiagnostic.field] : []).join("\\n"); window.open("https://github.com/alphazede/bearing/issues/new?title=" + encodeURIComponent(title) + "&body=" + encodeURIComponent(body), "_blank", "noopener,noreferrer"); }; }\n' +
   '  function recordPlanReview(answer) { var question = "Approve the complete planning package before implementation?"; return readRun(currentRunId).then(function (state) { if (state.pendingDecision && state.pendingDecision.question !== question) throw new Error("Resolve the current owner decision before reviewing the route."); var save = state.pendingDecision ? Promise.resolve(state) : postCommand(currentRunId, state, "requireDecision", { decisionId: "plan-review-" + crypto.randomUUID(), question: question, consequential: true }).then(function () { return readRun(currentRunId); }); return save; }).then(function (state) { if (!state.pendingDecision || state.pendingDecision.question !== question) throw new Error("Planning approval could not be recorded."); return postCommand(currentRunId, state, "recordOwnerAnswer", { decisionId: state.pendingDecision.decisionId, answer: answer }); }); }\n' +
   '  function confirmFocusAmendment(stage) { var question = "The approved Focus contract changed. Review the drift summary. Confirm the Focus amendment to adopt the updated plan and recapture the Git baseline."; var answer = "Confirmed Focus amendment for execution retry"; var decisionId = "focus-amendment-" + crypto.randomUUID(); return readRun(currentRunId).then(function (state) { if (state.pendingDecision) throw new Error("Resolve the current owner decision before confirming the Focus amendment."); return postCommand(currentRunId, state, "requireDecision", { decisionId: decisionId, question: question, consequential: true }); }).then(function () { return readRun(currentRunId); }).then(function (state) { if (!state.pendingDecision || state.pendingDecision.decisionId !== decisionId || state.pendingDecision.question !== question) throw new Error("Focus amendment confirmation could not be recorded."); return postCommand(currentRunId, state, "recordOwnerAnswer", { decisionId: decisionId, answer: answer }); }).then(function () { return readRun(currentRunId); }).then(function (state) { if (state.pendingDecision) throw new Error("Another owner decision is pending."); focusAmendmentPending = false; invokeJourney(stage, { focusAmendmentConfirmed: true, focusAmendmentDecisionId: decisionId, focusAmendmentExpectedRevision: state.revision }); }, showError); }\n' +
-  '  function renderPlanReview(body) { var review = body.planningReview; if (!review) { renderFailure({ code: "artifact_invalid" }); return; } planningPanel.hidden = true; planReviewPanel.hidden = false; var recovery = document.getElementById("recovery-report"); if (!recovery.hidden) planReviewPanel.querySelector(".panel-body").prepend(recovery); document.getElementById("plan-review-summary").textContent = body.summary; document.getElementById("review-phase-count").textContent = String(review.phases); document.getElementById("review-slice-count").textContent = String(review.slices); document.getElementById("review-route").textContent = review.assignments.length + " assigned routes"; renderArtifactList(document.getElementById("review-artifacts"), body); var target = document.getElementById("review-assignments"); target.replaceChildren(); review.assignments.forEach(function (assignment) { var row = document.createElement("tr"); [assignment.slice, assignment.role, assignment.model, assignment.reasoning].forEach(function (value) { var cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell); }); target.appendChild(row); }); var validation = body.planningValidation || {}; var verdict = validation.verdict || "NEEDS_AMENDMENT"; var findings = Array.isArray(validation.findings) ? validation.findings : []; var findingPanel = document.getElementById("review-findings-panel"); var findingList = document.getElementById("review-findings"); findingList.replaceChildren(); findings.forEach(function (finding) { var item = document.createElement("li"); item.textContent = [finding.code, finding.artifact, finding.sliceId].filter(Boolean).join(" · ") + ": " + finding.observed + " Required: " + finding.required + " Remedy: " + finding.remedy; findingList.appendChild(item); }); findingPanel.hidden = findings.length === 0; document.getElementById("review-verdict").textContent = verdict === "PASS" ? "Planning validation passed with advisory findings." : verdict === "OWNER_DECISION_REQUIRED" ? "Owner decision required before approval." : "Planning amendments required before approval."; var approve = document.getElementById("approve-plan"); approve.disabled = verdict !== "PASS"; document.getElementById("review-change").value = ""; setStatus(verdict === "PASS" ? "Review every artifact, request changes, or approve the route." : verdict === "OWNER_DECISION_REQUIRED" ? "Review the findings and record the required owner decision before approval." : "Review the findings and request the required planning amendments.", false); }\n' +
-  '  function renderFailure(body) { hideWait(); planningSubmit.disabled = false; planningAnswerForm.hidden = true; document.getElementById("journey-action").hidden = true; document.getElementById("mode-choice").hidden = true; var complete = document.getElementById("journey-complete"); complete.hidden = false; complete.firstElementChild.textContent = "Journey paused"; focusAmendmentPending = body.code === "focus_amendment_required"; document.getElementById("journey-summary").textContent = body.code === "artifact_invalid" && currentStage === "draft-implementation" ? "Your questions are complete; the generated files need another validation pass." : "Bearing saved your progress and stopped before moving to the next phase."; var drift = body.focusDrift && Array.isArray(body.focusDrift.changedPlanSources) ? " Changed plan sources: " + body.focusDrift.changedPlanSources.join(", ") + "." : ""; document.getElementById("completion-summary").textContent = focusAmendmentPending ? (body.amendmentPrompt || "Review and confirm the Focus amendment.") + drift : body.continuityLost ? body.continuityDisclosure : body.escalationTarget ? "Automatic retry stopped. Escalation target: " + body.escalationTarget + "." : body.retryRefusal ? "Retry refused: " + body.retryRefusal + "." : body.code === "cancelled" ? "You stopped " + phaseNames[currentStage] + ". Any Git changes remain visible and the phase can be retried." : body.code === "interrupted" ? "Bearing stopped while " + phaseNames[currentStage] + " was running. Inspect the Git changes before deciding whether to retry the saved phase." : body.code === "token_budget" ? "This run reached its token budget before the phase completed. Retry after lowering reasoning with /model or raise the CLI budget." : body.recovery && body.recovery.status === "stopped" ? "Bearing tried one focused repair and one simpler contract-preserving repair. The same deterministic failure remains, so automatic repair stopped: " + body.code + "." : body.code === "artifact_invalid" && currentStage === "draft-implementation" ? "Your answers and planning files are saved. Bearing could not verify the generated implementation package. Retry this step; you will not repeat the questions." : "The agent could not complete " + phaseNames[currentStage] + ": " + (body.code || "request_failed") + ". No success was recorded."; document.getElementById("completion-artifacts").replaceChildren(); var retry = document.getElementById("journey-retry"); retry.textContent = focusAmendmentPending ? "Confirm amendment" : "Retry"; retry.hidden = !focusAmendmentPending && (!!body.continuityLost || !!body.escalationTarget || !!body.retryRefusal || !!(body.recovery && body.recovery.status === "stopped")); document.getElementById("new-journey").hidden = true; setStatus(focusAmendmentPending ? "Owner confirmation is required for the Focus amendment." : body.continuityLost ? "Conversation continuity was lost; review the disclosure." : body.escalationTarget ? "Automatic retry escalated to " + body.escalationTarget + "." : body.retryRefusal ? "Retry refused: " + body.retryRefusal + "." : body.code === "cancelled" ? "Journey stopped by owner." : body.code === "interrupted" ? "Journey interrupted. Inspect changes before retrying." : body.recovery && body.recovery.status === "stopped" ? "Automatic repair stopped after repeated equivalent failures." : "Journey blocked. Retry is available.", false); }\n' +
+  '  function renderPlanReview(body) { var review = body.planningReview; if (!review) { renderFailure({ code: "artifact_invalid" }); return; } planningPanel.hidden = true; planReviewPanel.hidden = false; var recovery = document.getElementById("recovery-report"); if (!recovery.hidden) planReviewPanel.querySelector(".panel-body").prepend(recovery); document.getElementById("plan-review-summary").textContent = body.summary; document.getElementById("review-phase-count").textContent = String(review.phases); document.getElementById("review-slice-count").textContent = String(review.slices); document.getElementById("review-route").textContent = review.assignments.length + " assigned routes"; renderArtifactList(document.getElementById("review-artifacts"), body); var target = document.getElementById("review-assignments"); var currentSlice = document.getElementById("current-slice"); target.replaceChildren(); currentSlice.replaceChildren(); review.assignments.forEach(function (assignment) { var row = document.createElement("tr"); [assignment.slice, assignment.role, assignment.model, assignment.reasoning].forEach(function (value) { var cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell); }); target.appendChild(row); var selected = /^Slice\s+((?:[A-Za-z]+\d+|\d+(?:\.\d+)+))\b/.exec(assignment.slice); if (selected) { var option = document.createElement("option"); option.value = selected[1]; option.textContent = assignment.slice; currentSlice.appendChild(option); } }); var validation = body.planningValidation || {}; var verdict = validation.verdict || "NEEDS_AMENDMENT"; var findings = Array.isArray(validation.findings) ? validation.findings : []; var findingPanel = document.getElementById("review-findings-panel"); var findingList = document.getElementById("review-findings"); findingList.replaceChildren(); findings.forEach(function (finding) { var item = document.createElement("li"); item.textContent = [finding.code, finding.artifact, finding.sliceId].filter(Boolean).join(" · ") + ": " + finding.observed + " Required: " + finding.required + " Remedy: " + finding.remedy; findingList.appendChild(item); }); findingPanel.hidden = findings.length === 0; document.getElementById("review-verdict").textContent = verdict === "PASS" ? "Planning validation passed with advisory findings." : verdict === "OWNER_DECISION_REQUIRED" ? "Owner decision required before approval." : "Planning amendments required before approval."; var approve = document.getElementById("approve-plan"); approve.disabled = verdict !== "PASS"; document.getElementById("review-change").value = ""; setStatus(verdict === "PASS" ? "Review every artifact, request changes, or approve the route." : verdict === "OWNER_DECISION_REQUIRED" ? "Review the findings and record the required owner decision before approval." : "Review the findings and request the required planning amendments.", false); }\n' +
+  '  function renderFailure(body) { hideWait(); planningSubmit.disabled = false; planningAnswerForm.hidden = true; document.getElementById("journey-action").hidden = true; document.getElementById("mode-choice").hidden = true; var complete = document.getElementById("journey-complete"); complete.hidden = false; complete.firstElementChild.textContent = "Journey paused"; focusAmendmentPending = body.code === "focus_amendment_required"; document.getElementById("journey-summary").textContent = body.code === "artifact_invalid" && currentStage === "draft-implementation" ? "Your questions are complete; the generated files need another validation pass." : "Bearing saved your progress and stopped before moving to the next phase."; var drift = body.focusDrift && Array.isArray(body.focusDrift.changedPlanSources) ? " Changed plan sources: " + body.focusDrift.changedPlanSources.join(", ") + "." : ""; document.getElementById("completion-summary").textContent = focusAmendmentPending ? (body.amendmentPrompt || "Review and confirm the Focus amendment.") + drift : body.continuityLost ? body.continuityDisclosure : body.escalationTarget ? "Automatic retry stopped. Escalation target: " + body.escalationTarget + "." : body.retryRefusal ? "Retry refused: " + body.retryRefusal + "." : body.code === "cancelled" ? "You stopped " + phaseNames[currentStage] + ". Any Git changes remain visible and the phase can be retried." : body.code === "interrupted" ? "Bearing stopped while " + phaseNames[currentStage] + " was running. Inspect the Git changes before deciding whether to retry the saved phase." : body.code === "token_budget" ? "This run reached its token budget before the phase completed. Retry after lowering reasoning with /model or raise the CLI budget." : body.recovery && body.recovery.status === "stopped" ? "Bearing tried one focused repair and one simpler contract-preserving repair. The same deterministic failure remains, so automatic repair stopped: " + body.code + "." : body.code === "artifact_invalid" && currentStage === "draft-implementation" ? "Your answers and planning files are saved. Bearing could not verify the generated implementation package. Retry this step; you will not repeat the questions." : "The agent could not complete " + phaseNames[currentStage] + ": " + (body.code || "request_failed") + ". No success was recorded."; document.getElementById("completion-artifacts").replaceChildren(); var retry = document.getElementById("journey-retry"); retry.textContent = focusAmendmentPending ? "Confirm amendment" : "Retry"; retry.hidden = !focusAmendmentPending && (!!body.continuityLost || !!body.escalationTarget || !!body.retryRefusal || body.code === "role_boundary_violation" || !!(body.recovery && body.recovery.status === "stopped")); document.getElementById("new-journey").hidden = true; setStatus(focusAmendmentPending ? "Owner confirmation is required for the Focus amendment." : body.continuityLost ? "Conversation continuity was lost; review the disclosure." : body.escalationTarget ? "Automatic retry escalated to " + body.escalationTarget + "." : body.retryRefusal ? "Retry refused: " + body.retryRefusal + "." : body.code === "cancelled" ? "Journey stopped by owner." : body.code === "interrupted" ? "Journey interrupted. Inspect changes before retrying." : body.recovery && body.recovery.status === "stopped" ? "Automatic repair stopped after repeated equivalent failures." : "Journey blocked. Retry is available.", false); }\n' +
   '  function renderJourney(body) { hideWait(); planningSubmit.disabled = false; renderArtifacts(body); renderRecoveryReport(body.recovery); pendingQuestionCount = body.status === "question" && Array.isArray(body.questions) ? Math.max(0, body.questions.length - 1) : 0; document.getElementById("journey-phase").textContent = phaseNames[currentStage].toUpperCase(); document.getElementById("journey-heading").textContent = phaseNames[currentStage]; document.getElementById("journey-summary").textContent = body.status === "action" ? body.summary : currentStage === "gather-supplies" ? "Answer the planning questions before the route map is written." : "The selected agent needs an owner answer before it can continue."; document.getElementById("journey-complete").hidden = true; document.getElementById("mode-choice").hidden = true; document.getElementById("journey-action").hidden = true; if (body.status === "failure") { renderFailure(body); return; } if (body.status === "question") { document.getElementById("journey-question-box").hidden = false; document.getElementById("planning-question").textContent = body.question || ""; var help = questionHelp(body.question || ""); document.getElementById("question-help").textContent = help; document.getElementById("question-help").hidden = !help; planningAnswerForm.hidden = false; planningAnswer.value = ""; planningAnswer.focus(); setStatus(currentStage === "gather-supplies" && pendingQuestionCount ? "Question saved locally. " + pendingQuestionCount + " remaining." : phaseNames[currentStage] + " needs your answer.", false); return; } document.getElementById("journey-question-box").hidden = true; document.getElementById("question-help").hidden = true; planningAnswerForm.hidden = true; if (currentStage === "draft-implementation") { renderPlanReview(body); return; } if (currentStage === "execute-explorer" || currentStage === "execute-expedition") { invokeJourney("review"); return; } if (currentStage === "review") { document.getElementById("journey-complete").hidden = false; document.getElementById("completion-summary").textContent = body.summary; renderArtifactList(document.getElementById("completion-artifacts"), body); document.getElementById("journey-retry").hidden = true; document.getElementById("new-journey").hidden = false; setStatus("Journey complete. Review the validated evidence.", false); return; } var next = document.getElementById("journey-next"); next.textContent = currentStage === "set-bearings" ? "Gather Supplies" : "Map the Route"; document.getElementById("journey-action").hidden = false; setStatus(phaseNames[currentStage] + " complete. Owner handoff required.", false); }\n' +
-  '  var renderJourneyResponse = renderJourney; renderJourney = function (body) { cacheEstimate(body); if (body.status === "action" && currentStage === "recon" && body.recon && (body.recon.state === "OWNER_DECISION_REQUIRED" || body.recon.state === "RECON_FAILED")) { renderFailure({ code: body.recon.state === "RECON_FAILED" ? "recon_failed" : "owner_decision_required" }); return; } renderJourneyResponse(body); if (body.status === "action" && currentStage === "repository-fit") invokeJourney("set-bearings"); else if (body.status === "action" && currentStage === "gather-supplies") invokeJourney("map-route"); else if (body.status === "action" && currentStage === "map-route") invokeJourney("recon"); else if (body.status === "action" && currentStage === "recon" && body.recon && (body.recon.state === "SKIPPED" || body.recon.state === "RECON_READY")) invokeJourney("draft-implementation"); };\n' +
+  '  var renderJourneyResponse = renderJourney; renderJourney = function (body) { cacheEstimate(body); if (body.status === "action" && currentStage === "recon" && body.recon && body.recon.state === "RECON_FAILED") { renderFailure({ code: "recon_failed" }); return; } if (body.status === "action" && currentStage === "recon" && body.recon && body.recon.state === "OWNER_DECISION_REQUIRED") { if (!body.ownerDecisionId || !body.ownerDecisionQuestion) { renderFailure({ code: "owner_decision_required" }); return; } var q = body.ownerDecisionQuestion; if (body.ownerDecisionAnswered === true) { invokeJourney("draft-implementation"); } else { persistAgentQuestion(q, body.ownerDecisionId).then(function () { renderJourneyResponse(Object.assign({}, body, { status: "question", question: q })); }, function () { renderFailure({ code: "owner_decision_required" }); }); } return; } renderJourneyResponse(body); if (body.status === "action" && currentStage === "repository-fit") invokeJourney("set-bearings"); else if (body.status === "action" && currentStage === "gather-supplies") invokeJourney("map-route"); else if (body.status === "action" && currentStage === "map-route") invokeJourney("recon"); else if (body.status === "action" && currentStage === "recon" && body.recon && (body.recon.state === "SKIPPED" || body.recon.state === "RECON_READY")) invokeJourney("draft-implementation"); };\n' +
   '  function renderSavedExecution(body) { hideWait(); retryStage = "review"; planningSubmit.disabled = false; planningAnswerForm.hidden = true; document.getElementById("journey-action").hidden = true; document.getElementById("mode-choice").hidden = true; var complete = document.getElementById("journey-complete"); complete.hidden = false; complete.firstElementChild.textContent = "Implementation saved"; document.getElementById("journey-summary").textContent = "Implementation completed successfully and is durably saved."; document.getElementById("completion-summary").textContent = "The follow-on review request disconnected. Your implementation success is saved; choose Retry to start Surveyor review."; renderArtifactList(document.getElementById("completion-artifacts"), body); document.getElementById("journey-retry").hidden = false; document.getElementById("new-journey").hidden = true; setStatus("Implementation complete and saved. Review is ready when you are.", false); }\n' +
   '  function reconcileJourney() { var runId = currentRunId, stage = currentStage; clearTimeout(reconcileTimer); reconcileTimer = null; fetch("/api/v1/journey/" + encodeURIComponent(runId) + "/status", { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error("status"); return r.json(); }).then(function (body) { if (currentRunId !== runId || currentStage !== stage) return; var run = body.run; if (!run) throw new Error("unsaved"); currentStage = run.stage; if (run.status === "running") { if (document.getElementById("journey-wait").hidden || run.stage !== stage) showWait(currentStage); setStatus("Reconnected to the saved " + phaseNames[currentStage] + " action.", true); reconcileTimer = setTimeout(function () { if (currentRunId === runId && currentStage === run.stage && !document.getElementById("journey-wait").hidden) reconcileJourney(); }, 2000); return; } if (!run.lastResult) throw new Error("unsaved"); var result = Object.assign({}, run.lastResult, { artifacts: run.artifacts || [], artifactLinks: run.artifactLinks || [] }); cacheEstimate(result); if ((run.stage === "execute-explorer" || run.stage === "execute-expedition") && result.status === "action") { renderSavedExecution(result); return; } renderJourney(result); }, function () { if (currentRunId === runId && currentStage === stage) renderFailure({ code: "network_error" }); }); }\n' +
-  '  function invokeJourney(stage, extra, quiet) { currentStage = stage; if (!quiet) showWait(stage); var payload = Object.assign({ runId: currentRunId, stage: stage, workGoal: currentGoal }, extra || {}); fetch("/api/v1/journey", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify(payload) }).then(function (r) { return r.json().catch(function () { return { status: "failure", code: "request_failed" }; }).then(function (body) { if (!r.ok && body.status !== "failure") return { status: "failure", code: "request_failed" }; return body; }); }).then(function (body) { return body.status === "question" && body.question ? persistAgentQuestion(body.question).then(function () { return body; }) : body; }).then(renderJourney, reconcileJourney); }\n' +
+  '  function invokeJourney(stage, extra, quiet) { currentStage = stage; if (!quiet) showWait(stage); var payload = Object.assign({ runId: currentRunId, stage: stage, workGoal: currentGoal }, extra || {}); fetch("/api/v1/journey", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify(payload) }).then(function (r) { return r.json().catch(function () { return { status: "failure", code: "request_failed" }; }).then(function (body) { if (!r.ok && body.status !== "failure") return { status: "failure", code: "request_failed" }; return body; }); }).then(function (body) { if (body.status === "question" && body.question) { return persistAgentQuestion(body.question, body.ownerDecisionId).then(function () { return body; }); } return body; }).then(renderJourney, reconcileJourney); }\n' +
   '  function showError(error) { setStatus(error instanceof Error ? error.message : "Request failed.", false); }\n' +
   '  function showDemoStage(next) { var stages = document.querySelectorAll("[data-demo-stage]"); var progress = document.querySelectorAll(".demo-progress li"); demoStage = Math.max(0, Math.min(stages.length - 1, next)); stages.forEach(function (stage, index) { stage.hidden = index !== demoStage; }); progress.forEach(function (step, index) { if (index === demoStage) step.setAttribute("aria-current", "step"); else step.removeAttribute("aria-current"); }); document.getElementById("demo-step").textContent = "Step " + (demoStage + 1) + " of " + stages.length; document.getElementById("demo-prev").disabled = demoStage === 0; document.getElementById("demo-next").textContent = demoStage === stages.length - 1 ? (currentRunId ? "Back to journey" : "Start journey") : "Next \\u2192"; }\n' +
   '  function chooseDemoMode(mode) { demoMode = mode; ["explorer", "expedition"].forEach(function (name) { var card = document.getElementById("demo-" + name); var selected = name === mode; card.classList.toggle("selected", selected); card.setAttribute("aria-pressed", String(selected)); }); if (!mode) { document.getElementById("demo-mode-status").textContent = "Choose a card to continue the tutorial."; document.getElementById("demo-selected-mode").textContent = "Your selected execution mode appears here."; return; } document.getElementById("demo-mode-status").textContent = (mode === "explorer" ? "Explorer selected: focused execution with fewer agent sessions." : "Expedition selected: parallel execution with more coordination.") + " Tutorial only; nothing was launched."; document.getElementById("demo-selected-mode").textContent = "Tutorial selection: " + (mode === "explorer" ? "Explorer" : "Expedition") + ". In a real run, Bearing records owner approval before execution."; }\n' +
   '  function openDemo() { demoReturnPanel = !planReviewPanel.hidden ? planReviewPanel : !planningPanel.hidden ? planningPanel : !workForm.hidden ? workForm : !routeForm.hidden ? routeForm : repositoryPanel; [repositoryPanel, routeForm, workForm, planningPanel, planReviewPanel].forEach(function (panel) { panel.hidden = true; }); demoPanel.hidden = false; viewDemo.textContent = "Exit tutorial"; chooseDemoMode(""); showDemoStage(0); setStatus("How it works. No model calls or tokens.", false); }\n' +
   '  function closeDemoPanel() { demoPanel.hidden = true; viewDemo.textContent = "See how it works"; if (demoReturnPanel) demoReturnPanel.hidden = false; setStatus(rememberedGreeting || (demoReturnPanel === repositoryPanel ? "Choose a repository." : "Tutorial closed."), false); }\n' +
   '  function configureRoute(route) { var modelChoice = document.getElementById("model-choice"); var reasoningChoice = document.getElementById("reasoning-choice"); var config = document.getElementById("route-config"); selectedRoute = null; config.hidden = true; document.getElementById("launch-bearing").disabled = true; detectedRoutes.textContent = "Loading model choices for " + route.id + "…"; fetch("/api/v1/routes/" + encodeURIComponent(route.id) + "/models", { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error("models"); return r.json(); }).then(function (body) { var models = body.models || []; modelChoice.replaceChildren(); models.forEach(function (option) { var item = document.createElement("option"); item.value = option.model; item.textContent = option.label; if (option.model === route.model) item.selected = true; modelChoice.appendChild(item); }); function configureReasoning() { var option = models.find(function (candidate) { return candidate.model === modelChoice.value; }) || models[0]; reasoningChoice.replaceChildren(); if (!option) return; reasoningTiers.forEach(function (level) { var item = document.createElement("option"); item.value = level; item.textContent = level; reasoningChoice.appendChild(item); }); var preferred = reasoningTiers.indexOf(route.reasoning) >= 0 ? route.reasoning : reasoningTiers.indexOf(option.defaultReasoning) >= 0 ? option.defaultReasoning : "medium"; reasoningChoice.value = preferred; selectedRoute = { id: route.id, provider: route.provider, model: option.model, reasoning: reasoningChoice.value }; document.getElementById("launch-bearing").disabled = false; } modelChoice.onchange = configureReasoning; reasoningChoice.onchange = function () { selectedRoute = { id: route.id, provider: route.provider, model: modelChoice.value, reasoning: reasoningChoice.value }; }; config.hidden = false; configureReasoning(); detectedRoutes.textContent = "Model choices loaded. Choose a model and reasoning level."; }, function () { detectedRoutes.textContent = "Model choices unavailable. Choose another detected agent or refresh detection."; }); }\n' +
-  '  function renderRoutes(routes) { var names = { "codex": "Codex CLI", "claude": "Claude Code", "agy": "Agy", "grok-build": "Grok Build", "opencode": "OpenCode", "pi": "Pi" }; var firstAvailable = null; selectedRoute = null; document.getElementById("route-config").hidden = true; document.getElementById("launch-bearing").disabled = true; routeOptions.replaceChildren(); routes.forEach(function (route, index) { var label = document.createElement("label"); label.className = "route-card" + (route.detected ? "" : " unavailable"); var input = document.createElement("input"); input.type = "radio"; input.name = "route"; input.id = "route-option-" + index; input.required = true; input.disabled = !route.detected; input.addEventListener("change", function () { configureRoute(route); }); var copy = document.createElement("span"); var title = document.createElement("strong"); title.textContent = names[route.id] || route.id; var statusText = document.createElement("span"); statusText.className = "route-status"; statusText.id = input.id + "-status"; statusText.textContent = route.detected ? "Agent detected" : "Agent unavailable"; input.setAttribute("aria-describedby", statusText.id); var modelText = document.createElement("span"); modelText.className = "route-model"; modelText.textContent = (route.model === "*" ? "Current model: agent default" : "Current model: " + route.model) + " · reasoning: " + route.reasoning; copy.append(title, statusText, modelText); label.append(input, copy); routeOptions.appendChild(label); if (!firstAvailable && route.detected) firstAvailable = input; }); var detected = routes.filter(function (route) { return route.detected; }).length; detectedRoutes.textContent = detected + " of " + routes.length + " supported agents detected. Choose one to see its models and reasoning levels."; if (firstAvailable) firstAvailable.focus(); }\n' +
+  '  function renderRoutes(routes) { var names = { "codex": "Codex CLI", "claude": "Claude Code", "agy": "Agy", "opencode": "OpenCode", "pi": "Pi" }; var firstAvailable = null; selectedRoute = null; document.getElementById("route-config").hidden = true; document.getElementById("launch-bearing").disabled = true; routeOptions.replaceChildren(); routes.forEach(function (route, index) { var label = document.createElement("label"); label.className = "route-card" + (route.detected ? "" : " unavailable"); var input = document.createElement("input"); input.type = "radio"; input.name = "route"; input.id = "route-option-" + index; input.required = true; input.disabled = !route.detected; input.addEventListener("change", function () { configureRoute(route); }); var copy = document.createElement("span"); var title = document.createElement("strong"); title.textContent = names[route.id] || route.id; var statusText = document.createElement("span"); statusText.className = "route-status"; statusText.id = input.id + "-status"; statusText.textContent = route.detected ? "Agent detected" : "Agent unavailable"; input.setAttribute("aria-describedby", statusText.id); var modelText = document.createElement("span"); modelText.className = "route-model"; modelText.textContent = (route.model === "*" ? "Current model: agent default" : "Current model: " + route.model) + " · reasoning: " + route.reasoning; copy.append(title, statusText, modelText); label.append(input, copy); routeOptions.appendChild(label); if (!firstAvailable && route.detected) firstAvailable = input; }); var detected = routes.filter(function (route) { return route.detected; }).length; detectedRoutes.textContent = detected + " of " + routes.length + " supported agents detected. Choose one to see its models and reasoning levels."; if (firstAvailable) firstAvailable.focus(); }\n' +
   '  function loadRoutes() { detectedRoutes.textContent = "Checking supported agents\u2026"; fetch("/api/v1/routes", { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error("routes"); return r.json(); }).then(function (body) { renderRoutes(body.routes); }, function () { detectedRoutes.textContent = "Agent detection unavailable; no route has been selected or verified."; }); }\n' +
   '  function resumeRailEntry(entry) { [repositoryPanel, routeForm, workForm, planningPanel, planReviewPanel, historyPanel, demoPanel].forEach(function (panel) { panel.hidden = true; }); var hasSavedResult = !!(entry.stage && entry.lastResult); if (entry.busy && entry.stage) { currentRunId = entry.runId; currentGoal = entry.goal; currentStage = entry.stage; planningPanel.hidden = false; showWait(currentStage); setStatus("Returned to the active journey.", true); } else if (hasSavedResult) { currentRunId = entry.runId; currentGoal = entry.goal; currentStage = entry.stage; planningPanel.hidden = false; renderJourney(Object.assign({}, entry.lastResult, { artifacts: entry.artifacts || [], artifactLinks: entry.artifactLinks || [] })); setStatus(entry.status === "complete" ? "Opened completed journey evidence." : "Resumed the saved journey.", false); } else { currentRunId = ""; currentGoal = ""; workForm.hidden = false; document.getElementById("work-goal").value = entry.goal; document.getElementById("work-goal").focus(); setStatus("Saved request loaded. Embark when you are ready to start a new journey.", false); } renderRailHistory(historyEntries); appShell.classList.remove("rail-open"); }\n' +
   '  function renderRailHistory(entries) { historyEntries = entries; railHistoryList.replaceChildren(); var query = document.getElementById("history-search").value.trim().toLowerCase(); var shown = entries.filter(function (entry) { return !query || (entry.title + " " + entry.goal).toLowerCase().includes(query); }); if (!shown.length) { var empty = document.createElement("p"); empty.className = "rail-empty"; empty.textContent = entries.length ? "No matching journeys." : selectedRepositoryPath ? "No journeys yet." : "Choose a workspace to see its journeys."; railHistoryList.appendChild(empty); return; } shown.forEach(function (entry) { var action = document.createElement("button"); action.type = "button"; action.className = "rail-journey" + (entry.runId === currentRunId ? " current" : ""); action.setAttribute("aria-label", (entry.busy ? "Return to running journey: " : "Open journey: ") + entry.title); var dot = document.createElement("span"); dot.className = "journey-dot " + (entry.busy ? "running" : entry.status === "complete" ? "complete" : "paused"); dot.setAttribute("aria-hidden", "true"); var copy = document.createElement("div"); var title = document.createElement("strong"); title.textContent = entry.title; var detail = document.createElement("small"); detail.textContent = entry.busy ? "Running · " + (phaseNames[entry.stage] || entry.stage || "Working") : entry.status === "complete" ? "Complete" : "Saved · " + new Date(entry.updatedAt).toLocaleDateString(); copy.append(title, detail); action.append(dot, copy); action.addEventListener("click", function () { resumeRailEntry(entry); }); railHistoryList.appendChild(action); }); }\n' +
@@ -751,8 +989,9 @@ const NATIVE_HTML_TEMPLATE =
   '  document.getElementById("review-back").addEventListener("click", function () { planReviewPanel.hidden = true; workForm.hidden = false; document.getElementById("work-goal").value = currentGoal; document.getElementById("work-goal").focus(); setStatus("Planning package saved. Update the request or return through History.", false); });\n' +
   '  document.getElementById("request-plan-changes").addEventListener("click", function () { var instruction = document.getElementById("review-change").value.trim(); if (!instruction) { document.getElementById("review-change").focus(); return; } recordPlanReview("Changes requested: " + instruction).then(function () { planReviewPanel.hidden = true; planningPanel.hidden = false; invokeJourney("gather-supplies", { reviewChange: instruction }); }, showError); });\n' +
   '  document.getElementById("approve-plan").addEventListener("click", function () { document.getElementById("approve-plan").disabled = true; recordPlanReview("Approved for execution-mode selection").then(function () { planReviewPanel.hidden = true; planningPanel.hidden = false; document.getElementById("mode-choice").hidden = false; document.getElementById("approve-plan").disabled = false; setStatus("Route approved. Choose Explorer or Expedition and the review cadence.", false); }, function (error) { document.getElementById("approve-plan").disabled = false; showError(error); }); });\n' +
-  '  ["explorer", "expedition"].forEach(function (mode) { document.getElementById("journey-" + mode).addEventListener("click", function () { journeyMode = mode; ["explorer", "expedition"].forEach(function (name) { var card = document.getElementById("journey-" + name); var chosen = name === mode; card.classList.toggle("selected", chosen); card.setAttribute("aria-pressed", String(chosen)); }); document.getElementById("execute-journey").disabled = false; }); });\n' +
-  '  document.getElementById("execute-journey").addEventListener("click", function () { if (!journeyMode) return; var cadence = document.querySelector("input[name=review-cadence]:checked").value; invokeJourney(journeyMode === "explorer" ? "execute-explorer" : "execute-expedition", { executionMode: journeyMode, reviewCadence: cadence, cleanupMergedWorktrees: document.getElementById("cleanup-worktrees").checked }); });\n' +
+  '  ["explorer", "expedition"].forEach(function (mode) { document.getElementById("journey-" + mode).addEventListener("click", function () { journeyMode = mode; ["explorer", "expedition"].forEach(function (name) { var card = document.getElementById("journey-" + name); var chosen = name === mode; card.classList.toggle("selected", chosen); card.setAttribute("aria-pressed", String(chosen)); }); var sliceChoice = document.getElementById("slice-choice"); var currentSlice = document.getElementById("current-slice"); sliceChoice.hidden = mode !== "expedition"; document.getElementById("execute-journey").disabled = mode === "expedition" && !currentSlice.value; }); });\n' +
+  '  document.getElementById("current-slice").addEventListener("change", function () { if (journeyMode === "expedition") document.getElementById("execute-journey").disabled = !this.value; });\n' +
+  '  document.getElementById("execute-journey").addEventListener("click", function () { if (!journeyMode) return; var cadence = document.querySelector("input[name=review-cadence]:checked").value; var currentSlice = document.getElementById("current-slice"); if (journeyMode === "expedition" && !currentSlice.value) return; invokeJourney(journeyMode === "explorer" ? "execute-explorer" : "execute-expedition", { executionMode: journeyMode, reviewCadence: cadence, cleanupMergedWorktrees: document.getElementById("cleanup-worktrees").checked, ...(journeyMode === "expedition" ? { currentSlice: currentSlice.value } : {}) }); });\n' +
   '  document.getElementById("journey-back").addEventListener("click", function () { planningPanel.hidden = true; workForm.hidden = false; document.getElementById("work-goal").focus(); setStatus("Review or update your work request.", false); });\n' +
   '  document.getElementById("mode-back").addEventListener("click", function () { document.getElementById("mode-choice").hidden = true; planningPanel.hidden = true; planReviewPanel.hidden = false; setStatus("Review the approved planning package.", false); });\n' +
   '  document.getElementById("completion-back").addEventListener("click", function () { document.getElementById("journey-complete").hidden = true; document.getElementById("mode-choice").hidden = false; setStatus("Review the selected execution settings.", false); });\n' +
@@ -839,16 +1078,21 @@ function isSelectionBody(v: unknown): v is Selection {
 interface JourneyBody {
   readonly runId: string;
   readonly stage: JourneyStage;
+  readonly expectedRevision?: number;
+  readonly recoveryExpectedRevision?: number;
   readonly workGoal?: string;
   readonly answer?: string;
   readonly endQuestions?: true;
   readonly reviewChange?: string;
   readonly executionMode?: "explorer" | "expedition";
   readonly reviewCadence?: "slice" | "phase" | "end";
+  readonly currentSlice?: string;
   readonly cleanupMergedWorktrees?: boolean;
   readonly focusAmendmentConfirmed?: true;
   readonly focusAmendmentDecisionId?: string;
   readonly focusAmendmentExpectedRevision?: number;
+  /** Closed-vocabulary warrant supplied by guided progress transition for exact same-stage retry. */
+  readonly retryWarrant?: RetryWarrant;
 }
 
 interface JourneyControlBody { readonly runId: string; readonly action: "stop" | "steer"; readonly instruction?: string; }
@@ -868,24 +1112,42 @@ function isJourneyControlBody(v: unknown): v is JourneyControlBody {
 function isJourneyBody(v: unknown): v is JourneyBody {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
   const body = v as Record<string, unknown>;
-  const allowed = new Set(["runId", "stage", "workGoal", "answer", "endQuestions", "reviewChange", "executionMode", "reviewCadence", "cleanupMergedWorktrees", "focusAmendmentConfirmed", "focusAmendmentDecisionId", "focusAmendmentExpectedRevision"]);
+  const allowed = new Set(["runId", "stage", "expectedRevision", "recoveryExpectedRevision", "workGoal", "answer", "endQuestions", "reviewChange", "executionMode", "reviewCadence", "currentSlice", "cleanupMergedWorktrees", "focusAmendmentConfirmed", "focusAmendmentDecisionId", "focusAmendmentExpectedRevision", "retryWarrant"]);
   // ponytail: built from the ledger tuple. A hand-written literal types its
   // members but not its completeness, so a missing stage would be rejected here
   // and nowhere else.
   const stages = new Set<JourneyStage>(RECORD_JOURNEY_CHECKPOINT_STAGES);
   return Object.keys(body).every((key) => allowed.has(key)) && /^[A-Za-z0-9_-]{1,128}$/.test(String(body.runId ?? "")) &&
     stages.has(body.stage as JourneyStage) &&
+    (body.expectedRevision === undefined || (
+      Number.isSafeInteger(body.expectedRevision) && Number(body.expectedRevision) >= 0 &&
+      body.recoveryExpectedRevision === undefined && body.workGoal === undefined && body.answer === undefined && body.endQuestions === undefined &&
+      body.reviewChange === undefined && body.executionMode === undefined && body.reviewCadence === undefined && body.cleanupMergedWorktrees === undefined &&
+      body.focusAmendmentConfirmed === undefined && body.focusAmendmentDecisionId === undefined && body.focusAmendmentExpectedRevision === undefined
+    )) &&
+    (body.recoveryExpectedRevision === undefined || (
+      (body.stage === "gather-supplies" || body.stage === "execute-explorer" || body.stage === "execute-expedition") &&
+      Number.isSafeInteger(body.recoveryExpectedRevision) && Number(body.recoveryExpectedRevision) >= 0 &&
+      body.expectedRevision === undefined && body.workGoal === undefined && body.answer === undefined && body.endQuestions === undefined &&
+      body.reviewChange === undefined && body.executionMode === undefined && body.reviewCadence === undefined && body.currentSlice === undefined && body.cleanupMergedWorktrees === undefined &&
+      body.focusAmendmentConfirmed === undefined && body.focusAmendmentDecisionId === undefined && body.focusAmendmentExpectedRevision === undefined
+    )) &&
     (body.workGoal === undefined || (typeof body.workGoal === "string" && body.workGoal === body.workGoal.trim() && body.workGoal.length > 0 && body.workGoal.length <= 4096 && !hasUnsafeTextControl(body.workGoal))) &&
     (body.answer === undefined || (typeof body.answer === "string" && body.answer === body.answer.trim() && body.answer.length > 0 && body.answer.length <= 4096 && !hasUnsafeTextControl(body.answer))) &&
     (body.endQuestions === undefined || (body.endQuestions === true && body.stage === "gather-supplies" && typeof body.answer === "string")) &&
     (body.reviewChange === undefined || (body.stage === "gather-supplies" && typeof body.reviewChange === "string" && body.reviewChange === body.reviewChange.trim() && body.reviewChange.length > 0 && body.reviewChange.length <= 4096 && !hasUnsafeTextControl(body.reviewChange))) &&
     (body.executionMode === undefined || body.executionMode === "explorer" || body.executionMode === "expedition") &&
     (body.reviewCadence === undefined || body.reviewCadence === "slice" || body.reviewCadence === "phase" || body.reviewCadence === "end") &&
+    (body.currentSlice === undefined || body.stage === "execute-expedition" && typeof body.currentSlice === "string" && /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/.test(body.currentSlice)) &&
     (body.cleanupMergedWorktrees === undefined || ((body.stage === "execute-explorer" || body.stage === "execute-expedition") && typeof body.cleanupMergedWorktrees === "boolean")) &&
     ((body.focusAmendmentConfirmed === undefined && body.focusAmendmentDecisionId === undefined && body.focusAmendmentExpectedRevision === undefined) ||
       (body.focusAmendmentConfirmed === true && (body.stage === "execute-explorer" || body.stage === "execute-expedition") &&
         typeof body.focusAmendmentDecisionId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(body.focusAmendmentDecisionId) &&
-        Number.isSafeInteger(body.focusAmendmentExpectedRevision) && Number(body.focusAmendmentExpectedRevision) >= 0));
+        Number.isSafeInteger(body.focusAmendmentExpectedRevision) && Number(body.focusAmendmentExpectedRevision) >= 0)) &&
+    (body.retryWarrant === undefined || (
+      (body.retryWarrant === "new_hypothesis" || body.retryWarrant === "new_evidence" || body.retryWarrant === "changed_strategy" || body.retryWarrant === "changed_environment") &&
+      (body.expectedRevision !== undefined || body.recoveryExpectedRevision !== undefined)
+    ));
 }
 
 const HEADER_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
@@ -1111,6 +1373,7 @@ function handleRepositoryPost(
       return repositoryBootstrap.choose(resolved.candidate, {
         ownerConfirmedNonGit: body!.confirmNonGit === true,
         ...(agentExecutableRealpaths ? { agentExecutableRealpaths } : {}),
+        legacyWorkspaceProof: async (path) => (await admitRepositoryRoot(path)) !== undefined,
       }).then((result) => {
         selected.repositorySelecting = false;
         if (!result.ok) {
@@ -1264,6 +1527,7 @@ export interface RequestHandlerOptions {
     readonly runId: string;
     readonly expectedRevision: number;
   }) => Promise<void>;
+  readonly consumeJourneyStatusRefresh?: (runId: string) => boolean;
 }
 
 function handleRepositoryOptions(
@@ -1429,6 +1693,7 @@ interface BrowserJourney {
   planDirectory?: string;
   repositoryFitDecision?: FitDecision;
   resolvedPlanDirectory?: string;
+  currentSlice?: string;
   reviewBaselineRevision?: number;
   lastResult?: CheckpointJourneyResult;
   control?: { action: "stop" | "steer"; instruction?: string };
@@ -1439,6 +1704,10 @@ interface BrowserJourney {
   gatherQuestionsDiscovered: boolean;
   retryLedger: RetryLedgerEntry[];
   activityTrail: JourneyActivity[];
+  tokenTotal?: number;
+  tokenBudget?: number;
+  tokenBudgetState?: JourneyTokenBudgetState;
+  recoveryOutcome?: JourneyRecoveryOutcome;
   concurrency?: RuntimeConcurrencyDecision;
   sessionContinuity: "intact" | "lost";
   retryRefusal?: RetryRefusal;
@@ -1484,7 +1753,12 @@ function confirmedFit(state: BrowserJourney, repositoryPath: string): ConfirmedF
 type FitAnswer =
   | ConfirmedFit
   | { readonly declined: true }
-  | { readonly question: string }
+  | {
+      readonly question: string;
+      readonly validationError?: "repository_fit_answer_invalid";
+      readonly remedy?: typeof FIT_OWNER_ANSWER_REMEDY;
+      readonly correctionAction?: "decide";
+    }
   | { readonly consolidation: BoundConsolidationPlan }
   | { readonly failure: "input_invalid" | "fit_undecidable" };
 
@@ -1549,13 +1823,23 @@ async function fitAnswer(
   answer: string,
 ): Promise<FitAnswer> {
   if (assumption.repository !== repositoryPath) return { failure: "fit_undecidable" };
-  const normalized = answer.toLowerCase().replace(/[.!]+$/g, "");
-  if (["no", "decline", "declined", "stop", "cancel"].includes(normalized)) return { declined: true };
-  const confirmed = answer === assumption.planDirectory
-    || ["y", "yes", "confirm", "confirmed", "approve", "approved", "proceed", "use it", "looks good"].includes(normalized);
+  const canonical = canonicalizeFitOwnerAnswer(answer, repositoryPath);
+  if (!canonical.ok) return {
+    question: `${assumption.repository} and ${assumption.planDirectory} still require confirmation. ${canonical.remedy}`,
+    validationError: canonical.error,
+    remedy: canonical.remedy,
+    correctionAction: canonical.correctionAction,
+  };
+  if (canonical.answer === "Decline") return { declined: true };
+  const confirmed = canonical.answer === "Confirm" || canonical.answer === assumption.planDirectory;
   let resolved;
-  try { resolved = await resolvePlanDirectory(repositoryPath, confirmed ? assumption.planDirectory : answer); }
-  catch { return { failure: "input_invalid" }; }
+  try { resolved = await resolvePlanDirectory(repositoryPath, confirmed ? assumption.planDirectory : canonical.answer); }
+  catch { return {
+    question: `${assumption.repository} and ${assumption.planDirectory} still require confirmation. ${FIT_OWNER_ANSWER_REMEDY}`,
+    validationError: "repository_fit_answer_invalid",
+    remedy: FIT_OWNER_ANSWER_REMEDY,
+    correctionAction: "decide",
+  }; }
   if (resolved.ok) {
     const consolidation = await duplicateConsolidation(repositoryPath, resolved.path);
     if (consolidation) return { consolidation };
@@ -1568,10 +1852,20 @@ async function fitAnswer(
     return { decision, resolvedPlanDirectory: resolved.path };
   }
   if (resolved.reason === "plan_directory_ambiguous") {
-    return { question: `More than one plan directory matches. Enter one exact path: ${resolved.matches.join(", ")}` };
+    return {
+      question: `More than one plan directory matches. Enter one exact path: ${resolved.matches.join(", ")}`,
+      validationError: "repository_fit_answer_invalid",
+      remedy: FIT_OWNER_ANSWER_REMEDY,
+      correctionAction: "decide",
+    };
   }
   if (resolved.reason === "plan_directory_absent") {
-    return { question: `No exact plan directory matches "${resolved.requested}". Enter a full path under docs/plans/.` };
+    return {
+      question: `No exact plan directory matches "${resolved.requested}". Enter a full path under docs/plans/.`,
+      validationError: "repository_fit_answer_invalid",
+      remedy: FIT_OWNER_ANSWER_REMEDY,
+      correctionAction: "decide",
+    };
   }
   return { failure: "input_invalid" };
 }
@@ -1586,6 +1880,46 @@ type RecoveryReport = {
   readonly version: string;
   readonly fitDiagnostic?: FitDiagnostic;
 };
+
+function boundedJourneyTokenBudget(run: ResolvedRun): number | undefined {
+  const budget = run.roles[0]?.limits.tokenBudget;
+  return typeof budget === "number"
+    && Number.isSafeInteger(budget)
+    && budget > 0
+    ? budget
+    : undefined;
+}
+
+function accumulateJourneyTokens(state: BrowserJourney, result: JourneyResult): void {
+  const tokens = result.tokens;
+  if (state.tokenBudget !== undefined) {
+    state.tokenBudgetState = result.status === "failure"
+      && result.code === "token_budget"
+      && Number.isSafeInteger(tokens)
+      && tokens > state.tokenBudget
+      ? "exhausted"
+      : "within_budget";
+  }
+  if (state.tokenTotal === undefined
+    || !Number.isSafeInteger(tokens)
+    || tokens < 0
+    || tokens > MAX_JOURNEY_TOKEN_TOTAL - state.tokenTotal) {
+    state.tokenTotal = undefined;
+    return;
+  }
+  state.tokenTotal += tokens;
+}
+
+function journeyTokenUsage(state: BrowserJourney): JourneyTokenUsage | undefined {
+  if (state.tokenTotal === undefined
+    || state.tokenBudget === undefined
+    || state.tokenBudgetState === undefined) return undefined;
+  return {
+    total: state.tokenTotal,
+    budget: state.tokenBudget,
+    state: state.tokenBudgetState,
+  };
+}
 
 function recoverableFailure(result: JourneyResult): result is FailureResult {
   return result.status === "failure" && ["result_missing", "result_malformed", "artifact_invalid", "focus_invalid", "completion_invalid", "fit_malformed"].includes(result.code);
@@ -1629,15 +1963,39 @@ async function browserFailureFingerprint(
   });
 }
 
+/**
+ * Both `focus_amendment_required` and `role_boundary_violation` gate retry on the same
+ * owner-confirmation flow (DES-03): the owner must recapture the target repository, write
+ * set, and Git baseline before retry, never an automatic same-slice repair. This is the
+ * single place that maps a failure code onto that shared gate, and onto the distinct,
+ * accurate confirmation prompt/approval text for each.
+ */
+type AmendmentGateCode = "focus_amendment_required" | "role_boundary_violation";
+
+function amendmentGateCode(code: string | undefined): AmendmentGateCode | undefined {
+  return code === "focus_amendment_required" || code === "role_boundary_violation" ? code : undefined;
+}
+
+function amendmentPromptFor(code: AmendmentGateCode): typeof FOCUS_AMENDMENT_PROMPT | typeof ROLE_BOUNDARY_VIOLATION_PROMPT {
+  return code === "focus_amendment_required" ? FOCUS_AMENDMENT_PROMPT : ROLE_BOUNDARY_VIOLATION_PROMPT;
+}
+
+function amendmentApprovalFor(code: AmendmentGateCode): typeof FOCUS_AMENDMENT_APPROVAL | typeof ROLE_BOUNDARY_VIOLATION_APPROVAL {
+  return code === "focus_amendment_required" ? FOCUS_AMENDMENT_APPROVAL : ROLE_BOUNDARY_VIOLATION_APPROVAL;
+}
+
 function retryScope(stage: JourneyStage, code: FailureResult["code"]): EscalationScope {
-  if (code === "focus_amendment_required") return "contract-change";
+  // Issue 93: recovering from a proven pre-dispatch role-boundary violation, like recovering
+  // from Focus drift, requires the owner to recapture the target repository, write set, and Git
+  // baseline before retry (DES-03) — never an automatic same-slice repair.
+  if (code === "focus_amendment_required" || code === "role_boundary_violation") return "contract-change";
   if (stage === "review") return "cross-phase";
   if (stage === "map-route" || stage === "recon" || stage === "draft-implementation") return "cross-slice";
   return "within-slice";
 }
 
 function escalationTargetFor(stage: JourneyStage, result: JourneyResult | undefined): EscalationTarget {
-  if (result?.status === "failure" && result.code === "focus_amendment_required") return "owner";
+  if (result?.status === "failure" && (result.code === "focus_amendment_required" || result.code === "role_boundary_violation")) return "owner";
   if (stage === "review") return "navigator";
   if (stage === "map-route" || stage === "recon" || stage === "draft-implementation") return "trail-boss";
   return "explorer";
@@ -1727,6 +2085,7 @@ function journeyConcurrency(
 }
 
 function journeyDisclosures(state: BrowserJourney, result: JourneyResult | undefined = state.lastResult) {
+  const amendmentCode = result?.status === "failure" ? amendmentGateCode(result.code) : undefined;
   return {
     retryHistoryLength: state.retryLedger.length,
     ...(state.retryRefusal ? { retryRefusal: state.retryRefusal } : {}),
@@ -1734,9 +2093,7 @@ function journeyDisclosures(state: BrowserJourney, result: JourneyResult | undef
     ...(state.sessionContinuity === "lost"
       ? { continuityLost: true as const, continuityDisclosure: CONTINUITY_LOST_DISCLOSURE }
       : {}),
-    ...(result?.status === "failure" && result.code === "focus_amendment_required"
-      ? { amendmentPrompt: FOCUS_AMENDMENT_PROMPT }
-      : {}),
+    ...(amendmentCode ? { amendmentPrompt: amendmentPromptFor(amendmentCode) } : {}),
   };
 }
 
@@ -1771,19 +2128,22 @@ function planningApprovalRecorded(state: Awaited<ReturnType<BearingStore["load"]
 function focusAmendmentApprovalRecorded(
   state: Awaited<ReturnType<BearingStore["load"]>>,
   decisionId: string,
+  code: AmendmentGateCode = "focus_amendment_required",
 ): boolean {
+  const question = amendmentPromptFor(code);
+  const answer = amendmentApprovalFor(code);
   let required = false;
   for (const event of state.events) {
     if (event.type === "decisionRequired"
       && event.actor === "owner"
       && event.payload.decisionId === decisionId
-      && event.payload.question === FOCUS_AMENDMENT_PROMPT
+      && event.payload.question === question
       && event.payload.consequential === true) required = true;
     if (required
       && event.type === "ownerAnswered"
       && event.actor === "owner"
       && event.payload.decisionId === decisionId
-      && event.payload.answer === FOCUS_AMENDMENT_APPROVAL) return true;
+      && event.payload.answer === answer) return true;
   }
   return false;
 }
@@ -1889,6 +2249,29 @@ function ownerAnswerRecorded(
   );
 }
 
+function ownerDecisionAnsweredForQuestion(
+  state: Awaited<ReturnType<BearingStore["load"]>>,
+  decisionId: string | undefined,
+  question: string,
+  answer?: string,
+): boolean {
+  if (decisionId === undefined) return false;
+  let required = false;
+  for (const event of state.events) {
+    if (event.type === "decisionRequired" && event.payload.decisionId === decisionId) {
+      required = event.payload.question === question;
+    }
+    if (event.type === "journeyCheckpointRecorded" && event.payload.questionDecisionId === decisionId) {
+      required = event.payload.question === question;
+    }
+    if (required
+      && event.type === "ownerAnswered"
+      && event.payload.decisionId === decisionId
+      && (answer === undefined || event.payload.answer === answer)) return true;
+  }
+  return false;
+}
+
 function lastQaAnswer(entries: readonly { question: string; answer: string }[], question: string): string | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) if (entries[index].question === question) return entries[index].answer;
   return undefined;
@@ -1957,15 +2340,40 @@ function planningStateForJourneyGate(
   readonly activeReconFailure: "RECON_FAILED" | "OWNER_DECISION_REQUIRED" | undefined;
 } {
   let activeReconFailure: "RECON_FAILED" | "OWNER_DECISION_REQUIRED" | undefined;
+  let answeredReconOwnerDecision = false;
   for (const event of durable.events) {
-    if (event.type !== "journeyCheckpointRecorded" || event.payload.stage !== "recon") continue;
+    if (event.type !== "journeyCheckpointRecorded") continue;
+    if (event.payload.stage !== "recon") {
+      if (event.payload.planningFailure === "OWNER_DECISION_REQUIRED") answeredReconOwnerDecision = false;
+      continue;
+    }
     const result = parseCheckpointJson<JourneyResult | undefined>(event.payload.lastResultJson, undefined);
     const failure = reconPlanningFailure(result);
-    if (failure) activeReconFailure = failure;
-    else if (reconSuccessfullyCompleted(result)) activeReconFailure = undefined;
+    if (failure === "RECON_FAILED") {
+      activeReconFailure = failure;
+      answeredReconOwnerDecision = false;
+    } else if (failure === "OWNER_DECISION_REQUIRED") {
+      const cpQid = result && result.status === "action" ? result.ownerDecisionId : undefined;
+      const cpQuestion = result && result.status === "action" ? result.ownerDecisionQuestion : undefined;
+      if (cpQid && cpQuestion && ownerDecisionAnsweredForQuestion(durable, cpQid, cpQuestion)) {
+        // exact ownerAnswered for this recon decision ID clears the gate; do not block
+        answeredReconOwnerDecision = true;
+        activeReconFailure = undefined;
+      } else {
+        activeReconFailure = failure;
+        answeredReconOwnerDecision = false;
+      }
+    } else if (reconSuccessfullyCompleted(result)) {
+      activeReconFailure = undefined;
+      answeredReconOwnerDecision = false;
+    }
   }
+  const derivedPlanningState = derivePlanningState(durable.events);
+  const planningState: ReturnType<typeof derivePlanningState> = answeredReconOwnerDecision && derivedPlanningState === "OWNER_DECISION_REQUIRED"
+    ? "RECON_READY"
+    : activeReconFailure ?? derivedPlanningState;
   return {
-    planningState: activeReconFailure ?? derivePlanningState(durable.events),
+    planningState,
     activeReconFailure,
   };
 }
@@ -1984,12 +2392,12 @@ function retainedPlanningFailure(state: ReturnType<typeof derivePlanningState>) 
   }
 }
 
-async function completedRequirementRefs(
+async function completedSliceEvidence(
   repositoryPath: string | undefined,
   runId: string,
   state: BrowserJourney,
   durable: Awaited<ReturnType<BearingStore["load"]>>,
-): Promise<readonly string[] | undefined> {
+): Promise<readonly CompletedSliceEvidence[] | undefined> {
   if (
     repositoryPath === undefined
     || (state.stage !== "execute-explorer" && state.stage !== "execute-expedition")
@@ -1997,6 +2405,8 @@ async function completedRequirementRefs(
     || state.lastResult.verification?.verdict !== "PASS"
     || state.planDirectory === undefined
   ) return undefined;
+  const completed = state.lastResult.verification.completedSlices;
+  if (completed === undefined) return undefined;
   const source = await executionContractSource(repositoryPath, state.planDirectory);
   if (!source.available) return undefined;
   const parsed = parseApprovedExecutionContract(source.value);
@@ -2004,8 +2414,23 @@ async function completedRequirementRefs(
   // Owner approval is an owner-authored ownerAnswered event. A bearing-authored
   // checkpoint carrying the hash is the agent vouching for its own approval.
   if (!executionContractApprovalRecorded(durable.events, parsed.value.ownerApproval.recordId, parsed.value.contentHash)) return undefined;
-  const refs = [...new Set(parsed.value.slices.flatMap((slice) => slice.requirementIds))];
-  return isRequirementRefs(refs) ? refs : undefined;
+  const approvedSlices = new Map(parsed.value.slices.map((slice) => [slice.sliceId, slice] as const));
+  const seen = new Set<string>();
+  const evidence: CompletedSliceEvidence[] = [];
+  for (const slice of completed) {
+    if (seen.has(slice.sliceId)) return undefined;
+    seen.add(slice.sliceId);
+    const approvedSlice = approvedSlices.get(slice.sliceId);
+    if (!approvedSlice) return undefined;
+    const actualRequirements = [...slice.requirementIds].sort();
+    const approvedRequirements = [...approvedSlice.requirementIds].sort();
+    if (actualRequirements.length !== approvedRequirements.length
+      || actualRequirements.some((requirementId, index) => requirementId !== approvedRequirements[index])) {
+      return undefined;
+    }
+    evidence.push({ sliceId: slice.sliceId, requirementIds: actualRequirements });
+  }
+  return evidence.sort((left, right) => left.sliceId < right.sliceId ? -1 : left.sliceId > right.sliceId ? 1 : 0);
 }
 
 class JourneyCheckpointRevisionConflict extends Error {}
@@ -2067,7 +2492,8 @@ async function persistJourneyCheckpoint(
   const checkpointResult = state.lastResult && checkpointDiagnostic
     ? { ...state.lastResult, checkpointDiagnostic }
     : state.lastResult;
-  const requirementRefs = await completedRequirementRefs(repositoryPath, runId, state, durable);
+  const completedSlices = await completedSliceEvidence(repositoryPath, runId, state, durable);
+  const tokenUsage = journeyTokenUsage(state);
   const payload = {
     stage: state.stage,
     status: state.status,
@@ -2084,10 +2510,18 @@ async function persistJourneyCheckpoint(
     ...(state.selection ? { selectionProvider: state.selection.provider, selectionModel: state.selection.model, selectionReasoning: state.selection.reasoning } : {}),
     ...(state.providerSessionId ? { providerSessionId: state.providerSessionId } : {}),
     runtimeStateJson,
+    ...(tokenUsage ? { tokenUsage } : {}),
+    ...(state.recoveryOutcome ? { recoveryOutcome: state.recoveryOutcome } : {}),
     ...(state.lastResult?.status === "action" && state.lastResult.verification !== undefined
-      ? { verification: { layer: "validator", verdict: state.lastResult.verification.verdict, findingCount: state.lastResult.verification.reasons.length } satisfies VerificationCheckpointPayload }
+      ? {
+          verification: {
+            layer: "validator",
+            verdict: state.lastResult.verification.verdict,
+            findingCount: state.lastResult.verification.reasons.length,
+            ...(completedSlices === undefined ? {} : { completedSlices }),
+          } satisfies VerificationCheckpointPayload,
+        }
       : {}),
-    ...(requirementRefs === undefined ? {} : { requirementRefs }),
     ...planningFields,
   };
   const command = { schemaVersion: 1, commandId: id, runId, expectedRevision: expectedRevision ?? durable.revision, session: { sessionId: "local-runtime", actor: "bearing" }, correlationId: id, type: "recordJourneyCheckpoint", payload } as CommandEnvelopeV1;
@@ -2126,7 +2560,9 @@ function restoreJourney(entry: { goal: string; updatedAt: string; pendingQuestio
     ? parseRuntimeState(checkpoint.runtimeStateJson)
     : undefined;
   const runtimeState = parsedRuntime?.ok ? parsedRuntime.value : undefined;
+  const tokenUsage = isJourneyTokenUsage(checkpoint.tokenUsage) ? checkpoint.tokenUsage : undefined;
   const retryOutcome = runtimeState?.retry.at(-1)?.outcome;
+  const currentSlice = [...qa].reverse().find((item) => item.question === "Current slice")?.answer;
   const retryRefusal = retryOutcome === "retry_requires_warrant"
     || retryOutcome === "same_attempt_higher_reasoning"
     || retryOutcome === "retry_limit_reached"
@@ -2141,6 +2577,7 @@ function restoreJourney(entry: { goal: string; updatedAt: string; pendingQuestio
     ...(questionPending && checkpoint.questionDecisionId ? { questionDecisionId: checkpoint.questionDecisionId } : {}),
     ...(checkpoint.planDirectory ? { planDirectory: checkpoint.planDirectory } : {}),
     ...(fit ? { repositoryFitDecision: fit.decision, resolvedPlanDirectory: fit.resolvedPlanDirectory } : {}),
+    ...(currentSlice && /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/.test(currentSlice) ? { currentSlice } : {}),
     ...(checkpoint.reviewBaselineRevision === undefined ? {} : { reviewBaselineRevision: checkpoint.reviewBaselineRevision }),
     lastResult,
     busy: false,
@@ -2150,6 +2587,11 @@ function restoreJourney(entry: { goal: string; updatedAt: string; pendingQuestio
     gatherQuestionsDiscovered: checkpoint.gatherQuestionsDiscovered === true && !(checkpoint.stage === "gather-supplies" && staleQuestion),
     retryLedger: runtimeState ? [...runtimeState.retry] : [],
     activityTrail: runtimeState ? [...runtimeState.trace] : [],
+    ...(tokenUsage ? {
+      tokenTotal: tokenUsage.total,
+      tokenBudget: tokenUsage.budget,
+      tokenBudgetState: tokenUsage.state,
+    } : {}),
     ...(runtimeState?.concurrency ? { concurrency: runtimeState.concurrency } : {}),
     sessionContinuity: runtimeState?.sessionContinuity
       ?? (savedLastResult?.sessionContinuity === "lost" ? "lost" : "intact"),
@@ -2177,6 +2619,7 @@ type SelectedBrowserState = {
   selection: Selection | null;
   run: ResolvedRun | null;
   readonly journeys: Map<string, BrowserJourney>;
+  readonly inFlightImprovementProposals: Set<string>;
   busyLeaseQueue: Promise<void>;
   busyLeaseHeartbeat?: ReturnType<typeof setInterval>;
 };
@@ -2226,6 +2669,7 @@ function handleJourneyPost(
     const stateWasCreated = state === undefined;
     if (!state) {
       if (!value.workGoal || !ensureJourneyCapacity(selected.journeys)) { writeRejection(res, 409); return; }
+      const tokenBudget = boundedJourneyTokenBudget(run);
       state = {
         goal: value.workGoal,
         updatedAt: new Date().toISOString(),
@@ -2237,19 +2681,28 @@ function handleJourneyPost(
         gatherQuestionsDiscovered: false,
         retryLedger: [],
         activityTrail: [],
+        ...(tokenBudget === undefined ? {} : {
+          tokenTotal: 0,
+          tokenBudget,
+          tokenBudgetState: "within_budget" as const,
+        }),
         sessionContinuity: "intact",
         busy: false,
         selection,
       };
       selected.journeys.set(value.runId, state);
     } else if (value.workGoal && value.workGoal !== state.goal) { writeRejection(res, 409); return; }
-    if (!sameSelection(state.selection, selection)) { writeRejection(res, 409); return; }
+    const routeRebindRequested = !sameSelection(state.selection, selection);
+    const selectionBeforeRebind = state.selection;
+    const providerSessionBeforeRebind = state.providerSessionId;
+    if (routeRebindRequested && value.retryWarrant !== "changed_strategy") { writeRejection(res, 409); return; }
     if (state.busy) { writeRejection(res, 409); return; }
     if (!selected.store) { writeRejection(res, 409); return; }
     let durable;
     try { durable = await selected.store.load(value.runId); }
     catch { writeRejection(res, 503); return; }
     if (!durable.workRequestCreated) { writeRejection(res, 409); return; }
+    if (value.expectedRevision !== undefined && durable.revision !== value.expectedRevision) { writeRejection(res, 409); return; }
     // A creating POST seeds `stage` from the request before any gate has run. If that request is then
     // rejected the entry survives, so an identical repeat sees stageChanged === false, reads as a
     // same-stage retry rather than forward progress, and skips the failed-planning-state gate entirely.
@@ -2290,6 +2743,42 @@ function handleJourneyPost(
       ? durable.journeyCheckpoint?.stage ?? state.stage
       : state.stage;
     if (!journeyStageTransitionAllowed(previousStage, value.stage)) { writeRejection(res, 409); return; }
+    const recoveryRetry = (state.status === "failed" || state.status === "stopped")
+      && state.lastResult?.status === "failure"
+      && (
+        (previousStage === "map-route" && value.stage === "gather-supplies" && state.lastResult.code === "artifact_invalid")
+        || ((previousStage === "execute-explorer" || previousStage === "execute-expedition")
+          && value.stage === previousStage
+          && state.lastResult.code === "interrupted")
+        || (previousStage === "repository-fit" && value.stage === "repository-fit" && state.lastResult.code === "fit_unavailable")
+        || ((previousStage === "execute-explorer" || previousStage === "execute-expedition")
+          && value.stage === previousStage
+          && state.lastResult.code === "adapter_failed")
+      );
+    const recoveryFailure = state.lastResult?.status === "failure" ? state.lastResult : undefined;
+    const warrantRecovery = recoveryRetry && recoveryFailure !== undefined
+      && (recoveryFailure.code === "fit_unavailable" || recoveryFailure.code === "adapter_failed");
+    if (value.recoveryExpectedRevision !== undefined
+      && (durable.revision !== value.recoveryExpectedRevision || !recoveryRetry)) { writeRejection(res, 409); return; }
+    // These public same-stage recoveries are intentionally fail-closed before any retry-ledger
+    // write or provider dispatch. The request revision binds the one-use warrant to this exact
+    // failed checkpoint; replaying it after a successful or newly failed attempt is stale.
+    if (warrantRecovery && value.retryWarrant !== undefined && (
+      value.expectedRevision !== durable.revision
+      || recoveryFailure === undefined
+      || !retryWarrantAllowed(retryScope(value.stage, recoveryFailure.code), value.retryWarrant)
+    )) { writeRejection(res, 409); return; }
+    if (!warrantRecovery && value.retryWarrant !== undefined) { writeRejection(res, 409); return; }
+    // An owner may replace a failed adapter route only as an exact-revision changed-strategy
+    // recovery. Readiness has already admitted the new selection, and clearing the prior
+    // provider session prevents a new launcher from receiving another route's session id.
+    if (routeRebindRequested) {
+      if (recoveryFailure?.code !== "adapter_failed" || value.expectedRevision !== durable.revision) {
+        writeRejection(res, 409);
+        return;
+      }
+      Object.assign(state, { selection, providerSessionId: undefined });
+    }
     const previousResult = state.lastResult;
     const stageChanged = previousStage !== value.stage;
     const planningGateState = planningStateForJourneyGate(durable);
@@ -2319,30 +2808,78 @@ function handleJourneyPost(
       writeRejection(res, 409);
       return;
     }
+    const amendmentCode = previousResult?.status === "failure" ? amendmentGateCode(previousResult.code) : undefined;
     if (value.focusAmendmentConfirmed && (
       stageChanged
-      || previousResult?.status !== "failure"
-      || previousResult.code !== "focus_amendment_required"
+      || amendmentCode === undefined
       || durable.revision !== value.focusAmendmentExpectedRevision
       || durable.pendingDecision !== null
-      || !focusAmendmentApprovalRecorded(durable, value.focusAmendmentDecisionId!)
+      || !focusAmendmentApprovalRecorded(durable, value.focusAmendmentDecisionId!, amendmentCode)
     )) {
       writeRejection(res, 409);
       return;
     }
-    const amendmentRollback = value.focusAmendmentConfirmed ? {
+    const checkpointExpectedRevision = value.expectedRevision ?? value.recoveryExpectedRevision ?? value.focusAmendmentExpectedRevision;
+    const checkpointRollback = checkpointExpectedRevision !== undefined ? {
+      updatedAt: state.updatedAt,
       stage: state.stage,
       status: state.status,
       lastResult: state.lastResult,
       qa: [...state.qa],
+      currentSlice: state.currentSlice,
       retryLedger: [...state.retryLedger],
       concurrency: state.concurrency,
       pendingRetryWarrant: state.pendingRetryWarrant,
       retryRefusal: state.retryRefusal,
       escalationTarget: state.escalationTarget,
+      recoveryOutcome: state.recoveryOutcome,
+      selection: selectionBeforeRebind,
+      providerSessionId: providerSessionBeforeRebind,
     } : undefined;
+    const restoreCheckpointRollback = () => {
+      if (!checkpointRollback) return;
+      state.updatedAt = checkpointRollback.updatedAt;
+      state.stage = checkpointRollback.stage;
+      state.status = checkpointRollback.status;
+      state.lastResult = checkpointRollback.lastResult;
+      state.qa.splice(0, state.qa.length, ...checkpointRollback.qa);
+      state.currentSlice = checkpointRollback.currentSlice;
+      state.retryLedger = checkpointRollback.retryLedger;
+      if (checkpointRollback.concurrency) state.concurrency = checkpointRollback.concurrency;
+      else delete state.concurrency;
+      if (checkpointRollback.pendingRetryWarrant) state.pendingRetryWarrant = checkpointRollback.pendingRetryWarrant;
+      else delete state.pendingRetryWarrant;
+      if (checkpointRollback.retryRefusal) state.retryRefusal = checkpointRollback.retryRefusal;
+      else delete state.retryRefusal;
+      if (checkpointRollback.escalationTarget) state.escalationTarget = checkpointRollback.escalationTarget;
+      else delete state.escalationTarget;
+      if (checkpointRollback.recoveryOutcome) state.recoveryOutcome = checkpointRollback.recoveryOutcome;
+      else delete state.recoveryOutcome;
+      Object.assign(state, {
+        selection: checkpointRollback.selection,
+        providerSessionId: checkpointRollback.providerSessionId,
+      });
+    };
     if (stageChanged) clearRetryDecision(state);
+    state.recoveryOutcome = undefined;
+    if (value.retryWarrant !== undefined) {
+      state.pendingRetryWarrant = value.retryWarrant;
+    }
     const retryFailure = failedResultForStage(durable, value.stage, state);
+    if (value.retryWarrant !== undefined) {
+      if (stageChanged || !retryFailure || value.retryWarrant === "approved_amendment") {
+        writeRejection(res, 409);
+        return;
+      }
+      state.pendingRetryWarrant = value.retryWarrant;
+    }
+    // Selecting a different explicit Expedition slice after a retained execution failure is a
+    // changed strategy, not an unwarranted replay. Admit one retry through the existing ledger;
+    // Focus still proves that the new slice exists and derives its exact write set.
+    if (retryFailure
+      && value.stage === "execute-expedition"
+      && value.currentSlice !== undefined
+      && value.currentSlice !== state.currentSlice) state.pendingRetryWarrant = "changed_strategy";
     if (
       retryFailure
       && (retryRequiresWarrant(retryFailure) || !stageChanged && state.pendingRetryWarrant !== undefined)
@@ -2360,9 +2897,6 @@ function handleJourneyPost(
         state.lastResult = retryFailure;
         state.status = "failed";
         state.updatedAt = new Date().toISOString();
-        try { await persistJourneyCheckpoint(selected.store, value.runId, state, journey); }
-        catch { writeRejection(res, 503); return; }
-        const links = state.artifacts.flatMap((path, index) => /\.(?:html|md)$/i.test(path) ? [{ path, url: `/api/v1/journey/${encodeURIComponent(value.runId)}/artifacts/${index}` }] : []);
         const recovery = {
           status: "stopped",
           stage: value.stage,
@@ -2372,8 +2906,21 @@ function handleJourneyPost(
           version: BEARING_VERSION,
           ...recoveryFitDiagnostic(retryFailure),
         } satisfies RecoveryReport;
+        state.recoveryOutcome = { outcome: recovery.status, attempts: 1 };
+        try {
+          if (checkpointExpectedRevision !== undefined) await beforeExecutionCheckpoint?.({ runId: value.runId, expectedRevision: checkpointExpectedRevision });
+          await persistJourneyCheckpoint(selected.store, value.runId, state, journey, undefined, checkpointExpectedRevision);
+        }
+        catch (error) {
+          if (error instanceof JourneyCheckpointRevisionConflict && checkpointRollback) {
+            restoreCheckpointRollback();
+            writeRejection(res, 409);
+          } else writeRejection(res, 503);
+          return;
+        }
+        const links = state.artifacts.flatMap((path, index) => /\.(?:html|md)$/i.test(path) ? [{ path, url: `/api/v1/journey/${encodeURIComponent(value.runId)}/artifacts/${index}` }] : []);
         writeShowcaseJson(res, {
-          ...retryFailure,
+          ...browserLastResult(retryFailure),
           artifacts: state.artifacts,
           artifactLinks: links,
           recovery,
@@ -2382,7 +2929,7 @@ function handleJourneyPost(
         return;
       }
     }
-    if (value.answer) {
+    if (value.answer && value.stage !== "recon") {
       if (!state.question || state.questionStage !== value.stage) { writeRejection(res, 409); return; }
       const pendingResult = state.lastResult;
       const pendingConsolidation = resultConsolidation(pendingResult);
@@ -2459,11 +3006,18 @@ function handleJourneyPost(
         state.updatedAt = new Date().toISOString();
         state.busy = false;
         if ("question" in resolution) {
-          const result: JourneyResult = {
+          const result: JourneyResult & {
+            readonly validationError?: "repository_fit_answer_invalid";
+            readonly remedy?: typeof FIT_OWNER_ANSWER_REMEDY;
+            readonly correctionAction?: "decide";
+          } = {
             status: "question",
             question: resolution.question,
             fitAssumption: assumption,
             tokens: 0,
+            ...(resolution.validationError ? { validationError: resolution.validationError } : {}),
+            ...(resolution.remedy ? { remedy: resolution.remedy } : {}),
+            ...(resolution.correctionAction ? { correctionAction: resolution.correctionAction } : {}),
           };
           state.question = resolution.question;
           state.questionStage = "repository-fit";
@@ -2546,12 +3100,53 @@ function handleJourneyPost(
         return;
       }
     }
+    // Recon answers use the shared free-text form + existing command boundary (requireDecision/recordOwnerAnswer via postCommand).
+    // Require the exact durable decision ID, server-authored question, and answer text. Missing/unrecorded/stale answers remain correctable (no consume).
+    // Valid answer appends QA and falls through to normal execution of the same recon stage (re-run with durable QA); no saved short-circuit.
+    if (value.stage === "recon" && value.answer) {
+      const priorResult = state.lastResult ?? parseCheckpointJson<JourneyResult | undefined>(durable.journeyCheckpoint?.lastResultJson, undefined);
+      if (priorResult?.status === "question") {
+        const q = state.question;
+        const id = state.questionDecisionId;
+        if (state.questionStage !== "recon" || typeof q !== "string" || !id || priorResult.question !== q) {
+          writeJourneyFailure(res, 409, "input_invalid");
+          return;
+        }
+        if (!ownerDecisionAnsweredForQuestion(durable, id, q, value.answer)) {
+          writeShowcaseJson(res, { status: "question", question: q, ownerDecisionId: id, ownerDecisionQuestion: q, validationError: "owner_answer_not_recorded", tokens: 0 });
+          return;
+        }
+        appendJourneyQa(state, q, value.answer);
+        state.question = undefined;
+        state.questionStage = undefined;
+        state.questionDecisionId = undefined;
+      } else {
+        const decId = priorResult && priorResult.status === "action" ? priorResult.ownerDecisionId : undefined;
+        const priorQ = priorResult && priorResult.status === "action" ? priorResult.ownerDecisionQuestion : undefined;
+        if (!decId || !priorQ) {
+          writeJourneyFailure(res, 409, "input_invalid");
+          return;
+        }
+        if (!ownerDecisionAnsweredForQuestion(durable, decId, priorQ, value.answer)) {
+          writeShowcaseJson(res, { status: "question", question: priorQ, ownerDecisionId: decId, ownerDecisionQuestion: priorQ, validationError: "owner_answer_not_recorded", tokens: 0 });
+          return;
+        }
+        appendJourneyQa(state, priorQ, value.answer);
+        state.question = undefined;
+        state.questionStage = undefined;
+        state.questionDecisionId = undefined;
+      }
+    }
     if (value.reviewChange) {
       if (!state.planDirectory || state.question || (state.stage !== "map-route" && state.stage !== "draft-implementation")) { writeRejection(res, 409); return; }
       appendJourneyQa(state, "Requested changes during planning-package review", value.reviewChange);
     }
     if (value.executionMode) appendJourneyQa(state, "Execution mode", value.executionMode);
     if (value.reviewCadence) appendJourneyQa(state, "Review cadence", value.reviewCadence);
+    if (value.currentSlice) {
+      state.currentSlice = value.currentSlice;
+      appendJourneyQa(state, "Current slice", value.currentSlice);
+    } else if (value.executionMode === "explorer") state.currentSlice = undefined;
     if (value.cleanupMergedWorktrees !== undefined) appendJourneyQa(state, "Cleanup merged worktrees", value.cleanupMergedWorktrees ? "on" : "off");
     state.concurrency = journeyConcurrency(run, value.stage, previousStage, state.concurrency, previousResult);
     state.lastResult = undefined;
@@ -2560,24 +3155,12 @@ function handleJourneyPost(
     state.busy = true;
     try {
       await syncBusyLease(selected);
-      if (value.focusAmendmentConfirmed) await beforeExecutionCheckpoint?.({ runId: value.runId, expectedRevision: value.focusAmendmentExpectedRevision! });
-      await persistJourneyCheckpoint(selected.store, value.runId, state, undefined, undefined, value.focusAmendmentExpectedRevision);
+      if (checkpointExpectedRevision !== undefined) await beforeExecutionCheckpoint?.({ runId: value.runId, expectedRevision: checkpointExpectedRevision });
+      await persistJourneyCheckpoint(selected.store, value.runId, state, undefined, undefined, checkpointExpectedRevision);
     } catch (error) {
       state.busy = false;
-      if (error instanceof JourneyCheckpointRevisionConflict && amendmentRollback) {
-        state.stage = amendmentRollback.stage;
-        state.status = amendmentRollback.status;
-        state.lastResult = amendmentRollback.lastResult;
-        state.qa.splice(0, state.qa.length, ...amendmentRollback.qa);
-        state.retryLedger = amendmentRollback.retryLedger;
-        if (amendmentRollback.concurrency) state.concurrency = amendmentRollback.concurrency;
-        else delete state.concurrency;
-        if (amendmentRollback.pendingRetryWarrant) state.pendingRetryWarrant = amendmentRollback.pendingRetryWarrant;
-        else delete state.pendingRetryWarrant;
-        if (amendmentRollback.retryRefusal) state.retryRefusal = amendmentRollback.retryRefusal;
-        else delete state.retryRefusal;
-        if (amendmentRollback.escalationTarget) state.escalationTarget = amendmentRollback.escalationTarget;
-        else delete state.escalationTarget;
+      if (error instanceof JourneyCheckpointRevisionConflict && checkpointRollback) {
+        restoreCheckpointRollback();
       } else state.status = "failed";
       await syncBusyLease(selected).catch(() => {});
       writeRejection(res, error instanceof JourneyCheckpointRevisionConflict ? 409 : 503);
@@ -2585,26 +3168,32 @@ function handleJourneyPost(
     }
     let result: JourneyResult;
     let gatherMode = value.stage === "gather-supplies" ? value.answer || value.reviewChange || state.gatherQuestionsDiscovered ? "apply" as const : "questions" as const : undefined;
-    const execute = (reviewPrompt?: string, gateFailureFingerprint?: string) => journey.execute({
-      selection,
-      run,
-      repositoryPath,
-      runId: value.runId,
-      workGoal: state!.goal,
-      stage: value.stage,
-      priorOwnerQa: state!.qa,
-      ...(value.stage === "set-bearings"
-        ? { requestedPlanDirectory: state!.resolvedPlanDirectory }
-        : state!.planDirectory
-          ? { planDirectory: state!.planDirectory }
-          : {}),
-      ...(gatherMode ? { gatherMode } : {}),
-      ...(reviewPrompt ? { reviewPrompt } : {}),
-      ...(gateFailureFingerprint ? { gateFailureFingerprint } : {}),
-      ...(value.focusAmendmentConfirmed ? { focusAmendmentConfirmed: true } : {}),
-      ...(state!.providerSessionId ? { providerSessionId: state!.providerSessionId } : {}),
-    });
+    const execute = async (reviewPrompt?: string, gateFailureFingerprint?: string): Promise<JourneyResult> => {
+      const executed = await journey.execute({
+        selection,
+        run,
+        repositoryPath,
+        runId: value.runId,
+        workGoal: state!.goal,
+        stage: value.stage,
+        priorOwnerQa: state!.qa,
+        ...(value.stage === "set-bearings"
+          ? { requestedPlanDirectory: state!.resolvedPlanDirectory }
+          : state!.planDirectory
+            ? { planDirectory: state!.planDirectory }
+            : {}),
+        ...(gatherMode ? { gatherMode } : {}),
+        ...(reviewPrompt ? { reviewPrompt } : {}),
+        ...(gateFailureFingerprint ? { gateFailureFingerprint } : {}),
+        ...(value.stage === "execute-expedition" && state!.currentSlice ? { currentSlice: state!.currentSlice } : {}),
+        ...(value.focusAmendmentConfirmed ? { focusAmendmentConfirmed: true } : {}),
+        ...(state!.providerSessionId ? { providerSessionId: state!.providerSessionId } : {}),
+      });
+      accumulateJourneyTokens(state!, executed);
+      return executed;
+    };
     let recoveryReport: RecoveryReport | undefined;
+    let recoveryAttempts = 0;
     try {
       result = await execute();
       const control = state.control;
@@ -2633,7 +3222,9 @@ function handleJourneyPost(
       let automaticRetries = 0;
       let firstFailure: FailureResult | undefined;
       let lastRetryLevel: RecoveryReport["retryLevel"] = "repair";
-      while (recoverableFailure(result) && automaticRetries < automaticWarrants.length) {
+      // A public recovery warrant authorizes exactly one stage dispatch at the bound revision.
+      // Do not silently expand it into the ordinary two-attempt automatic repair sequence.
+      while (!warrantRecovery && recoverableFailure(result) && automaticRetries < automaticWarrants.length) {
         firstFailure ??= result;
         const retry = automaticWarrants[automaticRetries]!;
         const fingerprint = await browserFailureFingerprint(repositoryPath, value.stage, result, state);
@@ -2643,6 +3234,7 @@ function handleJourneyPost(
         if (!decision.ok || decision.escalation) break;
         result = await execute(recoveryGuidance(lastRetryLevel, result.code), fingerprint);
       }
+      recoveryAttempts = automaticRetries;
       if (result.status !== "failure" && firstFailure) {
         recoveryReport = { status: "repaired", stage: value.stage, failureClass: "agent_receipt_or_artifact_validation", code: firstFailure.code, retryLevel: lastRetryLevel, version: BEARING_VERSION, ...recoveryFitDiagnostic(firstFailure) };
         clearRetryDecision(state);
@@ -2655,6 +3247,9 @@ function handleJourneyPost(
       state.busy = false;
       await syncBusyLease(selected).catch(() => {});
     }
+    state.recoveryOutcome = recoveryReport === undefined
+      ? undefined
+      : { outcome: recoveryReport.status, attempts: recoveryAttempts };
     if (result.sessionContinuity === "lost") {
       state.sessionContinuity = "lost";
       if (result.status === "failure" && result.code === "session_unavailable") {
@@ -2669,6 +3264,18 @@ function handleJourneyPost(
       state.providerSessionId = journey.providerSessionId(repositoryPath, value.runId, selection) ?? state.providerSessionId;
     }
     if (result.status === "question" && result.question) { state.question = result.question; state.questionStage = value.stage; state.questionDecisionId = `journey-${randomToken(12)}`; state.pendingQuestions = result.questions ? [...result.questions.slice(1)] : []; if (value.stage === "gather-supplies" && gatherMode === "questions") state.gatherQuestionsDiscovered = true; }
+    // For recon OWNER_DECISION_REQUIRED put ID and server question only on result; never set state.question*, state.questionStage, or state.questionDecisionId.
+    if (result.status === "action" && result.recon && result.recon.state === "OWNER_DECISION_REQUIRED") {
+      const q = reconOwnerDecisionQuestion(result.recon);
+      const priorResult = state.lastResult ?? parseCheckpointJson<JourneyResult | undefined>(durable.journeyCheckpoint?.lastResultJson, undefined);
+      const pId = priorResult && priorResult.status === "action" ? priorResult.ownerDecisionId : undefined;
+      const priorQ = priorResult && priorResult.status === "action" ? priorResult.ownerDecisionQuestion : undefined;
+      const priorAnswered = pId && priorQ ? ownerDecisionAnsweredForQuestion(durable, pId, priorQ) : false;
+      const carriesMatchingAnswer = !!(value.answer && pId && priorQ === q && ownerDecisionAnsweredForQuestion(durable, pId, q, value.answer));
+      const reuse = !!(pId && priorQ === q && (carriesMatchingAnswer || (!value.answer && !priorAnswered)));
+      const id = reuse && pId ? pId : `journey-${randomToken(12)}`;
+      result = { ...result, ownerDecisionId: id, ownerDecisionQuestion: q, ...(carriesMatchingAnswer ? { ownerDecisionAnswered: true as const } : {}) };
+    }
     if (result.status === "action") {
       for (const artifact of result.artifacts) if (!state.artifacts.includes(artifact)) state.artifacts.push(artifact);
       if (value.stage === "draft-implementation") {
@@ -2690,7 +3297,7 @@ function handleJourneyPost(
     if (checkpointDiagnostic) state.lastResult = { ...result, checkpointDiagnostic };
     const links = state.artifacts.flatMap((path, index) => /\.(?:html|md)$/i.test(path) ? [{ path, url: `/api/v1/journey/${encodeURIComponent(value.runId)}/artifacts/${index}` }] : []);
     writeShowcaseJson(res, {
-      ...state.lastResult,
+      ...browserLastResult(state.lastResult),
       artifacts: state.artifacts,
       artifactLinks: links,
       ...(recoveryReport ? { recovery: recoveryReport } : {}),
@@ -2758,9 +3365,13 @@ async function handleGitDiffGet(req: IncomingMessage, res: ServerResponse, servi
   writeShowcaseJson(res, { path: change.path, diff });
 }
 
-async function handleJourneyStatusGet(req: IncomingMessage, res: ServerResponse, service: LocalSessionService, selected: SelectedBrowserState, runId?: string, journey?: JourneyService): Promise<void> {
+async function handleJourneyStatusGet(req: IncomingMessage, res: ServerResponse, service: LocalSessionService, selected: SelectedBrowserState, runId?: string, journey?: JourneyService, refreshDurable = false): Promise<void> {
   if (!service.authenticateRequest(req)) { writeRejection(res, 401); return; }
   if (!selected.repositoryPath || !selected.store) { writeRejection(res, 409); return; }
+  if (runId && refreshDurable) {
+    if (selected.journeys.get(runId)?.busy) { writeRejection(res, 409); return; }
+    selected.journeys.delete(runId);
+  }
   const changes = await gitChanges(selected.repositoryPath);
   const changedFiles = changes?.length ?? null;
   const history = await selected.store.list(8);
@@ -2785,8 +3396,9 @@ async function handleJourneyStatusGet(req: IncomingMessage, res: ServerResponse,
           stage: active.stage,
           status: active.status,
           busy: active.busy,
+          currentSlice: active.currentSlice,
           artifacts: active.artifacts,
-          lastResult: active.lastResult,
+          lastResult: browserLastResult(active.lastResult),
           artifactLinks,
           ...journeyDisclosures(active),
         }
@@ -2802,8 +3414,9 @@ async function handleJourneyStatusGet(req: IncomingMessage, res: ServerResponse,
     stage: active.stage,
     status: active.status,
     busy: active.busy,
+    currentSlice: active.currentSlice,
     artifacts: active.artifacts,
-    lastResult: active.lastResult,
+    lastResult: browserLastResult(active.lastResult),
     artifactLinks: active.artifacts.flatMap((path, index) => /\.(?:html|md)$/i.test(path) ? [{ path, url: `/api/v1/journey/${encodeURIComponent(activeRunId)}/artifacts/${index}` }] : []),
     ...journeyDisclosures(active),
   });
@@ -2817,6 +3430,20 @@ async function handleJourneyStatusGet(req: IncomingMessage, res: ServerResponse,
   const explorerAvailable = state && durable
     ? await executionTransitionAllowed(state, durable, selected.repositoryPath, "execute-explorer", "explorer", "slice")
     : false;
+  const recoveryAvailable = state && durable && selected.selection && sameSelection(state.selection, selected.selection)
+    && (state.status === "failed" || state.status === "stopped") && state.lastResult?.status === "failure"
+    ? state.stage === "repository-fit" && state.lastResult.code === "fit_unavailable"
+      ? journeyStageTransitionAllowed(state.stage, state.stage)
+      : confirmedFit(state, selected.repositoryPath) === undefined
+        ? false
+        : state.stage === "map-route" && state.lastResult.code === "artifact_invalid"
+      ? journeyStageTransitionAllowed(state.stage, "gather-supplies")
+      : (state.stage === "execute-explorer" || state.stage === "execute-expedition") && state.lastResult.code === "interrupted"
+        ? await executionTransitionAllowed(state, durable, selected.repositoryPath, state.stage)
+        : ((state.stage === "execute-explorer" || state.stage === "execute-expedition") && state.lastResult.code === "adapter_failed")
+          ? await executionTransitionAllowed(state, durable, selected.repositoryPath, state.stage)
+          : false
+    : false;
   writeShowcaseJson(res, {
     changedFiles,
     gitChanges: changes ?? [],
@@ -2829,11 +3456,13 @@ async function handleJourneyStatusGet(req: IncomingMessage, res: ServerResponse,
         stage: state.stage,
         status: state.status,
         busy: state.busy,
+        currentSlice: state.currentSlice,
         artifacts: state.artifacts,
         question: state.question,
-        lastResult: state.lastResult,
+        lastResult: browserLastResult(state.lastResult),
         planReviewAvailable: routeApprovalAvailable,
         explorerAvailable,
+        recoveryAvailable,
         ...journeyDisclosures(state),
       },
     } : {}),
@@ -2987,7 +3616,8 @@ function writeShowcaseJson(res: ServerResponse, value: unknown): void {
 type VerificationIngestFailure = GraderReportFailure | ParkRangerReportFailure
   | "verification_content_type_unsupported"
   | "verification_report_too_large"
-  | "verification_checkpoint_rejected";
+  | "verification_checkpoint_rejected"
+  | "minimum_score_not_met";
 
 type RunReadFailureCode = "repository_not_selected" | "run_not_found" | "run_unavailable" | "execution_contract_unavailable" | "execution_contract_malformed" | "owner_approval_unverified" | "execution_contract_response_too_large" | "unknown_slice" | "slice_not_projectable" | "verification_projection_invalid" | VerificationIngestFailure;
 
@@ -3017,12 +3647,14 @@ function runReadFailure(code: RunReadFailure["code"]): RunReadFailure {
     prototype_pollution: { status: 422, remedy: "Submit a plain JSON report without unsafe object keys or prototypes." },
     finding_unreproduced: { status: 422, remedy: "Include bounded reproduction inputs and an observed failure for every finding." },
     finding_unreachable: { status: 422, remedy: "Include a non-empty reachable path for every finding." },
+    finding_slice_scope_invalid: { status: 422, remedy: "Include one or more approved execution slice IDs for every finding." },
     claim_unadjudicated: { status: 422, remedy: "Adjudicate every inbound readiness claim before submitting the report." },
     self_certification: { status: 422, remedy: "Use an independent verification session for the report." },
     shared_ancestry: { status: 422, remedy: "Use a verification session outside the implementation execution ancestry." },
     verification_content_type_unsupported: { status: 415, remedy: "Submit the verification report as application/json." },
     verification_report_too_large: { status: 413, remedy: "Reduce the verification report to the bounded ingestion size." },
     verification_checkpoint_rejected: { status: 409, remedy: "Reload the run and retry the validated evidence append without changing its authority." },
+    minimum_score_not_met: { status: 422, remedy: "Submit a grader report with a weighted aggregate of at least 3.0 and every individual required dimension at 3.0 or higher." },
   };
   return { code, ...failures[code] };
 }
@@ -3079,6 +3711,126 @@ async function handleImprovementReportGet(
     return;
   }
   writeRunReadJson(res, result.value);
+}
+
+function isOwnerApplicationRecordBody(v: unknown): v is { readonly runId: string; readonly proposalHash: string; readonly surface: string; readonly target: CanonicalValue; readonly value: CanonicalValue; readonly externalEvidenceHash: string } {
+  if (!isRecord(v)
+    || Object.keys(v).length !== 6
+    || !["runId", "proposalHash", "surface", "target", "value", "externalEvidenceHash"].every((key) => Object.hasOwn(v, key))
+    || typeof v.runId !== "string"
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(v.runId)) return false;
+  if (typeof v.proposalHash !== "string" || !/^[a-f0-9]{64}$/.test(v.proposalHash)) return false;
+  if (typeof v.surface !== "string" || v.surface.length === 0 || v.surface.length > 128) return false;
+  if (typeof v.externalEvidenceHash !== "string" || !/^[a-f0-9]{64}$/.test(v.externalEvidenceHash)) return false;
+  return Object.hasOwn(v, "target") && Object.hasOwn(v, "value");
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+async function handleOwnerImprovementApplication(
+  req: IncomingMessage,
+  res: ServerResponse,
+  service: LocalSessionService,
+  selected: SelectedBrowserState,
+  report: RequestHandlerOptions["improvementReport"],
+): Promise<void> {
+  if (req.headers.origin !== undefined && !service.validOrigin(req.headers.origin)) { writeRejection(res, 403); return; }
+  if (!service.authenticateRequest(req)) { writeRejection(res, 401); return; }
+  if (!hasJsonContentType(req.headers["content-type"])) { writeRejection(res, 415); return; }
+  let body: unknown;
+  try {
+    body = await readJsonBody(req, MAX_OWNER_BODY);
+  } catch {
+    writeRejection(res, 400);
+    return;
+  }
+  if (!isOwnerApplicationRecordBody(body)) { writeRejection(res, 400); return; }
+  if (!selected.store) { writeRejection(res, 409); return; }
+  if (selected.inFlightImprovementProposals.has(body.proposalHash)) { writeRejection(res, 409); return; }
+  selected.inFlightImprovementProposals.add(body.proposalHash);
+
+  try {
+  // Verify proposal present in current report (read-only) and exact surface-target-value binding.
+  const selectedReport = report ?? ((input: { readonly store: BearingStore }) => (
+    buildImprovementReport(input.store)
+  ));
+  let reportRes: Awaited<ReturnType<NonNullable<typeof report>>>;
+  try {
+    reportRes = await selectedReport({ repositoryPath: selected.repositoryPath ?? "", store: selected.store });
+  } catch {
+    writeRejection(res, 503);
+    return;
+  }
+  if (!reportRes.ok) { writeRejection(res, 503); return; }
+  const reportValue = reportRes.value as Partial<RuntimeImprovementReport>;
+  const proposals = Array.isArray(reportValue.proposals) ? reportValue.proposals : [];
+  const match = proposals.find((p) => p.proposalHash === body.proposalHash);
+  if (!match) { writeRejection(res, 400); return; }
+  if (match.recommendation.surface !== body.surface
+    || canonicalStringify(match.recommendation.target) !== canonicalStringify(body.target)
+    || canonicalStringify(match.recommendation.to) !== canonicalStringify(body.value)) {
+    writeRejection(res, 400);
+    return;
+  }
+
+  let trialLedger: TrialLedgerFacts;
+  try {
+    trialLedger = await readTrialLedger(selected.store);
+  } catch {
+    writeRejection(res, 503);
+    return;
+  }
+  if (trialLedger.applications.some((application) => application.proposalHash === body.proposalHash)) {
+    writeRejection(res, 409);
+    return;
+  }
+
+  // Append one atomic owner event that binds the proposal, exact applied value, and external evidence.
+  let durable: StoredRunState;
+  try {
+    durable = await selected.store.load(body.runId);
+  } catch {
+    writeRejection(res, 404);
+    return;
+  }
+  const appId = randomUUID();
+  const appCmd: CommandEnvelopeV1 = {
+    schemaVersion: 1,
+    commandId: appId,
+    runId: body.runId,
+    expectedRevision: durable.revision,
+    session: { sessionId: service.ownerSessionId() ?? "owner", actor: "owner" },
+    correlationId: appId,
+    type: "recordOwnerImprovementApplication",
+    payload: {
+      improvementProposalRef: body.proposalHash,
+      externalEvidenceHash: body.externalEvidenceHash,
+      surface: body.surface,
+      targetJson: canonicalStringify(body.target),
+      valueJson: canonicalStringify(body.value),
+    },
+  };
+  let appRes;
+  try {
+    appRes = await selected.store.apply(appCmd);
+  } catch {
+    writeRejection(res, 503);
+    return;
+  }
+  if (!appRes.ok) {
+    writeRejection(res, appRes.reason === "stale_revision" ? 409 : 400);
+    return;
+  }
+  if (selected.sse) {
+    selected.sse.publish(appRes.events);
+  }
+  res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ revision: appRes.state.revision }));
+  } finally {
+    selected.inFlightImprovementProposals.delete(body.proposalHash);
+  }
 }
 
 function writeImprovementHandoffFailure(
@@ -3181,25 +3933,166 @@ export function executionContractApprovalRecorded(
     && event.payload.ownerApprovedContentHash === contentHash);
 }
 
+export type ApprovedContractFailure =
+  | "execution_contract_unavailable"
+  | "execution_contract_malformed"
+  | "owner_approval_unverified";
+
+// --- Approved role-route projection -----------------------------------------
+
+export interface RoleRouteView {
+  readonly primary: string;
+  readonly fallbacks: readonly string[];
+}
+
+export interface GuidedRoleRoutes {
+  readonly authorRoute: RoleRouteView;
+  readonly reviewSlots: {
+    readonly general: RoleRouteView;
+    readonly security: RoleRouteView;
+  };
+}
+
+/** A durably approved contract with no recorded role routes; never filled from the run-wide onboarding route. */
+export type RoleRoutesRequiredOwnerAction = {
+  readonly type: "OWNER_DECISION_REQUIRED";
+  readonly reason: "role_routes_missing";
+};
+
+const ROLE_ROUTES_REQUIRED_OWNER_ACTION: RoleRoutesRequiredOwnerAction = {
+  type: "OWNER_DECISION_REQUIRED",
+  reason: "role_routes_missing",
+};
+
+const REVIEW_ROLE_KIND: Readonly<Record<ReviewClass, RoleKind>> = {
+  general: "review-general",
+  security: "review-security",
+};
+
+/** `roleRoutesShape` guarantees exactly one entry per `ROLE_KINDS` member whenever `routes` is defined. */
+function roleRouteView(routes: readonly RoleRoute[], role: RoleKind): RoleRouteView {
+  const found = routes.find((route) => route.role === role)!;
+  return { primary: found.primary, fallbacks: found.fallbacks };
+}
+
+function projectGuidedRoleRoutes(routes: readonly RoleRoute[]): GuidedRoleRoutes {
+  return {
+    authorRoute: roleRouteView(routes, "execution-author"),
+    reviewSlots: {
+      general: roleRouteView(routes, REVIEW_ROLE_KIND.general),
+      security: roleRouteView(routes, REVIEW_ROLE_KIND.security),
+    },
+  };
+}
+
+/**
+ * Restore the owner-approved contract for one run from the plan directory the
+ * ledger recorded, with no response to write. The HTTP read below and the
+ * review gate share this one resolution instead of restating its five checks.
+ */
+async function resolveApprovedExecutionContract(
+  repositoryPath: string,
+  runId: string,
+  durable: Awaited<ReturnType<BearingStore["load"]>>,
+): Promise<
+  | { readonly ok: true; readonly value: Extract<ExecutionContractParseResult, { readonly ok: true }> }
+  | { readonly ok: false; readonly code: ApprovedContractFailure }
+> {
+  const planDirectory = [...durable.events].reverse().find((event) => event.type === "journeyCheckpointRecorded"
+    && typeof event.payload.planDirectory === "string")?.payload.planDirectory;
+  if (typeof planDirectory !== "string") return { ok: false, code: "execution_contract_unavailable" };
+  if (!repositoryRelativePlanDirectory(planDirectory)) return { ok: false, code: "execution_contract_malformed" };
+  const source = await executionContractSource(repositoryPath, planDirectory);
+  if (!source.available) {
+    if (durable.legacyExecutionContract !== null
+      && !isCompactedRunState(durable)
+      && await executionContractFileAbsent(repositoryPath, durable)) {
+      const parsed = parseApprovedExecutionContract(durable.legacyExecutionContract);
+      if (parsed.ok
+        && parsed.value.runId === runId
+        && parsed.value.planDirectory === planDirectory
+        && durable.events.some((event) => event.type === "legacyExecutionContractApproved"
+          && event.actor === "owner"
+          && event.payload.approvedContentHash === parsed.value.contentHash)) {
+        return { ok: true, value: parsed };
+      }
+    }
+    return { ok: false, code: "execution_contract_unavailable" };
+  }
+  const parsed = parseApprovedExecutionContract(source.value);
+  if (!parsed.ok || parsed.value.runId !== runId || parsed.value.planDirectory !== planDirectory) {
+    return { ok: false, code: "execution_contract_malformed" };
+  }
+  if (!executionContractApprovalRecorded(durable.events, parsed.value.ownerApproval.recordId, parsed.value.contentHash)) {
+    return { ok: false, code: "owner_approval_unverified" };
+  }
+  return { ok: true, value: parsed };
+}
+
+/**
+ * Positive proof that this run has no execution contract, for the legacy role-route binding.
+ *
+ * `executionContractSource` reports `available: false` for a missing file *and* for a file it
+ * refuses — a symlink, a directory, an oversized artifact, a containment failure, an
+ * unreadable handle. Treating that one answer as absence would let a planted or broken
+ * artifact unlock the legacy path, so absence is re-proved here from the filesystem: only a
+ * genuinely missing entry counts, and anything present, of any kind, does not. A run with no
+ * recorded plan directory can hold no contract at all, which is the one other true absence.
+ */
+async function executionContractFileAbsent(repositoryPath: string, durable: StoredRunState): Promise<boolean> {
+  // The ledger outranks the filesystem. Once the owner has approved a contract by content
+  // hash, that approval is durable evidence a contract exists for this run, and deleting the
+  // artifact must not turn it back into an absence. A plan-review answer that carries no
+  // content hash approved no contract — that is the legacy shape this whole path exists for.
+  if (durable.events.some((event) => event.type === "ownerAnswered"
+    && event.actor === "owner"
+    && event.payload.answer === PLAN_REVIEW_APPROVAL
+    && typeof event.payload.ownerApprovedContentHash === "string")) return false;
+  const planDirectory = [...durable.events].reverse().find((event) => event.type === "journeyCheckpointRecorded"
+    && typeof event.payload.planDirectory === "string")?.payload.planDirectory;
+  if (typeof planDirectory !== "string") return true;
+  if (!repositoryRelativePlanDirectory(planDirectory)) return false;
+  const candidate = resolve(repositoryPath, planDirectory, "execution-contract.json");
+  const lexical = relative(repositoryPath, candidate);
+  if (!lexical || lexical.startsWith("..") || isAbsolute(lexical)) return false;
+  try {
+    await lstat(candidate);
+    return false;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "ENOENT";
+  }
+}
+
+/** The resolver code that reports "no contract resolved"; never sufficient on its own. */
+const CONTRACT_ABSENT = "execution_contract_unavailable";
+
+/**
+ * The one state that admits a legacy role-route binding: this run provably has no execution
+ * contract. A resolved contract is authoritative; a contract that is present but malformed,
+ * unverifiable, or unreadable is a validation failure rather than an absence; and a compacted
+ * run has no ledger left to resolve a contract from, so it can prove nothing. All of those
+ * refuse. The read projection and the write path share this one rule so neither can drift
+ * open independently of the other.
+ */
+async function legacyBindingAdmitted(
+  repositoryPath: string,
+  durable: StoredRunState,
+  contract: Awaited<ReturnType<typeof resolveApprovedExecutionContract>>,
+): Promise<boolean> {
+  if (contract.ok || contract.code !== CONTRACT_ABSENT) return false;
+  if (isCompactedRunState(durable)) return false;
+  return executionContractFileAbsent(repositoryPath, durable);
+}
+
 async function approvedExecutionContractForRun(
   res: ServerResponse,
   repositoryPath: string,
   runId: string,
   durable: Awaited<ReturnType<BearingStore["load"]>>,
 ): Promise<Extract<ExecutionContractParseResult, { readonly ok: true }> | undefined> {
-  const planDirectory = [...durable.events].reverse().find((event) => event.type === "journeyCheckpointRecorded"
-    && typeof event.payload.planDirectory === "string")?.payload.planDirectory;
-  if (typeof planDirectory !== "string") { writeRunReadFailure(res, "execution_contract_unavailable"); return undefined; }
-  if (!repositoryRelativePlanDirectory(planDirectory)) { writeRunReadFailure(res, "execution_contract_malformed"); return undefined; }
-  const source = await executionContractSource(repositoryPath, planDirectory);
-  if (!source.available) { writeRunReadFailure(res, "execution_contract_unavailable"); return undefined; }
-  const parsed = parseApprovedExecutionContract(source.value);
-  if (!parsed.ok || parsed.value.runId !== runId || parsed.value.planDirectory !== planDirectory) { writeRunReadFailure(res, "execution_contract_malformed"); return undefined; }
-  if (!executionContractApprovalRecorded(durable.events, parsed.value.ownerApproval.recordId, parsed.value.contentHash)) {
-    writeRunReadFailure(res, "owner_approval_unverified");
-    return undefined;
-  }
-  return parsed;
+  const resolved = await resolveApprovedExecutionContract(repositoryPath, runId, durable);
+  if (!resolved.ok) { writeRunReadFailure(res, resolved.code); return undefined; }
+  return resolved.value;
 }
 
 async function handleExecutionContractGet(req: IncomingMessage, res: ServerResponse, service: LocalSessionService, selected: SelectedBrowserState, runId: string, sliceId: string): Promise<void> {
@@ -3253,6 +4146,9 @@ function parseVerificationCheckpoint(value: unknown): VerificationCheckpointPars
       verdict: value.verdict,
       ...(value.rubricVersion === undefined ? {} : { rubricVersion: value.rubricVersion }),
       ...(value.findingCount === undefined ? {} : { findingCount: value.findingCount }),
+      ...(value.completedSlices === undefined ? {} : { completedSlices: value.completedSlices }),
+      ...(value.reviewedSliceIds === undefined ? {} : { reviewedSliceIds: value.reviewedSliceIds }),
+      ...(value.confirmedFindings === undefined ? {} : { confirmedFindings: value.confirmedFindings }),
     },
   };
 }
@@ -3273,6 +4169,9 @@ async function handleVerificationReportGet(req: IncomingMessage, res: ServerResp
     readonly verdict: VerificationVerdict;
     readonly rubricVersion?: string;
     readonly findingCount?: number;
+    readonly completedSlices?: VerificationCheckpointPayload["completedSlices"];
+    readonly reviewedSliceIds?: VerificationCheckpointPayload["reviewedSliceIds"];
+    readonly confirmedFindings?: VerificationCheckpointPayload["confirmedFindings"];
   }[] = [];
   for (const event of durable.events) {
     if (event.type !== "journeyCheckpointRecorded" || event.payload.verification === undefined) continue;
@@ -3295,6 +4194,9 @@ async function handleVerificationReportGet(req: IncomingMessage, res: ServerResp
       verdict: parsed.value.verdict,
       ...(parsed.value.rubricVersion === undefined ? {} : { rubricVersion: parsed.value.rubricVersion }),
       ...(parsed.value.findingCount === undefined ? {} : { findingCount: parsed.value.findingCount }),
+      ...(parsed.value.completedSlices === undefined ? {} : { completedSlices: parsed.value.completedSlices }),
+      ...(parsed.value.reviewedSliceIds === undefined ? {} : { reviewedSliceIds: parsed.value.reviewedSliceIds }),
+      ...(parsed.value.confirmedFindings === undefined ? {} : { confirmedFindings: parsed.value.confirmedFindings }),
     });
   }
   writeRunReadJson(res, { runId, layer, entries });
@@ -3353,6 +4255,10 @@ async function handleVerificationReportPost(
       ...independence,
     });
     if (!independent.ok) { writeRunReadFailure(res, independent.code); return; }
+    if (parsed.value.verdict === "weak") {
+      writeRunReadFailure(res, "minimum_score_not_met");
+      return;
+    }
     reportIdentity = parsed.value;
     verification = {
       layer,
@@ -3383,17 +4289,27 @@ async function handleVerificationReportPost(
         return;
       }
     }
-    const parsedReports = reports.map((report) => parseParkRangerReport(report, inboundClaims, independence));
+    const allowedSliceIds = contract.slices.map(({ sliceId }) => sliceId);
+    const parsedReports = reports.map((report) => parseParkRangerReport(report, inboundClaims, independence, allowedSliceIds));
     const refused = parsedReports.find((report) => !report.ok);
     if (refused && !refused.ok) { writeRunReadFailure(res, refused.reason); return; }
     const parsedValues = parsedReports.flatMap((report) => report.ok ? [report.value] : []);
     reportIdentity = parsedValues;
     const synthesized = synthesizeFindings(parsedValues, independence);
     if (!synthesized.ok) { writeRunReadFailure(res, synthesized.reason); return; }
+    const confirmedFindings = synthesized.value.findings
+      .map((finding) => ({
+        findingRef: createHash("sha256").update(findingIdentity(finding)).digest("hex"),
+        priority: finding.priority,
+        sliceIds: [...finding.sliceIds].sort(),
+      }))
+      .sort((left, right) => left.findingRef < right.findingRef ? -1 : left.findingRef > right.findingRef ? 1 : 0);
     verification = {
       layer,
       verdict: synthesized.value.verdict,
-      findingCount: synthesized.value.findings.length,
+      findingCount: confirmedFindings.length,
+      reviewedSliceIds: [...allowedSliceIds].sort(),
+      confirmedFindings,
     };
   }
   if (!isVerificationCheckpointPayload(verification)) { writeRunReadFailure(res, "verification_projection_invalid"); return; }
@@ -3479,7 +4395,7 @@ export function createRequestHandler(
   options: RequestHandlerOptions = {},
 ) {
   const selected: SelectedBrowserState = {
-    store: null, gateway: null, sse: null, repositoryPath: null, repositorySelecting: false, selection: null, run: null, journeys: new Map(), busyLeaseQueue: Promise.resolve(),
+    store: null, gateway: null, sse: null, repositoryPath: null, repositorySelecting: false, selection: null, run: null, journeys: new Map(), inFlightImprovementProposals: new Set(), busyLeaseQueue: Promise.resolve(),
   };
   const readiness = new ReadinessService(
     options.routeInspection ?? options.processRunner ?? { executableAvailable: () => false },
@@ -3601,6 +4517,11 @@ export function createRequestHandler(
         .catch(() => writeImprovementFailure(res, "stage_failed"));
       return;
     }
+    if (method === "POST" && path === "/api/v1/improvement/application") {
+      void handleOwnerImprovementApplication(req, res, service, selected, improvementReport)
+        .catch(() => writeRejection(res, 400));
+      return;
+    }
     const historyEntry = /^\/api\/v1\/history\/([A-Za-z0-9_-]{1,128})$/.exec(path);
     if (method === "DELETE" && (path === "/api/v1/history" || historyEntry)) {
       void handleHistoryDelete(req, res, service, selected, historyEntry?.[1]).catch(() => writeRejection(res, 500));
@@ -3608,7 +4529,9 @@ export function createRequestHandler(
     }
     const journeyStatus = /^\/api\/v1\/journey\/([A-Za-z0-9_-]{1,128})\/status$/.exec(path);
     if (method === "GET" && journeyStatus) {
-      void handleJourneyStatusGet(req, res, service, selected, journeyStatus[1], journey).catch(() => writeRejection(res, 500));
+      const runId = journeyStatus[1]!;
+      const refreshDurable = options.consumeJourneyStatusRefresh?.(runId) === true;
+      void handleJourneyStatusGet(req, res, service, selected, runId, journey, refreshDurable).catch(() => writeRejection(res, 500));
       return;
     }
     const executionContract = /^\/api\/v1\/runs\/([A-Za-z0-9_-]{1,128})\/execution-contract\/([A-Za-z0-9.]{1,128})$/.exec(path);
@@ -3714,40 +4637,62 @@ export interface HeadlessJourneyRequest {
   readonly model: string;
   readonly reasoning: string;
   readonly runId: string;
+  /** Internal caller identity; direct headless CLI requests retain the default. */
+  readonly sessionId?: string;
   readonly goal?: string;
   readonly answer?: string;
   readonly stage?: JourneyStage;
   readonly executionMode?: "explorer" | "expedition";
   readonly reviewCadence?: "slice" | "phase" | "end";
+  readonly currentSlice?: string;
+  /** Closed warrant for same-stage retry of a warrant-requiring failure at exact revision. Only for progress. */
+  readonly retryWarrant?: RetryWarrant;
+  readonly expectedRevision?: number;
 }
 
 export type HeadlessJourneyReceipt = {
   readonly ok: boolean;
-  readonly code?: "input_invalid" | "illegal_transition" | "repository_rejected" | "route_unavailable" | "run_not_found" | "transition_unavailable";
+  readonly code?: "input_invalid" | "illegal_transition" | "repository_rejected" | "repository_nested_in_git" | "route_unavailable" | "run_not_found" | "transition_unavailable";
   readonly runId: string;
   readonly revision: number;
   readonly stage?: JourneyStage;
   readonly status?: BrowserJourney["status"];
   readonly allowedActions?: readonly HeadlessJourneyAction[];
+  readonly recoveryAction?:
+    | { readonly type: "resume"; readonly stage: "execute-explorer" | "execute-expedition" }
+    | { readonly type: "progress"; readonly stage: JourneyStage; readonly retryWarrants?: readonly RetryWarrant[] };
   readonly question?: string;
   readonly summary?: string;
   readonly artifacts?: readonly string[];
+  readonly selectedScope?: JourneySelectedScope;
   readonly requiredOwnerAction?:
     | { readonly type: "answer"; readonly question: string }
     | { readonly type: "approve-route"; readonly prompt: typeof PLAN_REVIEW_QUESTION; readonly artifacts: readonly string[] }
-    | { readonly type: "confirm-amendment"; readonly prompt: typeof FOCUS_AMENDMENT_PROMPT }
+    | { readonly type: "confirm-amendment"; readonly prompt: typeof FOCUS_AMENDMENT_PROMPT | typeof ROLE_BOUNDARY_VIOLATION_PROMPT }
     | { readonly type: "select-execution"; readonly modes: readonly ["explorer", "expedition"]; readonly reviewCadences: readonly ["slice", "phase", "end"] };
+  readonly validationError?: "repository_fit_answer_invalid";
+  readonly remedy?: string;
+  readonly containingRepositoryPath?: string;
+  readonly correctionAction?: "decide";
   readonly outcome?:
     | { readonly type: "running" | "waiting" | "complete" }
     | { readonly type: "stopped" | "failed"; readonly code: HeadlessJourneyFailureCode };
+  /** Bounded structural design-checkpoint findings that accompany an `artifact_invalid` map-route failure (issue 78). */
+  readonly findings?: readonly Finding[];
   readonly disclosure?: string;
   readonly gitignoreMissing?: boolean;
-  readonly readiness?: "ready" | "unavailable";
+  readonly readiness?: "ready" | "blocked" | "unavailable";
 };
 
 export interface HeadlessJourneyDeps {
   readonly processRunner: ProcessRunner;
   readonly routeInspection?: RouteInspectionPort;
+  readonly beforeJourneyExecutionCheckpoint?: RequestHandlerOptions["beforeJourneyExecutionCheckpoint"];
+  readonly beforeHeadlessRecoveryDispatch?: (input: {
+    readonly runId: string;
+    readonly action: "resume" | "progress" | "decide" | "status";
+    readonly expectedRevision: number;
+  }) => Promise<void>;
 }
 
 type HeadlessResponse = { readonly status: number; readonly body: string; readonly headers: Readonly<Record<string, string | readonly string[]>> };
@@ -3756,7 +4701,7 @@ const HEADLESS_BOUND_HOST = "127.0.0.1:0";
 const HEADLESS_WORKSPACE_DISCLOSURE = "Bearing writes durable planning state to the selected repository's .bearing/ directory.";
 const MAX_HEADLESS_TEXT = 4_096;
 const MAX_HEADLESS_ARTIFACTS = 32;
-const HEADLESS_SECRET = /(?:\b(?:api[_ -]?key|secret|token|password|authorization)\s*[=:]\s*|\bBearer\s+|\bsk-[A-Za-z0-9_-]{8,}|\bAKIA[A-Z0-9]{16})[^\s,;]*/i;
+const HEADLESS_SECRET = /(?:\b(?:api[_ -]?key|secret|token|password|authorization)\s*[=:]\s*|\bBearer\s+|\bsk-[A-Za-z0-9_-]{8,}|\bAKIA[A-Z0-9]{16}|\bgh[oprsu]_[A-Za-z0-9]{16,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[A-Za-z0-9_-]{20,}|\bASIA[A-Z0-9]{16})[^\s,;]*/i;
 const HEADLESS_JOURNEY_FAILURE_CODES = new Set([
   "input_invalid",
   "plan_directory_invalid",
@@ -3778,6 +4723,7 @@ const HEADLESS_JOURNEY_FAILURE_CODES = new Set([
   "fit_unavailable",
   "fit_malformed",
   "fit_undecidable",
+  "role_boundary_violation",
 ] as const);
 type HeadlessJourneyFailureCode = (typeof HEADLESS_JOURNEY_FAILURE_CODES extends ReadonlySet<infer Code> ? Code : never) | "failure_unavailable";
 
@@ -3798,24 +4744,123 @@ function headlessJson(value: string): Record<string, unknown> | undefined {
   }
 }
 
-async function freshHeadlessRead(repository: string): Promise<boolean> {
+/**
+ * Fail-closed admission for a caller-supplied repository argument.
+ *
+ * Returns the admitted absolute Git root, or `undefined` for anything that is not one:
+ * a relative path, a traversal that lands outside a repository root, a non-Git directory,
+ * an unsafe candidate, an interrupted initialization, or a `.bearing` that is a symlink,
+ * not a directory, or lacks a valid workspace.json manifest matching the root. It reads only;
+ * it never creates or repairs anything.
+ */
+export async function admitRepositoryRoot(repository: string): Promise<string | undefined> {
+  if (!isAbsolute(repository)) return undefined;
   let repositoryPath: string;
-  let isGitRoot: boolean;
   try {
     repositoryPath = await realpath(repository);
-    if (!(await lstat(repositoryPath)).isDirectory()) return false;
+    // Only the exact canonical root is admitted, modulo a trailing separator (a harmless
+    // respelling `realpath` itself would normalize away). A lexical `..` that resolves back to
+    // the same root, and a symlink whose target is the root, still canonicalize to something the
+    // caller did not name, so neither reaches the store.
+    if (repositoryPath !== (repository.replace(/[/\\]+$/, "") || repository)) return undefined;
+    if (!(await lstat(repositoryPath)).isDirectory()) return undefined;
     const git = await lstat(resolve(repositoryPath, ".git"));
-    isGitRoot = git.isDirectory() || git.isFile();
-    if (!isGitRoot || !(assessRepositorySafety({
+    if (!git.isDirectory() && !git.isFile()) return undefined;
+    if (!(assessRepositorySafety({
       candidate: repositoryPath,
-      isGitRoot,
+      isGitRoot: true,
       agentExecutableRealpaths: new RepositoryChoiceService().agentExecutableRealpaths(),
       ownerConfirmedNonGit: false,
-    })).ok) return false;
-    if ((await readdir(repositoryPath)).some((entry) => entry.startsWith(".bearing.tmp-"))) return false;
+    })).ok) return undefined;
+    if ((await readdir(repositoryPath)).some((entry) => entry.startsWith(".bearing.tmp-"))) return undefined;
   } catch {
-    return false;
+    return undefined;
   }
+  try {
+    const bearing = await lstat(resolve(repositoryPath, ".bearing"));
+    if (!bearing.isDirectory() || bearing.isSymbolicLink()) return undefined;
+  } catch (error: unknown) {
+    return error instanceof Error && "code" in error && error.code === "ENOENT" ? repositoryPath : undefined;
+  }
+  try {
+    const manifestPath = resolve(repositoryPath, ".bearing", "workspace.json");
+    const manifestStat = await lstat(manifestPath);
+    if (manifestStat.isFile() && !manifestStat.isSymbolicLink()) {
+      const manifestBody = readFileSync(manifestPath, "utf8");
+      const parsed: unknown = JSON.parse(manifestBody);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        const manifest = parsed as Partial<{ schemaVersion: unknown; repositoryPath: unknown }>;
+        if (manifest.schemaVersion === 1 && typeof manifest.repositoryPath === "string" && manifest.repositoryPath === repositoryPath) {
+          return repositoryPath;
+        }
+      }
+    }
+    return undefined;
+  } catch (error: unknown) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+      return undefined;
+    }
+  }
+  try {
+    // Bounded canonical listing replaces unbounded per-entry readdir+load. list() is fail-closed on
+    // integrity problems, surfaces only runs with workRequestCreated (or compacted summaries), and
+    // internally caps candidates/loads (default 20, hard 50). At least one readable (non-unreadable)
+    // entry within the hard bound admits legacy run state; corrupt unreadable entries never count
+    // as proof. Use list(50) so a genuine readable entry remains visible even when a newer corrupt
+    // entry (by updatedAt) appears first in the result.
+    const listed = await new BearingStore(repositoryPath).list(50);
+    if (listed.some((entry) => !unreadable(entry))) {
+      return repositoryPath;
+    }
+  } catch {
+    // listing failure is not an admission signal
+  }
+  try {
+    const focusPath = resolve(repositoryPath, ".bearing", "focus");
+    const focusStat = await lstat(focusPath);
+    if (focusStat.isDirectory() && !focusStat.isSymbolicLink()) {
+      const entries = await readdir(focusPath);
+      for (const entry of entries) {
+        if (entry === "request.json") {
+          const filePath = resolve(focusPath, entry);
+          const fileStat = await lstat(filePath);
+          if (fileStat.isFile() && !fileStat.isSymbolicLink()) {
+            // Canonical reuse: parse with the exported focusRequest predicate (unchanged semantics from
+            // standalone-focus) then call createFocusContext with the validated fields. Admit the
+            // repository for legacy Focus marker only on full success (matches beginStandaloneFocus
+            // admission read path without opening a server). Rejects role-only, traversal planDirectory,
+            // empty/invalid, and non-plan-backed requests.
+            try {
+              const body = readFileSync(filePath, "utf8");
+              const parsed: unknown = JSON.parse(body);
+              if (focusRequest(parsed)) {
+                const ctx = await createFocusContext({
+                  root: repositoryPath,
+                  planDirectory: parsed.planDirectory,
+                  role: parsed.role,
+                  objective: parsed.objective,
+                  ...(parsed.slice ? { currentSlice: parsed.slice } : {}),
+                });
+                if (ctx.ok) {
+                  return repositoryPath;
+                }
+              }
+            } catch {
+              // empty, unparsable, or canonical predicate/context rejected -> not a legacy marker
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // focus directory missing
+  }
+  return undefined;
+}
+
+async function freshHeadlessRead(repository: string): Promise<boolean> {
+  const repositoryPath = await admitRepositoryRoot(repository);
+  if (repositoryPath === undefined) return false;
   try {
     await lstat(resolve(repositoryPath, ".bearing"));
     return false;
@@ -3861,36 +4906,107 @@ function invokeHeadlessHandler(
   });
 }
 
+function headlessAmendmentCode(run: Record<string, unknown> | undefined): AmendmentGateCode | undefined {
+  const lastResult = typeof run?.lastResult === "object" && run.lastResult !== null && !Array.isArray(run.lastResult)
+    ? run.lastResult as Record<string, unknown>
+    : undefined;
+  return lastResult?.status === "failure" && typeof lastResult.code === "string" ? amendmentGateCode(lastResult.code) : undefined;
+}
+
+function headlessAmendmentPrompt(run: Record<string, unknown> | undefined): typeof FOCUS_AMENDMENT_PROMPT | typeof ROLE_BOUNDARY_VIOLATION_PROMPT {
+  return amendmentPromptFor(headlessAmendmentCode(run) ?? "focus_amendment_required");
+}
+
+function headlessAmendmentApproval(run: Record<string, unknown> | undefined): typeof FOCUS_AMENDMENT_APPROVAL | typeof ROLE_BOUNDARY_VIOLATION_APPROVAL {
+  return amendmentApprovalFor(headlessAmendmentCode(run) ?? "focus_amendment_required");
+}
+
 function headlessFocusAmendmentRequired(run: Record<string, unknown> | undefined): boolean {
   if (!run || (run.status !== "failed" && run.status !== "stopped") || (run.stage !== "execute-explorer" && run.stage !== "execute-expedition")) return false;
+  return headlessAmendmentCode(run) !== undefined;
+}
+
+type HeadlessRecoveryPlan = Pick<HeadlessJourneyReceipt, "allowedActions" | "recoveryAction">;
+
+function isIssue85Recovery(run: Record<string, unknown> | undefined): boolean {
+  if (!run || (run.status !== "failed" && run.status !== "stopped")) return false;
   const lastResult = typeof run.lastResult === "object" && run.lastResult !== null && !Array.isArray(run.lastResult)
     ? run.lastResult as Record<string, unknown>
     : undefined;
-  return lastResult?.status === "failure" && lastResult.code === "focus_amendment_required";
+  return lastResult?.status === "failure"
+    && ((run.stage === "map-route" && lastResult.code === "artifact_invalid")
+      || ((run.stage === "execute-explorer" || run.stage === "execute-expedition") && lastResult.code === "interrupted"));
 }
 
-function headlessAllowedActions(
+function isRetryWarrantRecovery(run: Record<string, unknown> | undefined): boolean {
+  if (!run || (run.status !== "failed" && run.status !== "stopped")) return false;
+  const lastResult = typeof run.lastResult === "object" && run.lastResult !== null && !Array.isArray(run.lastResult)
+    ? run.lastResult as Record<string, unknown>
+    : undefined;
+  return lastResult?.status === "failure"
+    && ((run.stage === "repository-fit" && lastResult.code === "fit_unavailable")
+      || ((run.stage === "execute-explorer" || run.stage === "execute-expedition") && lastResult.code === "adapter_failed"));
+}
+
+function headlessFailedRecoveryDecision(
+  run: Record<string, unknown> | undefined,
+  pendingDecision: Record<string, unknown> | null | undefined,
+): boolean {
+  return isIssue85Recovery(run)
+    && typeof pendingDecision?.decisionId === "string"
+    && headlessText(pendingDecision.question)
+    && pendingDecision.question !== PLAN_REVIEW_QUESTION;
+}
+
+function headlessRecoveryPlan(
   run: Record<string, unknown> | undefined,
   pendingDecision: Record<string, unknown> | null | undefined,
   readinessReady: boolean,
-): readonly HeadlessJourneyAction[] {
-  if (!run) return ["create", "resume", "status"];
-  if (run.status === "complete") return ["status"];
-  if (!readinessReady) return ["status", "resume"];
+): HeadlessRecoveryPlan {
+  if (!run) return { allowedActions: ["create", "resume", "status"] };
+  if (run.status === "complete") return { allowedActions: ["status"] };
+  const lastResult = typeof run.lastResult === "object" && run.lastResult !== null && !Array.isArray(run.lastResult)
+    ? run.lastResult as Record<string, unknown>
+    : undefined;
+  if (!readinessReady) return { allowedActions: isIssue85Recovery(run) ? ["status"] : ["status", "resume"] };
   if (pendingDecision && typeof pendingDecision.decisionId === "string") {
-    return pendingDecision.question === PLAN_REVIEW_QUESTION && run.planReviewAvailable === true
+    return { allowedActions: pendingDecision.question === PLAN_REVIEW_QUESTION && run.planReviewAvailable === true
       ? ["status", "resume", "approve-route"]
       : pendingDecision.question === PLAN_REVIEW_QUESTION
         ? ["status", "resume"]
-        : ["status", "resume", "decide"];
+        : isIssue85Recovery(run) && !headlessFailedRecoveryDecision(run, pendingDecision)
+          ? ["status"]
+        : ["status", "resume", "decide"] };
   }
-  if (headlessFocusAmendmentRequired(run)) return ["status", "resume", "confirm-amendment"];
-  if (run.status === "failed" || run.status === "stopped") return ["status", "resume", "progress"];
-  return run.status === "waiting" && run.stage === "draft-implementation" && run.explorerAvailable === true
+  if (headlessFocusAmendmentRequired(run)) return { allowedActions: ["status", "resume", "confirm-amendment"] };
+  const issue85Recovery = isIssue85Recovery(run);
+  if (issue85Recovery && run.recoveryAvailable !== true) return { allowedActions: ["status"] };
+  const warrantRecovery = isRetryWarrantRecovery(run);
+  if (warrantRecovery && run.recoveryAvailable !== true) return { allowedActions: ["status"] };
+  if ((run.status === "failed" || run.status === "stopped") && run.recoveryAvailable === true) {
+    if (run.stage === "map-route" && lastResult?.status === "failure" && lastResult.code === "artifact_invalid") {
+      return { allowedActions: ["status", "progress"], recoveryAction: { type: "progress", stage: "gather-supplies" } };
+    }
+    if ((run.stage === "execute-explorer" || run.stage === "execute-expedition") && lastResult?.status === "failure" && lastResult.code === "interrupted") {
+      return { allowedActions: ["status", "resume"], recoveryAction: { type: "resume", stage: run.stage } };
+    }
+    if (warrantRecovery && typeof run.stage === "string" && RECORD_JOURNEY_CHECKPOINT_STAGES.includes(run.stage as JourneyStage)) {
+      return {
+        allowedActions: ["status", "progress"],
+        recoveryAction: {
+          type: "progress",
+          stage: run.stage as JourneyStage,
+          retryWarrants: RETRY_WARRANTS.filter((warrant) => retryWarrantAllowed("within-slice", warrant)),
+        },
+      };
+    }
+  }
+  if (run.status === "failed" || run.status === "stopped") return { allowedActions: ["status", "resume", "progress"] };
+  return { allowedActions: run.status === "waiting" && run.stage === "draft-implementation" && run.explorerAvailable === true
     ? ["status", "resume", "select-execution", "select-explorer"]
     : run.planReviewAvailable === true
       ? ["status", "resume", "approve-route"]
-      : ["status", "resume", "progress"];
+      : ["status", "resume", "progress"] };
 }
 
 function headlessText(value: unknown): value is string {
@@ -3919,21 +5035,88 @@ function headlessArtifacts(value: unknown): readonly string[] {
   return projected;
 }
 
+const HEADLESS_FINDING_CODES = new Set(["artifact_frontmatter_invalid", "design_section_missing", "seit_section_missing"] as const);
+const HEADLESS_FINDING_ARTIFACTS = new Set(["design.md", "seit.md"] as const);
+const MAX_HEADLESS_FINDINGS = 16;
+
+/**
+ * Bounded projection of the design-checkpoint findings a map-route failure result carries
+ * (issue 78). Fail-closed: a finding survives only when every field matches the fixed structural
+ * vocabulary, every text field passes the shared headless scrubber (bounded, trimmed, free of
+ * control characters and secrets), and the count stays capped.
+ */
+function headlessFindings(value: unknown): readonly Finding[] {
+  if (!Array.isArray(value)) return [];
+  const projected: Finding[] = [];
+  for (const candidate of value) {
+    if (projected.length === MAX_HEADLESS_FINDINGS) break;
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) continue;
+    const finding = candidate as Record<string, unknown>;
+    if (typeof finding.code !== "string" || !HEADLESS_FINDING_CODES.has(finding.code as never)) continue;
+    if (typeof finding.artifact !== "string" || !HEADLESS_FINDING_ARTIFACTS.has(finding.artifact as never)) continue;
+    if (finding.severity !== "advisory" && finding.severity !== "amendment") continue;
+    if (!headlessText(finding.observed) || !headlessText(finding.required) || !headlessText(finding.remedy)) continue;
+    const sliceId = typeof finding.sliceId === "string" && /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/.test(finding.sliceId) ? finding.sliceId : undefined;
+    projected.push({
+      code: finding.code as Finding["code"],
+      severity: finding.severity as Finding["severity"],
+      artifact: finding.artifact as Finding["artifact"],
+      ...(sliceId ? { sliceId } : {}),
+      observed: finding.observed,
+      required: finding.required,
+      remedy: finding.remedy,
+    });
+  }
+  return projected;
+}
+
+/**
+ * The browser control room's status/showcase JSON emits `lastResult` directly rather than
+ * through {@link projectHeadlessReceipt} (issue 78 follow-up). Its `findings` field carries
+ * the same document-derived text the headless receipt bounds, so it needs the identical
+ * scrub here even though every other `lastResult` field on this loopback, cookie-
+ * authenticated surface is intentionally left as-is.
+ */
+function browserLastResult<T extends { status?: unknown; code?: unknown; findings?: unknown } | undefined>(lastResult: T): T {
+  if (lastResult === undefined || lastResult.status !== "failure" || lastResult.code !== "artifact_invalid" || lastResult.findings === undefined) return lastResult;
+  return { ...lastResult, findings: headlessFindings(lastResult.findings) };
+}
+
+function headlessSelectedScope(value: unknown): JourneySelectedScope | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const scope = value as Record<string, unknown>;
+  const currentSlice = scope.currentSlice;
+  const remainingSlices = scope.remainingSlices;
+  const allowedPaths = scope.allowedPaths;
+  const seitCommandIds = scope.seitCommandIds;
+  if (typeof currentSlice !== "string" || !/^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/.test(currentSlice)) return undefined;
+  if (!Array.isArray(remainingSlices) || remainingSlices.length !== 1 || remainingSlices[0] !== currentSlice) return undefined;
+  if (!Array.isArray(allowedPaths) || allowedPaths.length > MAX_HEADLESS_ARTIFACTS || !allowedPaths.every((path) => typeof path === "string" && repositoryRelativePlanDirectory(path))) return undefined;
+  if (!Array.isArray(seitCommandIds) || seitCommandIds.length > MAX_HEADLESS_ARTIFACTS || !seitCommandIds.every((id) => typeof id === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(id))) return undefined;
+  return { currentSlice, remainingSlices: [currentSlice], allowedPaths: [...allowedPaths] as string[], seitCommandIds: [...seitCommandIds] as string[] };
+}
+
 function projectHeadlessReceipt(
   run: Record<string, unknown> | undefined,
   pendingDecision: Record<string, unknown> | null | undefined,
   readinessReady: boolean,
-): Pick<HeadlessJourneyReceipt, "allowedActions" | "question" | "summary" | "artifacts" | "requiredOwnerAction" | "outcome"> {
-  const allowedActions = headlessAllowedActions(run, pendingDecision, readinessReady);
-  if (!run) return { allowedActions };
+): Pick<HeadlessJourneyReceipt, "allowedActions" | "recoveryAction" | "question" | "summary" | "artifacts" | "selectedScope" | "requiredOwnerAction" | "outcome" | "findings" | "validationError" | "remedy" | "correctionAction"> {
+  const recoveryPlan = headlessRecoveryPlan(run, pendingDecision, readinessReady);
+  const allowedActions = recoveryPlan.allowedActions ?? [];
+  if (!run) return recoveryPlan;
   const lastResult = typeof run.lastResult === "object" && run.lastResult !== null && !Array.isArray(run.lastResult)
     ? run.lastResult as Record<string, unknown>
     : undefined;
   const artifacts = headlessArtifacts(run.artifacts);
   const summary = lastResult?.status === "action" && headlessText(lastResult.summary) ? lastResult.summary : undefined;
+  const selectedScope = headlessSelectedScope(lastResult?.selectedScope);
+  const fitCorrection = lastResult?.status === "question"
+    && lastResult.validationError === "repository_fit_answer_invalid"
+    && lastResult.remedy === FIT_OWNER_ANSWER_REMEDY
+    && lastResult.correctionAction === "decide";
   const question = typeof pendingDecision?.decisionId === "string"
     && headlessText(pendingDecision.question)
-    && run.question === pendingDecision.question
+    && (run.question === pendingDecision.question || headlessFailedRecoveryDecision(run, pendingDecision))
     && pendingDecision.question !== PLAN_REVIEW_QUESTION
     ? pendingDecision.question
     : undefined;
@@ -3952,11 +5135,18 @@ function projectHeadlessReceipt(
     : status === "running" || status === "waiting" || status === "complete"
       ? { type: status } as const
       : undefined;
+  // Findings accompany only the map-route design-checkpoint failure; anything else that ever
+  // carried a `findings` field is deliberately not projected.
+  const findings = lastResult?.status === "failure" && lastResult.code === "artifact_invalid"
+    ? headlessFindings(lastResult.findings)
+    : [];
   return {
-    allowedActions,
+    ...recoveryPlan,
     ...(question ? { question, requiredOwnerAction: { type: "answer" as const, question } } : {}),
+    ...(fitCorrection ? { validationError: "repository_fit_answer_invalid" as const, remedy: FIT_OWNER_ANSWER_REMEDY, correctionAction: "decide" as const } : {}),
     ...(summary ? { summary } : {}),
     ...(artifacts.length ? { artifacts } : {}),
+    ...(selectedScope ? { selectedScope } : {}),
     ...(routeApprovalRequired
       ? { requiredOwnerAction: { type: "approve-route" as const, prompt: PLAN_REVIEW_QUESTION, artifacts } }
       : {}),
@@ -3964,10 +5154,647 @@ function projectHeadlessReceipt(
       ? { requiredOwnerAction: { type: "select-execution" as const, modes: ["explorer", "expedition"] as const, reviewCadences: ["slice", "phase", "end"] as const } }
       : {}),
     ...(focusAmendmentRequired
-      ? { requiredOwnerAction: { type: "confirm-amendment" as const, prompt: FOCUS_AMENDMENT_PROMPT } }
+      ? { requiredOwnerAction: { type: "confirm-amendment" as const, prompt: headlessAmendmentPrompt(run) } }
       : {}),
     ...(outcome ? { outcome } : {}),
+    ...(findings.length ? { findings } : {}),
   };
+}
+
+export type DurableContinuationProjection = ReturnType<typeof projectHeadlessReceipt>;
+
+export type DurableRunContinuation =
+  | {
+      readonly ok: false;
+      readonly code: "repository_rejected" | "store_unreadable" | "run_not_found";
+      /** Present once the repository itself was admitted. */
+      readonly repositoryPath?: string;
+    }
+  | {
+      readonly ok: true;
+      readonly repositoryPath: string;
+      readonly runId: string;
+      readonly revision: number;
+      readonly objective: string;
+      readonly updatedAt: string;
+      readonly stage?: JourneyStage;
+      readonly status?: BrowserJourney["status"];
+      readonly continuity: BrowserJourney["sessionContinuity"];
+      readonly selection?: Selection;
+      readonly planDirectory?: string;
+      readonly verification?: VerificationCheckpointPayload;
+      readonly checkpoint?: { readonly stage: JourneyStage; readonly status: BrowserJourney["status"] };
+      readonly blockers: readonly string[];
+      readonly projection: DurableContinuationProjection;
+      /** Present only when an approved execution contract carries a role-routes decision. */
+      readonly roleRoutes?: GuidedRoleRoutes;
+      /** Present only when an approved execution contract resolves but records no role-routes decision. */
+      readonly roleRoutesBlocker?: RoleRoutesRequiredOwnerAction;
+    };
+
+/**
+ * Project one durable run for a read-only continuation.
+ *
+ * This is the read half of {@link executeHeadlessJourney}: it restores and projects the same
+ * durable state through the same scrubbers, but it never starts a session, checks readiness,
+ * consults a provider, spawns a process, opens a socket, or writes a byte. Readiness is
+ * deliberately *not* probed here — a saved route means a transition is worth offering, and
+ * `executeHeadlessJourney` re-verifies that route before it mutates anything.
+ */
+export async function readDurableContinuation(repository: string, runId: string): Promise<DurableRunContinuation> {
+  const repositoryPath = await admitRepositoryRoot(repository);
+  if (repositoryPath === undefined) return { ok: false, code: "repository_rejected" };
+  let durable: StoredRunState;
+  try {
+    durable = await new BearingStore(repositoryPath).load(runId);
+  } catch {
+    return { ok: false, code: "store_unreadable", repositoryPath };
+  }
+  const created = durable.events.find((event) => event.type === "workRequestCreated");
+  const summary = isCompactedRunState(durable)
+    ? { goal: durable.summary.goal, updatedAt: durable.summary.updatedAt }
+    : created && typeof created.payload.goal === "string"
+      ? { goal: created.payload.goal, updatedAt: durable.events.at(-1)?.recordedAt ?? created.recordedAt }
+      : undefined;
+  if (!summary) return { ok: false, code: "run_not_found", repositoryPath };
+
+  const checkpoint = durable.journeyCheckpoint;
+  const answered = checkpoint?.questionDecisionId === undefined
+    ? undefined
+    : [...durable.events].reverse().find((event) => event.type === "ownerAnswered"
+      && event.payload.decisionId === checkpoint.questionDecisionId
+      && typeof event.payload.answer === "string");
+  const state = restoreJourney({
+    goal: summary.goal,
+    updatedAt: summary.updatedAt,
+    ...(durable.pendingDecision ? { pendingQuestion: durable.pendingDecision.question } : {}),
+    ...(answered ? { checkpointAnswer: answered.payload.answer as string } : {}),
+    ...(checkpoint ? { checkpoint } : {}),
+  });
+  // A saved route is the durable proof that a mutating action is worth offering at all.
+  const routeSaved = state?.selection !== undefined;
+  const recoveryAvailable = state !== undefined
+    && routeSaved
+    && (state.status === "failed" || state.status === "stopped")
+    && state.lastResult?.status === "failure"
+    ? state.stage === "repository-fit" && state.lastResult.code === "fit_unavailable"
+      ? journeyStageTransitionAllowed(state.stage, state.stage)
+      : confirmedFit(state, repositoryPath) === undefined
+        ? false
+        : state.stage === "map-route" && state.lastResult.code === "artifact_invalid"
+      ? journeyStageTransitionAllowed(state.stage, "gather-supplies")
+      : (state.stage === "execute-explorer" || state.stage === "execute-expedition")
+        && state.lastResult.code === "interrupted"
+        ? await executionTransitionAllowed(state, durable, repositoryPath, state.stage)
+        : ((state.stage === "execute-explorer" || state.stage === "execute-expedition") && state.lastResult.code === "adapter_failed")
+          ? await executionTransitionAllowed(state, durable, repositoryPath, state.stage)
+          : false
+    : false;
+  const run = state === undefined ? undefined : {
+    runId,
+    goal: state.goal,
+    stage: state.stage,
+    status: state.status,
+    busy: state.busy,
+    artifacts: state.artifacts,
+    question: state.question,
+    lastResult: state.lastResult,
+    planReviewAvailable: await planReviewAvailable(state, durable, repositoryPath),
+    explorerAvailable: await executionTransitionAllowed(state, durable, repositoryPath, "execute-explorer", "explorer", "slice"),
+    recoveryAvailable,
+  };
+  const projection = projectHeadlessReceipt(
+    run,
+    durable.pendingDecision as Record<string, unknown> | null,
+    routeSaved,
+  );
+  const planDirectory = state?.resolvedPlanDirectory ?? state?.planDirectory;
+  const blockers = new Set<string>();
+  if (state?.lastResult?.status === "failure" && headlessText(state.lastResult.code)) blockers.add(state.lastResult.code);
+  if (state?.retryRefusal) blockers.add(state.retryRefusal);
+  if (checkpoint?.planningFailure) blockers.add(checkpoint.planningFailure);
+  if (!routeSaved) blockers.add("route_unavailable");
+
+  // Read-only, provider-free: an approved contract's role routes are static ledger data, never
+  // a live availability probe. Never resolvable at all (unapproved, unwritten, malformed) leaves
+  // guided execution exactly as readable as before this projection existed.
+  const approvedContract = await resolveApprovedExecutionContract(repositoryPath, runId, durable);
+  const approvedRoleRoutes = approvedContract.ok ? approvedContract.value.value.roleRoutes : undefined;
+  // An owner's legacy binding is a last resort, never an override, and only *absence* of a
+  // contract admits it. A contract that resolves stays authoritative — including when it
+  // records no routes, where `roleRoutesBlocker` below keeps the decision where it belongs.
+  // A contract that is present but malformed or whose owner approval cannot be verified is
+  // not proof that none exists, so it fails closed to no routes at all rather than letting a
+  // stale binding supplant a contract-authorized route.
+  const legacyRoleRoutes = await legacyBindingAdmitted(repositoryPath, durable, approvedContract)
+    ? durable.legacyRoleRoutes ?? undefined
+    : undefined;
+  const effectiveRoleRoutes = approvedRoleRoutes ?? legacyRoleRoutes;
+
+  return {
+    ok: true,
+    repositoryPath,
+    runId,
+    revision: durable.revision,
+    // The goal is owner-authored free text: it passes the same scrubber every other projected
+    // string does, and a bounded placeholder stands in for anything that fails it.
+    objective: headlessText(summary.goal) ? summary.goal : "[redacted]",
+    updatedAt: summary.updatedAt,
+    ...(state ? { stage: state.stage, status: state.status } : {}),
+    continuity: state?.sessionContinuity ?? "intact",
+    ...(state?.selection ? { selection: state.selection } : {}),
+    ...(planDirectory !== undefined && headlessText(planDirectory) && repositoryRelativePlanDirectory(planDirectory)
+      ? { planDirectory }
+      : {}),
+    ...(checkpoint?.verification ? { verification: checkpoint.verification } : {}),
+    ...(checkpoint ? { checkpoint: { stage: checkpoint.stage, status: checkpoint.status } } : {}),
+    blockers: [...blockers],
+    projection,
+    ...(effectiveRoleRoutes ? { roleRoutes: projectGuidedRoleRoutes(effectiveRoleRoutes) } : {}),
+    ...(approvedContract.ok && approvedRoleRoutes === undefined ? { roleRoutesBlocker: ROLE_ROUTES_REQUIRED_OWNER_ACTION } : {}),
+  };
+}
+
+// --- Legacy role-route binding ----------------------------------------------
+
+export type LegacyRoleRouteFailure =
+  | "repository_rejected"
+  | "store_unreadable"
+  | "run_not_found"
+  | "role_routes_invalid"
+  | "role_routes_hash_mismatch"
+  | "execution_contract_authoritative"
+  | "execution_contract_malformed"
+  | "owner_approval_unverified"
+  /** A contract artifact is present but unreadable, or the ledger cannot prove one is absent. */
+  | "execution_contract_unresolved"
+  | "role_routes_already_bound"
+  | "stale_revision"
+  | "record_rejected";
+
+export interface LegacyRoleRouteRequest {
+  readonly repository: string;
+  readonly runId: string;
+  readonly expectedRevision: number;
+  readonly ownerSessionId: string;
+  readonly roleRoutes: readonly RoleRoute[];
+  readonly approvedContentHash: string;
+}
+
+export type LegacyRoleRouteResult =
+  | { readonly ok: false; readonly code: LegacyRoleRouteFailure; readonly revision?: number }
+  | { readonly ok: true; readonly revision: number; readonly roleRoutes: GuidedRoleRoutes; readonly recorded: boolean };
+
+/**
+ * Bind owner-approved role routes to a run that predates execution-contract role routes.
+ *
+ * This is control-plane provenance and nothing else. It records the owner's bindings, never
+ * touches stage, status, outcome, ledger, evidence, blockers, or the pending decision, and
+ * refuses outright wherever an approved execution contract resolves — a contract is the
+ * authority for its own run, and a legacy binding must never compete with one. Every other
+ * rule (owner actor, complete registered roles, exact canonical hash, expected revision,
+ * write-once) is the workflow aggregate's, re-derived here only to return a typed refusal
+ * instead of a bare `record_rejected`.
+ */
+export async function applyLegacyRoleRouteApproval(request: LegacyRoleRouteRequest): Promise<LegacyRoleRouteResult> {
+  const repositoryPath = await admitRepositoryRoot(request.repository);
+  if (repositoryPath === undefined) return { ok: false, code: "repository_rejected" };
+  const store = new BearingStore(repositoryPath);
+  let durable: StoredRunState;
+  try { durable = await store.load(request.runId); }
+  catch { return { ok: false, code: "store_unreadable" }; }
+  if (!durable.workRequestCreated) return { ok: false, code: "run_not_found" };
+
+  if (!roleRoutesShape(request.roleRoutes)) return { ok: false, code: "role_routes_invalid", revision: durable.revision };
+  if (request.approvedContentHash !== hashLegacyRoleRoutes(request.runId, request.roleRoutes)) {
+    return { ok: false, code: "role_routes_hash_mismatch", revision: durable.revision };
+  }
+
+  const contract = await resolveApprovedExecutionContract(repositoryPath, request.runId, durable);
+  if (contract.ok) return { ok: false, code: "execution_contract_authoritative", revision: durable.revision };
+  // A contract that exists but cannot be validated refuses the binding outright: treating a
+  // broken artifact as an absent one would let a tampered contract unlock legacy routes.
+  if (contract.code !== CONTRACT_ABSENT) return { ok: false, code: contract.code, revision: durable.revision };
+  if (!await legacyBindingAdmitted(repositoryPath, durable, contract)) {
+    return { ok: false, code: "execution_contract_unresolved", revision: durable.revision };
+  }
+
+  // Exact replay: this identical binding is already durable, so report it without a write.
+  const bound = durable.legacyRoleRoutes;
+  if (bound !== null) {
+    return canonicalStringify(bound) === canonicalStringify(request.roleRoutes)
+      ? { ok: true, revision: durable.revision, roleRoutes: projectGuidedRoleRoutes(bound), recorded: false }
+      : { ok: false, code: "role_routes_already_bound", revision: durable.revision };
+  }
+  if (durable.revision !== request.expectedRevision) return { ok: false, code: "stale_revision", revision: durable.revision };
+
+  const commandId = `legacy-routes-${createHash("sha256")
+    .update(canonicalStringify({ runId: request.runId, roleRoutes: request.roleRoutes }))
+    .digest("hex").slice(0, 48)}`;
+  const applied = await store.apply({
+    schemaVersion: 1,
+    commandId,
+    runId: request.runId,
+    expectedRevision: request.expectedRevision,
+    session: { sessionId: request.ownerSessionId, actor: "owner" },
+    correlationId: commandId,
+    type: "approveLegacyRoleRoutes",
+    payload: { roleRoutes: request.roleRoutes, approvedContentHash: request.approvedContentHash },
+  } as CommandEnvelopeV1).catch(() => undefined);
+  if (!applied?.ok) {
+    return applied?.reason === "stale_revision"
+      ? { ok: false, code: "stale_revision", revision: durable.revision }
+      : { ok: false, code: "record_rejected", revision: durable.revision };
+  }
+  return {
+    ok: true,
+    revision: applied.state.revision,
+    roleRoutes: projectGuidedRoleRoutes(request.roleRoutes),
+    recorded: applied.events.length > 0,
+  };
+}
+
+export type LegacyExecutionContractFailure =
+  | "repository_rejected"
+  | "store_unreadable"
+  | "run_not_found"
+  | "legacy_contract_run_mismatch"
+  | "execution_contract_authoritative"
+  | "execution_contract_malformed"
+  | "owner_approval_unverified"
+  | "execution_contract_unresolved"
+  | "legacy_role_routes_conflict"
+  | "content_hash_mismatch"
+  | ExecutionContractFailure
+  | "execution_contract_already_bound"
+  | "stale_revision"
+  | "record_rejected";
+
+export interface LegacyExecutionContractRequest {
+  readonly repository: string;
+  readonly runId: string;
+  readonly expectedRevision: number;
+  readonly ownerSessionId: string;
+  readonly body: ExecutionContractBody;
+  readonly approvedContentHash: string;
+}
+
+export type LegacyExecutionContractResult =
+  | { readonly ok: false; readonly code: LegacyExecutionContractFailure; readonly revision?: number }
+  | { readonly ok: true; readonly revision: number; readonly contract: ApprovedExecutionContract; readonly recorded: boolean };
+
+/**
+ * Bind an owner-approved execution contract to a run created before execution contracts were written
+ * to the plan directory.
+ */
+export async function applyLegacyExecutionContractApproval(request: LegacyExecutionContractRequest): Promise<LegacyExecutionContractResult> {
+  const repositoryPath = await admitRepositoryRoot(request.repository);
+  if (repositoryPath === undefined) return { ok: false, code: "repository_rejected" };
+  const store = new BearingStore(repositoryPath);
+  let durable: StoredRunState;
+  try { durable = await store.load(request.runId); }
+  catch { return { ok: false, code: "store_unreadable" }; }
+  if (!durable.workRequestCreated) return { ok: false, code: "run_not_found" };
+
+  // F1: Validate body.runId and body.planDirectory match the run's own identity
+  // before any hashing, recording, or contract resolution. Derive the recorded
+  // planDirectory exactly like resolveApprovedExecutionContract: the latest
+  // journeyCheckpointRecorded event's payload.planDirectory.
+  if (request.body.runId !== request.runId) {
+    return { ok: false, code: "legacy_contract_run_mismatch", revision: durable.revision };
+  }
+  const recordedPlanDirectory = [...durable.events].reverse().find((event) => event.type === "journeyCheckpointRecorded"
+    && typeof event.payload.planDirectory === "string")?.payload.planDirectory;
+  if (typeof recordedPlanDirectory !== "string") {
+    return { ok: false, code: "legacy_contract_run_mismatch", revision: durable.revision };
+  }
+  if (request.body.planDirectory !== recordedPlanDirectory) {
+    return { ok: false, code: "legacy_contract_run_mismatch", revision: durable.revision };
+  }
+
+  // F2: Hoist authority/absence checks before the replay branch. A resolved
+  // file-based contract remains authoritative (CONTRACT-27) even when a prior
+  // legacy binding exists, so the replay branch must never short-circuit past
+  // this check.
+  const contract = await resolveApprovedExecutionContract(repositoryPath, request.runId, durable);
+  if (contract.ok) return { ok: false, code: "execution_contract_authoritative", revision: durable.revision };
+  if (contract.code !== CONTRACT_ABSENT) return { ok: false, code: contract.code, revision: durable.revision };
+  if (!await legacyBindingAdmitted(repositoryPath, durable, contract)) {
+    return { ok: false, code: "execution_contract_unresolved", revision: durable.revision };
+  }
+
+  // Common role-route consistency check (shared by replay and first-time paths)
+  if (durable.legacyRoleRoutes !== null) {
+    if (request.body.roleRoutes === undefined || canonicalStringify(request.body.roleRoutes) !== canonicalStringify(durable.legacyRoleRoutes)) {
+      return { ok: false, code: "legacy_role_routes_conflict", revision: durable.revision };
+    }
+  }
+
+  const contentHash = hashExecutionContractBody(request.body);
+  if (request.approvedContentHash !== contentHash) {
+    return { ok: false, code: "content_hash_mismatch", revision: durable.revision };
+  }
+
+  const recordId = `legacy-approval-${createHash("sha256")
+    .update(canonicalStringify({ runId: request.runId, contentHash }))
+    .digest("hex").slice(0, 32)}`;
+  const candidate: ApprovedExecutionContract = {
+    ...request.body,
+    contentHash,
+    ownerApproval: {
+      kind: "owner-approval",
+      recordedBy: "owner",
+      durable: true,
+      recordId,
+      contentHash,
+    },
+  };
+
+  const parsed = parseApprovedExecutionContract(candidate);
+  if (!parsed.ok) {
+    return { ok: false, code: parsed.reason, revision: durable.revision };
+  }
+
+  // Replay: the binding already exists and matches exactly.
+  const bound = durable.legacyExecutionContract;
+  if (bound !== null) {
+    return canonicalStringify(bound) === canonicalStringify(parsed.value)
+      ? { ok: true, revision: durable.revision, contract: bound, recorded: false }
+      : { ok: false, code: "execution_contract_already_bound", revision: durable.revision };
+  }
+
+  if (durable.revision !== request.expectedRevision) return { ok: false, code: "stale_revision", revision: durable.revision };
+
+  const commandId = `legacy-contract-${createHash("sha256")
+    .update(canonicalStringify({ runId: request.runId, contentHash }))
+    .digest("hex").slice(0, 48)}`;
+  const applied = await store.apply({
+    schemaVersion: 1,
+    commandId,
+    runId: request.runId,
+    expectedRevision: request.expectedRevision,
+    session: { sessionId: request.ownerSessionId, actor: "owner" },
+    correlationId: commandId,
+    type: "approveLegacyExecutionContract",
+    payload: { contract: parsed.value as unknown as Record<string, unknown>, approvedContentHash: request.approvedContentHash },
+  } as CommandEnvelopeV1).catch(() => undefined);
+
+  if (!applied?.ok) {
+    return applied?.reason === "stale_revision"
+      ? { ok: false, code: "stale_revision", revision: durable.revision }
+      : { ok: false, code: "record_rejected", revision: durable.revision };
+  }
+
+  return {
+    ok: true,
+    revision: applied.state.revision,
+    contract: parsed.value,
+    recorded: applied.events.length > 0,
+  };
+}
+
+// --- Independent review gate ------------------------------------------------
+
+export type ReviewGateFailure =
+  | "repository_rejected"
+  | "store_unreadable"
+  | "run_not_found"
+  | "checkpoint_unavailable"
+  | ApprovedContractFailure
+  | "candidate_unclean"
+  | "stale_revision"
+  | "revision_changed"
+  | "contract_mismatch"
+  | "scope_mismatch"
+  | "reviewer_not_independent"
+  | "evidence_invalid"
+  | "verdict_unsupported"
+  | "pending_decision_blocks"
+  | "record_rejected";
+
+export interface ReviewGateState {
+  readonly reviewClass: ReviewClass;
+  readonly verdict: ReviewVerdict;
+  readonly reviewerIdentity: string;
+  readonly findingCount: number;
+}
+
+export type ReviewContextResult =
+  | { readonly ok: false; readonly code: ReviewGateFailure }
+  | {
+      readonly ok: true;
+      readonly repositoryPath: string;
+      readonly runId: string;
+      readonly reviewClass: ReviewClass;
+      readonly revision: number;
+      readonly contractHash: string;
+      readonly reviewedRevision: string;
+      readonly scope: readonly string[];
+      readonly implementerIdentities: readonly string[];
+      readonly gates: readonly ReviewGateState[];
+      /** Present only when the approved contract carries a role-routes decision for this review class. */
+      readonly reviewRoute?: RoleRouteView;
+      /** Present only when the approved contract records no role-routes decision at all. */
+      readonly reviewRouteBlocker?: RoleRoutesRequiredOwnerAction;
+    };
+
+export interface ReviewGateRequest {
+  readonly repository: string;
+  readonly runId: string;
+  readonly expectedRevision: number;
+  readonly reviewClass: ReviewClass;
+  readonly reviewerSessionId: string;
+  readonly reviewedRevision: string;
+  readonly contractHash: string;
+  readonly scope: readonly string[];
+  readonly verdict: ReviewVerdict;
+  readonly commands: readonly ReviewCommandEvidence[];
+  readonly findings: readonly ReviewFinding[];
+}
+
+export type ReviewGateResult =
+  | { readonly ok: false; readonly code: ReviewGateFailure; readonly revision?: number }
+  | { readonly ok: true; readonly revision: number; readonly record: ReviewRecord; readonly recorded: boolean };
+
+/** Path-blind, correlatable identity. A raw session identifier never leaves this module. */
+function reviewIdentity(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+/**
+ * Session identities that produced this run's work. A checkpoint that carries a
+ * review record is a certification, not implementation, so its session is not
+ * admitted as its own ancestry — otherwise a reviewer's first record would
+ * disqualify its second.
+ */
+function implementerIdentities(durable: StoredRunState): readonly string[] {
+  const sessions = new Set(durable.events
+    .filter((event) => !(event.type === "journeyCheckpointRecorded" && event.payload.review !== undefined))
+    .map((event) => reviewIdentity(event.sessionId)));
+  return [...sessions].sort();
+}
+
+interface ReviewFacts {
+  readonly repositoryPath: string;
+  readonly store: BearingStore;
+  readonly durable: StoredRunState;
+  readonly checkpoint: RecordJourneyCheckpointPayload;
+  readonly contract: ApprovedExecutionContract;
+  readonly reviewedRevision: string;
+  readonly scope: readonly string[];
+  readonly implementerIdentities: readonly string[];
+}
+
+/**
+ * Restore everything an exact-candidate review gate is decided against: the
+ * admitted repository, the durable run, the owner-approved contract, and the
+ * current *clean* Git revision. A dirty or headless worktree has no candidate
+ * to certify, so it fails closed here rather than certifying a moving target.
+ */
+async function reviewFacts(
+  repository: string,
+  runId: string,
+): Promise<{ readonly ok: true; readonly value: ReviewFacts } | { readonly ok: false; readonly code: ReviewGateFailure }> {
+  const repositoryPath = await admitRepositoryRoot(repository);
+  if (repositoryPath === undefined) return { ok: false, code: "repository_rejected" };
+  const store = new BearingStore(repositoryPath);
+  let durable: StoredRunState;
+  try { durable = await store.load(runId); }
+  catch { return { ok: false, code: "store_unreadable" }; }
+  if (!durable.workRequestCreated) return { ok: false, code: "run_not_found" };
+  const stored = durable.journeyCheckpoint;
+  if (!stored) return { ok: false, code: "checkpoint_unavailable" };
+  const { eventId: _event, ...checkpoint } = stored;
+  const contract = await resolveApprovedExecutionContract(repositoryPath, runId, durable);
+  if (!contract.ok) return { ok: false, code: contract.code };
+  const snapshot = await snapshotGitState(repositoryPath);
+  if (!snapshot || snapshot.head === null || snapshot.paths.size > 0) return { ok: false, code: "candidate_unclean" };
+  return {
+    ok: true,
+    value: {
+      repositoryPath,
+      store,
+      durable,
+      checkpoint,
+      contract: contract.value.value,
+      reviewedRevision: snapshot.head,
+      scope: [...contract.value.value.slices.map((slice) => slice.sliceId)].sort(),
+      implementerIdentities: implementerIdentities(durable),
+    },
+  };
+}
+
+/** Gates bound to the revision under review. A record left over from another revision certifies nothing. */
+function currentGates(facts: ReviewFacts): readonly ReviewRecord[] {
+  const recorded = facts.checkpoint.review ?? [];
+  return recorded.every((record) => record.reviewedRevision === facts.reviewedRevision) ? recorded : [];
+}
+
+/** Read the exact-candidate review gate state for one run. Mutates nothing. */
+export async function readReviewContext(
+  repository: string,
+  runId: string,
+  reviewClass: ReviewClass,
+): Promise<ReviewContextResult> {
+  const facts = await reviewFacts(repository, runId);
+  if (!facts.ok) return facts;
+  const roleRoutes = facts.value.contract.roleRoutes;
+  return {
+    ok: true,
+    repositoryPath: facts.value.repositoryPath,
+    runId,
+    reviewClass,
+    revision: facts.value.durable.revision,
+    contractHash: facts.value.contract.contentHash,
+    reviewedRevision: facts.value.reviewedRevision,
+    scope: facts.value.scope,
+    implementerIdentities: facts.value.implementerIdentities,
+    gates: currentGates(facts.value).map((record) => ({
+      reviewClass: record.reviewClass,
+      verdict: record.verdict,
+      reviewerIdentity: record.reviewerIdentity,
+      findingCount: record.findings.length,
+    })),
+    ...(roleRoutes ? { reviewRoute: roleRouteView(roleRoutes, REVIEW_ROLE_KIND[reviewClass]) } : {}),
+    ...(roleRoutes === undefined ? { reviewRouteBlocker: ROLE_ROUTES_REQUIRED_OWNER_ACTION } : {}),
+  };
+}
+
+/**
+ * Record one independent review gate through the existing checkpoint command.
+ *
+ * Every rejection below is a fail-closed refusal to certify: the candidate moved,
+ * the contract is not the approved one, the scope is not the admitted scope, the
+ * reviewer implemented the work, the rerun evidence does not support the verdict,
+ * or another writer already advanced the run.
+ */
+export async function recordReviewGate(request: ReviewGateRequest): Promise<ReviewGateResult> {
+  const found = await reviewFacts(request.repository, request.runId);
+  if (!found.ok) return found;
+  const facts = found.value;
+  if (request.reviewedRevision !== facts.reviewedRevision) return { ok: false, code: "revision_changed", revision: facts.durable.revision };
+  if (request.contractHash !== facts.contract.contentHash) return { ok: false, code: "contract_mismatch", revision: facts.durable.revision };
+  const scope = [...new Set(request.scope)].sort();
+  if (canonicalStringify(scope) !== canonicalStringify(facts.scope)) return { ok: false, code: "scope_mismatch", revision: facts.durable.revision };
+
+  const reviewerIdentity = reviewIdentity(request.reviewerSessionId);
+  if (facts.implementerIdentities.includes(reviewerIdentity)) {
+    return { ok: false, code: "reviewer_not_independent", revision: facts.durable.revision };
+  }
+
+  const declared = new Set(facts.contract.slices.flatMap((slice) => slice.evidenceCommandIds));
+  const commands = [...request.commands].sort((left, right) => left.commandId.localeCompare(right.commandId));
+  if (commands.length === 0
+    || new Set(commands.map((command) => command.commandId)).size !== commands.length
+    || commands.some((command) => !declared.has(command.commandId) || !headlessText(command.summary))) {
+    return { ok: false, code: "evidence_invalid", revision: facts.durable.revision };
+  }
+  if (request.findings.some((finding) => !headlessText(finding.summary) || !headlessText(finding.evidence))) {
+    return { ok: false, code: "evidence_invalid", revision: facts.durable.revision };
+  }
+
+  const record: ReviewRecord = {
+    reviewClass: request.reviewClass,
+    verdict: request.verdict,
+    contractHash: facts.contract.contentHash,
+    reviewedRevision: facts.reviewedRevision,
+    scope,
+    reviewerIdentity,
+    implementerIdentities: facts.implementerIdentities,
+    commands,
+    findings: [...request.findings],
+  };
+  // The record's own contract carries the independence and verdict-support rules.
+  if (!isReviewRecord(record)) return { ok: false, code: "verdict_unsupported", revision: facts.durable.revision };
+
+  const gates = currentGates(facts);
+  const canonical = canonicalStringify(record);
+  // Exact replay: the identical gate is already durable at this exact revision.
+  if (gates.some((existing) => canonicalStringify(existing) === canonical)) {
+    return { ok: true, revision: facts.durable.revision, record, recorded: false };
+  }
+  if (facts.durable.revision !== request.expectedRevision) return { ok: false, code: "stale_revision", revision: facts.durable.revision };
+  if (facts.durable.pendingDecision !== null) return { ok: false, code: "pending_decision_blocks", revision: facts.durable.revision };
+
+  const review = [...gates.filter((existing) => existing.reviewClass !== record.reviewClass), record]
+    .sort((left, right) => left.reviewClass.localeCompare(right.reviewClass));
+  const commandId = `review-${createHash("sha256").update(canonicalStringify({ runId: request.runId, review })).digest("hex").slice(0, 48)}`;
+  const applied = await facts.store.apply({
+    schemaVersion: 1,
+    commandId,
+    runId: request.runId,
+    expectedRevision: request.expectedRevision,
+    session: { sessionId: request.reviewerSessionId, actor: "bearing" },
+    correlationId: commandId,
+    type: "recordJourneyCheckpoint",
+    payload: { ...facts.checkpoint, review },
+  } as CommandEnvelopeV1).catch(() => undefined);
+  if (!applied?.ok) {
+    return applied?.reason === "stale_revision"
+      ? { ok: false, code: "stale_revision", revision: facts.durable.revision }
+      : { ok: false, code: "record_rejected", revision: facts.durable.revision };
+  }
+  return { ok: true, revision: applied.state.revision, record, recorded: true };
 }
 
 /** Execute one headless command through the authenticated browser transition layer. */
@@ -3980,9 +5807,12 @@ export async function executeHeadlessJourney(
     return { ok: false, code: "run_not_found", runId: request.runId, revision: 0 };
   }
   const service = new LocalSessionService(HEADLESS_BOUND_HOST);
+  const journeyStatusRefreshes = new Set<string>();
   const handler = createRequestHandler(service, undefined, {
     processRunner: deps.processRunner,
     ...(deps.routeInspection ? { routeInspection: deps.routeInspection } : {}),
+    ...(deps.beforeJourneyExecutionCheckpoint ? { beforeJourneyExecutionCheckpoint: deps.beforeJourneyExecutionCheckpoint } : {}),
+    consumeJourneyStatusRefresh: (runId) => journeyStatusRefreshes.delete(runId),
   });
   const origin = `http://${HEADLESS_BOUND_HOST}`;
   const jsonHeaders = { host: HEADLESS_BOUND_HOST, origin, "content-type": "application/json" };
@@ -3992,7 +5822,22 @@ export async function executeHeadlessJourney(
   if (session.status !== 200 || typeof cookie !== "string") return { ok: false, code: "transition_unavailable", runId: request.runId, revision: 0 };
   const authenticated = { ...jsonHeaders, cookie: cookie.split(";", 1)[0]! };
   const repository = await invokeHeadlessHandler(handler, "POST", "/api/v1/repository", authenticated, { path: request.repository });
-  if (repository.status !== 200) return { ok: false, code: headlessResponseCode(repository.status), runId: request.runId, revision: 0 };
+  if (repository.status !== 200) {
+    // The endpoint already types the nested-repository rejection in its 422 body; project it
+    // through instead of collapsing it to the generic input_invalid.
+    const body = headlessJson(repository.body);
+    if (body?.code === "repository_nested_in_git") {
+      return {
+        ok: false,
+        code: "repository_nested_in_git",
+        runId: request.runId,
+        revision: 0,
+        ...(typeof body.containingRepositoryPath === "string" ? { containingRepositoryPath: body.containingRepositoryPath } : {}),
+        ...(typeof body.remedy === "string" ? { remedy: body.remedy } : {}),
+      };
+    }
+    return { ok: false, code: headlessResponseCode(repository.status), runId: request.runId, revision: 0 };
+  }
   const repositoryState = headlessJson(repository.body);
   const firstLaunch = repositoryState?.status === "initialized"
     ? {
@@ -4007,30 +5852,69 @@ export async function executeHeadlessJourney(
   });
   const readinessReady = readiness.status === 200 && headlessJson(readiness.body)?.status === "ready";
   if (!readinessReady && !readAction) return { ok: false, code: "route_unavailable", runId: request.runId, revision: 0, ...firstLaunch };
-  const readReadiness = readAction ? { readiness: readinessReady ? "ready" as const : "unavailable" as const } : {};
 
   const readRun = async () => {
     const response = await invokeHeadlessHandler(handler, "GET", `/api/v1/runs/${encodeURIComponent(request.runId)}`, { host: HEADLESS_BOUND_HOST, cookie: authenticated.cookie });
     const body = headlessJson(response.body);
     return { response, body, revision: typeof body?.revision === "number" ? body.revision : 0 };
   };
-  const restore = () => invokeHeadlessHandler(handler, "GET", `/api/v1/journey/${encodeURIComponent(request.runId)}/status`, { host: HEADLESS_BOUND_HOST, cookie: authenticated.cookie });
-  const command = async (type: "createWorkRequest" | "requireDecision" | "recordOwnerAnswer", payload: Record<string, unknown>) => {
+  const restore = (refreshDurable = false) => {
+    if (refreshDurable) journeyStatusRefreshes.add(request.runId);
+    return invokeHeadlessHandler(handler, "GET", `/api/v1/journey/${encodeURIComponent(request.runId)}/status`, { host: HEADLESS_BOUND_HOST, cookie: authenticated.cookie });
+  };
+  const snapshotAttempt = async (action?: "resume" | "progress" | "decide" | "status", refreshDurable = false) => {
+    const before = await readRun();
+    const restored = await restore(refreshDurable);
+    const restoredRunValue = headlessJson(restored.body)?.run;
+    const run = typeof restoredRunValue === "object" && restoredRunValue !== null && !Array.isArray(restoredRunValue)
+      ? restoredRunValue as Record<string, unknown>
+      : undefined;
+    const pending = typeof before.body?.pendingDecision === "object" && before.body.pendingDecision !== null && !Array.isArray(before.body.pendingDecision)
+      ? before.body.pendingDecision as Record<string, unknown>
+      : before.body?.pendingDecision as null | undefined;
+    const dispatchable = action === "decide"
+      ? headlessFailedRecoveryDecision(run, pending)
+      : action !== undefined && isIssue85Recovery(run);
+    if (before.response.status === 200 && restored.status === 200 && action !== undefined && (action === "status" || dispatchable)) {
+      await deps.beforeHeadlessRecoveryDispatch?.({ runId: request.runId, action, expectedRevision: before.revision });
+    }
+    const after = await readRun();
+    return {
+      stable: before.response.status === 200 && restored.status === 200
+        && after.response.status === 200 && after.revision === before.revision,
+      restored,
+      run,
+      pending,
+      after,
+      expectedRevision: before.revision,
+    };
+  };
+  const stableSnapshot = async (action?: "resume" | "progress" | "decide" | "status") => {
+    const initial = await snapshotAttempt(action);
+    if (action !== "status" || initial.stable || isIssue85Recovery(initial.run)) return initial;
+    const refreshed = await snapshotAttempt(undefined, true);
+    return isIssue85Recovery(refreshed.run)
+      ? { ...refreshed, stable: false }
+      : refreshed;
+  };
+  const command = async (type: "createWorkRequest" | "requireDecision" | "recordOwnerAnswer", payload: Record<string, unknown>, expectedRevision?: number) => {
     const current = await readRun();
     if (current.response.status !== 200) return current.response;
+    if (expectedRevision !== undefined && current.revision !== expectedRevision) return { status: 409, body: "", headers: {} };
     const commandId = `headless-${randomToken(12)}`;
     return invokeHeadlessHandler(handler, "POST", `/api/v1/runs/${encodeURIComponent(request.runId)}/commands`, authenticated, {
       schemaVersion: 1,
       commandId,
       runId: request.runId,
       expectedRevision: current.revision,
-      session: { sessionId: "headless", actor: "owner" },
+      session: { sessionId: request.sessionId ?? "headless", actor: "owner" },
       correlationId: commandId,
       type,
       payload,
     });
   };
   let operation: HeadlessResponse;
+  let statusSnapshot: Awaited<ReturnType<typeof stableSnapshot>> | undefined;
   if (request.action === "create") {
     if (!request.goal) return { ok: false, code: "input_invalid", runId: request.runId, revision: 0 };
     const created = await command("createWorkRequest", { title: request.goal.split(/\r?\n/, 1)[0]!.slice(0, 160), goal: request.goal });
@@ -4038,44 +5922,64 @@ export async function executeHeadlessJourney(
       ? await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, { runId: request.runId, stage: "repository-fit", workGoal: request.goal })
       : created;
   } else if (request.action === "resume" || request.action === "status") {
-    const restored = await restore();
-    operation = headlessJson(restored.body)?.run === undefined ? { status: 404, body: "", headers: {} } : restored;
+    const snapshot = await stableSnapshot(request.action);
+    const recovery = request.action === "resume"
+      ? headlessRecoveryPlan(snapshot.run, snapshot.pending, readinessReady).recoveryAction
+      : undefined;
+    if (request.action === "status") statusSnapshot = snapshot;
+    const restored = snapshot.restored;
+    const restoredBody = headlessJson(restored.body);
+    const restoredRunValue = restoredBody?.run;
+    if (restoredRunValue === undefined) {
+      operation = { status: 404, body: "", headers: {} };
+    } else if (!snapshot.stable) {
+      operation = { status: 409, body: "", headers: {} };
+    } else if (request.action === "resume" && !readinessReady && isIssue85Recovery(snapshot.run)) {
+      return {
+        ok: false,
+        code: "route_unavailable",
+        runId: request.runId,
+        revision: snapshot.after.revision,
+        ...firstLaunch,
+        readiness: "unavailable",
+      };
+    } else if (request.action === "resume" && typeof restoredRunValue === "object" && restoredRunValue !== null && !Array.isArray(restoredRunValue)) {
+      operation = recovery?.type === "resume"
+        ? await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, { runId: request.runId, stage: recovery.stage, recoveryExpectedRevision: snapshot.expectedRevision })
+        : restored;
+    } else {
+      operation = restored;
+    }
   } else if (request.action === "decide") {
-    const restored = await restore();
-    const current = await readRun();
-    const pending = typeof current.body?.pendingDecision === "object" && current.body.pendingDecision !== null && !Array.isArray(current.body.pendingDecision)
-      ? current.body.pendingDecision as Record<string, unknown>
-      : undefined;
-    const restoredRunValue = headlessJson(restored.body)?.run;
-    const restoredRun = typeof restoredRunValue === "object" && restoredRunValue !== null && !Array.isArray(restoredRunValue)
-      ? restoredRunValue as Record<string, unknown>
-      : undefined;
+    const snapshot = await stableSnapshot("decide");
+    const pending = snapshot.pending ?? undefined;
+    const restoredRun = snapshot.run;
     const waitingStage = restoredRun?.status === "waiting"
       && typeof restoredRun.stage === "string"
       && RECORD_JOURNEY_CHECKPOINT_STAGES.includes(restoredRun.stage as JourneyStage)
       ? restoredRun.stage as JourneyStage
       : undefined;
+    const failedRecoveryDecision = headlessFailedRecoveryDecision(restoredRun, pending);
     if (
-      restored.status !== 200
-      || !current.body
+      !snapshot.stable
       || typeof pending?.decisionId !== "string"
       || typeof pending.question !== "string"
-      || waitingStage === undefined
-      || restoredRun?.question !== pending.question
+      || (waitingStage === undefined && !failedRecoveryDecision)
+      || (waitingStage !== undefined && restoredRun?.question !== pending.question)
     ) {
       operation = { status: 409, body: "", headers: {} };
     } else {
       const recorded = await command("recordOwnerAnswer", {
         decisionId: pending.decisionId,
         answer: request.answer,
-      });
-      operation = recorded.status === 200
-        ? await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, {
+      }, snapshot.expectedRevision);
+      operation = recorded.status !== 200 || failedRecoveryDecision
+        ? recorded
+        : await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, {
           runId: request.runId,
-          stage: waitingStage,
+          stage: waitingStage!,
           answer: request.answer,
-        })
-        : recorded;
+        });
     }
   } else if (request.action === "approve-route") {
     const restored = headlessJson((await restore()).body)?.run;
@@ -4117,16 +6021,17 @@ export async function executeHeadlessJourney(
       operation = { status: 409, body: "", headers: {} };
     } else {
       const decisionId = `focus-amendment-${randomToken(12)}`;
-      const required = await command("requireDecision", { decisionId, question: FOCUS_AMENDMENT_PROMPT, consequential: true });
+      const amendmentPrompt = headlessAmendmentPrompt(restoredRun);
+      const required = await command("requireDecision", { decisionId, question: amendmentPrompt, consequential: true });
       if (required.status !== 200) {
         operation = required;
       } else {
         current = await readRun();
         const pending = current.body?.pendingDecision;
-        if (!current.body || typeof pending !== "object" || pending === null || (pending as Record<string, unknown>).decisionId !== decisionId || (pending as Record<string, unknown>).question !== FOCUS_AMENDMENT_PROMPT) {
+        if (!current.body || typeof pending !== "object" || pending === null || (pending as Record<string, unknown>).decisionId !== decisionId || (pending as Record<string, unknown>).question !== amendmentPrompt) {
           operation = { status: 409, body: "", headers: {} };
         } else {
-          const answered = await command("recordOwnerAnswer", { decisionId, answer: FOCUS_AMENDMENT_APPROVAL });
+          const answered = await command("recordOwnerAnswer", { decisionId, answer: headlessAmendmentApproval(restoredRun) });
           if (answered.status !== 200) {
             operation = answered;
           } else {
@@ -4137,6 +6042,7 @@ export async function executeHeadlessJourney(
                 runId: request.runId,
                 stage,
                 executionMode: stage === "execute-explorer" ? "explorer" : "expedition",
+                ...(stage === "execute-expedition" && restoredRun && typeof restoredRun.currentSlice === "string" ? { currentSlice: restoredRun.currentSlice } : {}),
                 focusAmendmentConfirmed: true,
                 focusAmendmentDecisionId: decisionId,
                 focusAmendmentExpectedRevision: current.revision,
@@ -4145,6 +6051,53 @@ export async function executeHeadlessJourney(
         }
       }
     }
+  } else if (request.action === "progress") {
+    const snapshot = await stableSnapshot("progress");
+    const recovery = headlessRecoveryPlan(snapshot.run, snapshot.pending, readinessReady).recoveryAction;
+    const stage = request.stage;
+    const routeStrategyRecovery = request.retryWarrant === "changed_strategy"
+      && request.expectedRevision === snapshot.expectedRevision
+      && isRetryWarrantRecovery(snapshot.run)
+      && snapshot.run?.stage === stage;
+    const advertisedWarrant = recovery?.type === "progress"
+      && recovery.retryWarrants?.includes(request.retryWarrant as RetryWarrant) === true;
+    operation = !snapshot.stable
+      ? { status: 409, body: "", headers: {} }
+      : snapshot.run?.status === "complete" || headlessFocusAmendmentRequired(snapshot.run)
+        ? { status: 409, body: "", headers: {} }
+        : stage === undefined
+          ? { status: 400, body: "", headers: {} }
+          : isRetryWarrantRecovery(snapshot.run)
+            ? (recovery?.type === "progress" && recovery.stage === stage || routeStrategyRecovery)
+              && request.retryWarrant !== undefined
+              && (advertisedWarrant || routeStrategyRecovery)
+              && request.expectedRevision === snapshot.expectedRevision
+              ? await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, {
+                runId: request.runId,
+                stage,
+                expectedRevision: request.expectedRevision,
+                ...(request.retryWarrant ? { retryWarrant: request.retryWarrant } : {}),
+                ...(stage === "execute-expedition" && (request.currentSlice ?? (typeof snapshot.run?.currentSlice === "string" ? snapshot.run.currentSlice : undefined)) ? { currentSlice: request.currentSlice ?? (snapshot.run?.currentSlice as string) } : {}),
+              })
+              : { status: 409, body: "", headers: {} }
+          : request.retryWarrant !== undefined
+            ? { status: 409, body: "", headers: {} }
+          : isIssue85Recovery(snapshot.run)
+            ? recovery?.type === "progress" && recovery.stage === stage
+              ? await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, {
+                runId: request.runId,
+                stage,
+                recoveryExpectedRevision: snapshot.expectedRevision,
+                ...(request.retryWarrant ? { retryWarrant: request.retryWarrant } : {}),
+              })
+              : { status: 409, body: "", headers: {} }
+            : await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, {
+              runId: request.runId,
+              stage,
+              expectedRevision: snapshot.expectedRevision,
+              ...(stage === "execute-expedition" && (request.currentSlice ?? (typeof snapshot.run?.currentSlice === "string" ? snapshot.run.currentSlice : undefined)) ? { currentSlice: request.currentSlice ?? (snapshot.run?.currentSlice as string) } : {}),
+              ...(request.retryWarrant ? { retryWarrant: request.retryWarrant } : {}),
+            });
   } else {
     const restored = headlessJson((await restore()).body)?.run;
     const restoredRun = typeof restored === "object" && restored !== null && !Array.isArray(restored)
@@ -4163,15 +6116,23 @@ export async function executeHeadlessJourney(
       : await invokeHeadlessHandler(handler, "POST", "/api/v1/journey", authenticated, {
         runId: request.runId,
         stage,
-        ...(selection ? { executionMode, reviewCadence: request.reviewCadence } : {}),
+        ...(selection ? { executionMode, reviewCadence: request.reviewCadence, ...(executionMode === "expedition" && request.currentSlice ? { currentSlice: request.currentSlice } : {}) } : {}),
       });
   }
-  const stateResponse = await restore();
+  const stateResponse = statusSnapshot?.restored ?? await restore();
   const state = headlessJson(stateResponse.body)?.run;
   const run = typeof state === "object" && state !== null && !Array.isArray(state) ? state as Record<string, unknown> : undefined;
-  const durable = await readRun();
+  const durable = statusSnapshot?.after ?? await readRun();
   const stage = typeof run?.stage === "string" && RECORD_JOURNEY_CHECKPOINT_STAGES.includes(run.stage as JourneyStage) ? run.stage as JourneyStage : undefined;
   const status = run?.status;
+  const recoveryPlan = headlessRecoveryPlan(run, durable.body?.pendingDecision as Record<string, unknown> | null | undefined, readinessReady);
+  const readReadiness = readAction
+    ? { readiness: !readinessReady
+      ? "unavailable" as const
+      : isIssue85Recovery(run) && recoveryPlan.allowedActions?.length === 1 && recoveryPlan.allowedActions[0] === "status"
+        ? "blocked" as const
+        : "ready" as const }
+    : {};
   return operation.status >= 200 && operation.status < 300
     ? {
         ok: true,

@@ -65,7 +65,7 @@ describe("retry control", () => {
     "changed_environment",
     "approved_amendment",
   ] as const)("admits and records the %s warrant", (warrant: RetryWarrant) => {
-    const proposal = attempt("f".repeat(64), { warrant });
+    const proposal = attempt("f".repeat(64), { warrant, ...(warrant === "approved_amendment" ? { scope: "contract-change" as const } : {}) });
     const result = admitRetry([], proposal);
 
     expect(result).toEqual({
@@ -102,7 +102,7 @@ describe("retry control", () => {
     const prior = admitRetry([], attempt(fingerprint));
     expect(prior.ok).toBe(true);
 
-    for (const warrant of [undefined, "changed_strategy", "changed_environment", "approved_amendment"] as const) {
+    for (const warrant of [undefined, "changed_strategy", "changed_environment"] as const) {
       const result = admitRetry(prior.ledger, attempt(fingerprint, {
         warrant,
         reasoningTier: "high",
@@ -111,12 +111,31 @@ describe("retry control", () => {
       expect(result.ledger.at(-1)?.outcome).toBe("same_attempt_higher_reasoning");
     }
 
+    expect(admitRetry(prior.ledger, attempt(fingerprint, {
+      warrant: "approved_amendment",
+      reasoningTier: "high",
+      scope: "contract-change",
+    }))).toMatchObject({ ok: false, reason: "same_attempt_higher_reasoning" });
+
     for (const warrant of ["new_hypothesis", "new_evidence"] as const) {
       expect(admitRetry(prior.ledger, attempt(fingerprint, {
         warrant,
         reasoningTier: "high",
       }))).toMatchObject({ ok: true });
     }
+  });
+
+  it("refuses an amendment approval outside a contract-change scope", () => {
+    const fingerprint = "d".repeat(64);
+    const result = admitRetry([], attempt(fingerprint, { warrant: "approved_amendment", scope: "within-slice" }));
+
+    expect(result).toMatchObject({ ok: false, reason: "retry_warrant_scope_mismatch" });
+    expect(result.ledger.at(-1)).toEqual({
+      fingerprint,
+      warrant: "approved_amendment",
+      reasoningTier: "medium",
+      outcome: "retry_warrant_scope_mismatch",
+    });
   });
 
   it.each([

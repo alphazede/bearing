@@ -100,7 +100,8 @@ function coordinationRecord(runId: string): OutcomeRecord {
     recordedAt: RECORDED_AT,
     signal: "coordination",
     code: "explorer",
-    value: 1,
+    workItemCount: 1,
+    estimatedAgents: 1,
   });
 }
 
@@ -172,6 +173,8 @@ function settledState(runId: string): StoredRunState {
     workRequestCreated: true,
     executionRecommendation: null,
     executionApproval: null,
+    legacyRoleRoutes: null,
+    legacyExecutionContract: null,
     journeyCheckpoint: {
       stage: "review",
       status: "complete",
@@ -360,7 +363,33 @@ describe("improvement service", () => {
     expect(measure).toHaveBeenCalledWith(expect.objectContaining({
       settledRuns: 2,
       records: result.value.records,
+      recordsTruncated: true,
     }));
+  });
+
+  it("marks a per-run projection at its hard record cap as possibly truncated", async () => {
+    const store: ImprovementStore = {
+      list: async () => [summary("run-1")],
+      load: async (runId) => settledState(runId),
+    };
+    const measure = vi.fn((_window: ImprovementWindow) => metric());
+    const service = new ImprovementService({
+      store,
+      clock: () => RECORDED_AT,
+      digest,
+      thresholds: THRESHOLDS,
+      stages: {
+        project: ({ runId }) => Array.from({ length: 1_000 }, () => coordinationRecord(runId)),
+        measure,
+        recommend: () => ({ status: "ok" as const, recommendations: [] as const }),
+      },
+      maxRecords: 2_000,
+    });
+    const result = await service.report();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.value.recordsTruncated).toBe(true);
+    expect(measure).toHaveBeenCalledWith(expect.objectContaining({ recordsTruncated: true }));
   });
 
   it("does not accept a prototype-carried unreadable marker", async () => {

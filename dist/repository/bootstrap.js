@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 import { resolveExecutable } from "./executable-path.js";
 import { assessRepositorySafety } from "./safety.js";
+import { assertContained, assertWorkspaceRoot, isWorkspaceRootError, pinWorkspaceRoot } from "./workspace-root.js";
 const WORKSPACE_SCHEMA_VERSION = 1;
 const BEARING_DIR = ".bearing";
 const WORKSPACE_FILE = "workspace.json";
@@ -43,7 +44,12 @@ export class RepositoryBootstrap {
             return { ok: false, reason: "repository_nested_in_git", containingRepositoryPath: containingGitRoot };
         }
         const bearingPath = join(repositoryPath, BEARING_DIR);
-        const existing = await this.validateExistingBearing(bearingPath, repositoryPath);
+        let existing = await this.validateExistingBearing(bearingPath, repositoryPath);
+        if (existing !== "missing" && !existing.ok && existing.reason === "manifest_missing" && opts?.legacyWorkspaceProof) {
+            if (await opts.legacyWorkspaceProof(repositoryPath)) {
+                existing = { ok: true, status: "resumed", repositoryPath };
+            }
+        }
         if (!safety.ok) {
             if (existing !== "missing" && existing.ok && existing.status === "resumed") {
                 return this.withOwner(existing);
@@ -66,9 +72,9 @@ export class RepositoryBootstrap {
         const ownerPath = join(bearingPath, OWNER_FILE);
         const temporaryPath = join(bearingPath, `${OWNER_TEMP_PREFIX}${process.pid}-${randomBytes(8).toString("hex")}`);
         try {
-            const directory = await lstat(bearingPath);
-            if (!directory.isDirectory() || directory.isSymbolicLink() || await realpath(bearingPath) !== bearingPath)
-                return undefined;
+            const pinned = await pinWorkspaceRoot(repositoryPath);
+            await assertContained(pinned, temporaryPath);
+            await assertContained(pinned, ownerPath);
             await writeFile(temporaryPath, `${JSON.stringify({ name }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
             await syncPath(temporaryPath);
             await rename(temporaryPath, ownerPath);
@@ -127,6 +133,15 @@ export class RepositoryBootstrap {
             return { ok: false, reason: "bearing_symlink" };
         if (!s.isDirectory())
             return { ok: false, reason: "bearing_not_directory" };
+        try {
+            const pinned = await pinWorkspaceRoot(repositoryPath);
+            await assertWorkspaceRoot(pinned);
+        }
+        catch (err) {
+            if (isWorkspaceRootError(err))
+                return { ok: false, reason: "bearing_symlink" };
+            return { ok: false, reason: "repository_unavailable" };
+        }
         return this.validateManifest(bearingPath, repositoryPath);
     }
     async validateManifest(bearingPath, repositoryPath) {
@@ -181,6 +196,7 @@ export class RepositoryBootstrap {
             await syncPath(tmpPath);
             await rename(tmpPath, bearingPath);
             await syncPath(repositoryPath);
+            await pinWorkspaceRoot(repositoryPath);
             return { ok: true, status: "initialized", repositoryPath, gitignoreMissing: gitignore.missing, gitignoreAbsent: gitignore.absent };
         }
         catch (err) {

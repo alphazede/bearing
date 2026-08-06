@@ -18,6 +18,28 @@ export const EXECUTION_MODES = ["explorer", "expedition"];
  * is legal only alongside `recommendedMode: "expedition"`.
  */
 export const EXECUTION_ORCHESTRATIONS = ["explorer", "trail-boss"];
+/** Keep coordination, product authorship, and independent review distinct. */
+export function validateExecutionRoleBoundary(input) {
+    if (input.coordinator.role !== "navigator" && input.coordinator.role !== "explorer")
+        return { ok: false, reason: "role_boundary", field: "coordinator" };
+    if (input.productAuthor.role !== "crewmate" || input.productAuthor.identity === input.coordinator.identity)
+        return { ok: false, reason: "role_boundary", field: "productAuthor" };
+    if (input.reviewer.role !== "surveyor" || input.reviewer.identity === input.coordinator.identity || input.reviewer.identity === input.productAuthor.identity)
+        return { ok: false, reason: "role_boundary", field: "reviewer" };
+    return { ok: true };
+}
+/**
+ * A reviewer sharing identity with the role that authored the candidate cannot
+ * independently verify it (issue 93). This is checked again here, independent
+ * of `validateExecutionRoleBoundary`'s coordinated-dispatch check, because a
+ * standalone review-stage request has no coordinator/productAuthor triple of
+ * its own to validate against.
+ */
+export function validateReviewerAuthorship(input) {
+    return input.reviewer.identity === input.author.identity
+        ? { ok: false, reason: "role_boundary", field: "reviewer" }
+        : { ok: true };
+}
 /** Kept for every existing caller: the exported facade is version 1. */
 export function recommendExecutionMode(input) {
     return recommendExecutionModeV1(input);

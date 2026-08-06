@@ -64,11 +64,8 @@ describe("production process runner", () => {
   it("builds exact provider argv and keeps prompt on stdin", async () => {
     const codex = await execute({ provider: "codex", model: "gpt-5.6-sol", reasoning: "medium" });
     expect(codex.calls[0]).toMatchObject({ executable: "codex", args: ["exec", "--json", "-m", "gpt-5.6-sol", "-c", 'model_reasoning_effort="medium"', "-c", 'approval_policy="never"', "-C", repositoryPath, "-s", "workspace-write", "--ephemeral", "-"], options: { cwd: repositoryPath, shell: false, detached: true, stdio: ["pipe", "pipe", "pipe"] }, stdin: "private source password=hunter2" });
-    const grok = await execute({ provider: "grok", model: "grok-build", reasoning: "medium" });
-    expect(grok.calls[0].executable).toBe("grok-safe");
-    expect(grok.calls[0].args).toEqual(["--", "--output-format", "streaming-json", "--prompt-file", "/dev/stdin", "--cwd", repositoryPath, "--model", "grok-build", "--reasoning-effort", "medium", "--max-turns", "2", "--tools", "read,write", "--disallowed-tools", "external-action", "--sandbox", "strict", "--permission-mode", "dontAsk", "--no-memory", "--no-subagents", "--disable-web-search"]);
     const claude = await execute({ provider: "claude", model: "sonnet", reasoning: "high" });
-    expect(claude.calls[0]).toMatchObject({ executable: "claude", args: ["--print", "--output-format", "stream-json", "--verbose", "--model", "sonnet", "--effort", "medium", "--permission-mode", "dontAsk", "--allowedTools", "Read,Edit,Write", "--no-session-persistence"], stdin: "private source password=hunter2" });
+    expect(claude.calls[0]).toMatchObject({ executable: "claude", args: ["--print", "--output-format", "stream-json", "--verbose", "--model", "sonnet", "--effort", "high", "--permission-mode", "dontAsk", "--allowedTools", "Read,Edit,Write", "--no-session-persistence"], stdin: "private source password=hunter2" });
     const pi = await execute({ provider: "pi", model: "zai/glm-5.2", reasoning: "medium" }, {}, { noSession: true });
     expect(pi.calls[0]).toMatchObject({ executable: "pi", args: ["--mode", "json", "--print", "--model", "zai/glm-5.2", "--thinking", "medium", "--tools", "read,write", "--exclude-tools", "external-action", "--no-session", "--offline"] });
     const piV4 = await execute({ provider: "pi", model: "deepseek/deepseek-v4-pro", reasoning: "high" });
@@ -78,9 +75,9 @@ describe("production process runner", () => {
     expect(agy.calls[0].args).not.toContain("--dangerously-skip-permissions");
     expect(agy.calls[0].args.at(-1)).toMatch(/^Read and follow the complete task in @\/tmp\/bearing-prompt-/);
     const opencode = await execute({ provider: "opencode", model: "openai/gpt-5", reasoning: "high" });
-    expect(opencode.calls[0]).toMatchObject({ executable: "opencode", stdin: "", args: expect.arrayContaining(["run", "--format", "json", "--dir", repositoryPath, "--model", "openai/gpt-5", "--variant", "medium", "--file"]) });
+    expect(opencode.calls[0]).toMatchObject({ executable: "opencode", stdin: "", args: expect.arrayContaining(["run", "--format", "json", "--dir", repositoryPath, "--model", "openai/gpt-5", "--variant", "high", "--file"]) });
     expect(JSON.parse((opencode.calls[0].options as { env: Record<string, string> }).env.OPENCODE_PERMISSION)).toMatchObject({ "*": "deny", read: "allow", edit: "allow", bash: "deny", task: "deny", webfetch: "deny", websearch: "deny", external_directory: "deny" });
-    for (const result of [codex, grok, claude, agy, opencode, pi, piV4]) {
+    for (const result of [codex, claude, agy, opencode, pi, piV4]) {
       expect(result.calls[0].args.join(" ")).not.toMatch(/hunter2|private source/);
       expect(JSON.stringify(result.receipt)).not.toMatch(/hunter2|private source/);
     }
@@ -91,9 +88,6 @@ describe("production process runner", () => {
     expect(codex.calls).toHaveLength(0);
     expect(codex.receipt).toMatchObject({ status: "blocked", failure: "unsupported_policy", warningCodes: expect.arrayContaining(["codex_network_policy_unsupported"]) });
     const readOnly = { authority: { read: true, write: false, network: false, workspace: true, externalAction: false } };
-    const grok = await execute({ provider: "grok", model: "grok-build", reasoning: "medium" }, readOnly);
-    expect(grok.calls[0].args).toEqual(expect.arrayContaining(["--tools", "read", "--disallowed-tools", "external-action", "--sandbox", "strict"]));
-    expect(grok.receipt.warningCodes).not.toContain("tools_narrowed");
     const pi = await execute({ provider: "pi", model: "zai/glm-5.2", reasoning: "medium" }, readOnly);
     expect(pi.calls[0].args).toEqual(expect.arrayContaining(["--tools", "read", "--exclude-tools", "external-action"]));
     expect(pi.receipt.warningCodes).not.toContain("tools_narrowed");
@@ -137,6 +131,30 @@ describe("production process runner", () => {
     expect(h.calls).toHaveLength(0);
     const result = await h.runner.run({ routeId: "codex", executable: "codex", args: [], stdin: "x", cwd: repositoryPath, timeoutMs: 50, runId: "jsonl" });
     expect(result).toMatchObject({ exitCode: 0, usage: { tokens: 5 }, events: [{ type: "message", data: { content: "ok" } }, { type: "complete" }] });
+  });
+
+  it("parses compact single-result output with final content and exact usage", async () => {
+    const output = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: 'BEARING_RESULT {"kind":"action","summary":"coordinated","artifacts":[]}',
+      usage: { input_tokens: 40_210, output_tokens: 2_259 },
+    });
+    const parsed = await harness(output).runner.run({
+      routeId: "claude",
+      executable: "claude",
+      args: [],
+      stdin: "bounded prompt",
+      cwd: repositoryPath,
+      timeoutMs: 50,
+      runId: "claude-compact-json",
+    });
+
+    expect(parsed).toEqual({
+      exitCode: 0,
+      events: [{ type: "result", data: { content: 'BEARING_RESULT {"kind":"action","summary":"coordinated","artifacts":[]}' } }],
+      usage: { tokens: 42_469 },
+    });
   });
 
   it("streams only ordered, allowlisted activity metadata from complete JSONL lines", async () => {
@@ -214,7 +232,7 @@ describe("production process runner", () => {
 
   it("passes the selected Claude model with the resolved role effort", async () => {
     const claude = await execute({ provider: "claude", model: "claude-fable-5[1m]", reasoning: "max" });
-    expect(claude.calls[0].args).toEqual(["--print", "--output-format", "stream-json", "--verbose", "--model", "claude-fable-5[1m]", "--effort", "medium", "--permission-mode", "dontAsk", "--allowedTools", "Read,Edit,Write", "--no-session-persistence"]);
+    expect(claude.calls[0].args).toEqual(["--print", "--output-format", "stream-json", "--verbose", "--model", "claude-fable-5[1m]", "--effort", "max", "--permission-mode", "dontAsk", "--allowedTools", "Read,Edit,Write", "--no-session-persistence"]);
   });
 
   it("reads Pi's selected model from its configured agent directory", async () => {

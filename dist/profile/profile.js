@@ -136,7 +136,7 @@ export function resolveRun(profile, rawOverrides, sessionNonce) {
     const selected = { provider: overrides.provider ?? profile.selection.provider, model: overrides.model ?? profile.selection.model, reasoning: effectiveReasoning };
     const roleReasoning = new Map();
     for (const role of ROLES) {
-        const resolved = resolveReasoning({ role, provider: selected.provider, policy: profile.reasoningPolicy, globalOverride: effectiveReasoning });
+        const resolved = resolveReasoning({ role, provider: selected.provider, policy: profile.reasoningPolicy, globalOverride: effectiveReasoning, ownerRequest: effectiveReasoning });
         if (!resolved.ok)
             return { status: "blocked", code: resolved.code };
         roleReasoning.set(role, { tier: resolved.tier, providerLevel: resolved.providerLevel, clamped: resolved.clamped });

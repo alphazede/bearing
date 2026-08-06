@@ -71,6 +71,11 @@ Exit after one read-only pass with a verdict and actionable findings.
 Each finding states behavior, impact, P0 through P3 priority, proof, and changed
 location. A clean verdict reports no qualifying finding; it does not certify.
 
+Surveyor is exactly one fresh read-only fallback session per general/security
+review class only without a native reviewer. It returns reviewedRevision,
+exact scope, reviewer/implementer sessions and ancestry, rerun commands,
+PASS/FAIL/NEEDS_MORE_EVIDENCE, precise findings.
+
 ## Failure taxonomy
 
 Separate introduced defect, plan drift, insufficient evidence, pre-existing

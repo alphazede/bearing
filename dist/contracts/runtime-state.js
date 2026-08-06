@@ -16,6 +16,7 @@ export const RETRY_WARRANTS = [
 export const RETRY_OUTCOMES = [
     "admitted",
     "retry_requires_warrant",
+    "retry_warrant_scope_mismatch",
     "same_attempt_higher_reasoning",
     "retry_limit_reached",
     "escalation_required",

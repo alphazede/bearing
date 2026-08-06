@@ -173,6 +173,36 @@ export function buildProposal(recommendation) {
         return { ok: false, reason: "proposal_malformed" };
     }
 }
+function recommendationMetric(metric) {
+    return {
+        id: metric.id,
+        value: metric.value,
+        numerator: metric.numerator,
+        denominator: metric.denominator,
+        sufficient: metric.sufficient,
+        ...(metric.confusion === undefined ? {} : { confusion: metric.confusion }),
+    };
+}
+/** Adapt the closed recommender contract into the canonical proposal contract. */
+export function buildRecommendationProposal(recommendation) {
+    const canonical = (value) => value;
+    return buildProposal({
+        patternId: recommendation.patternId,
+        surface: recommendation.surface,
+        target: canonical(recommendation.target),
+        from: canonical(recommendation.from),
+        to: canonical(recommendation.to),
+        evidence: recommendation.evidence,
+        baseline: recommendationMetric(recommendation.baseline),
+        guards: recommendation.guards.map(recommendationMetric),
+        trial: recommendation.trial,
+        revert: {
+            surface: recommendation.revert.surface,
+            target: canonical(recommendation.revert.target),
+            value: canonical(recommendation.revert.value),
+        },
+    });
+}
 function validProposal(value) {
     return hasRequiredAndOptionalKeys(value, ["schemaVersion", "recommendation", "proposalHash"])
         && value.schemaVersion === 1
@@ -200,6 +230,7 @@ function verdict(input, status, reason, targetImprovement, guardRegressions) {
             status,
             prescribedAction: status === "retain" ? "retain" : "revert",
             reason,
+            proposalHash: input.proposal.proposalHash,
             occurrences: input.occurrences,
             distinctRuns: input.distinctRuns,
             requiredOccurrences: input.proposal.recommendation.trial.minOccurrences,
@@ -272,6 +303,58 @@ export function evaluateTrial(input) {
             return verdict(input, "retain", "target_improved", targetImprovement, []);
         }
         return verdict(input, "revert", "target_not_improved", targetImprovement, []);
+    }
+    catch {
+        return { ok: false, reason: "trial_malformed" };
+    }
+}
+export function evaluateBoundedTrial(input) {
+    try {
+        if (!validProposal(input.proposal)) {
+            return { ok: false, reason: "proposal_malformed" };
+        }
+        if (hashProposal(input.proposal.recommendation) !== input.proposal.proposalHash) {
+            return { ok: false, reason: "proposal_hash_mismatch" };
+        }
+        if (input.ownerEvidence.proposalHash !== input.proposal.proposalHash) {
+            return { ok: false, reason: "proposal_hash_mismatch" };
+        }
+        if (!Array.isArray(input.applications)) {
+            return { ok: false, reason: "trial_malformed" };
+        }
+        const matchingApplication = input.applications.find((app) => app != null
+            && app.schemaVersion === 1
+            && typeof app.applicationId === "string"
+            && app.applicationId.length > 0
+            && /^[a-f0-9]{64}$/.test(app.externalEvidenceHash)
+            && app.externalEvidenceHash === input.ownerEvidence.applicationHash
+            && app.proposalHash === input.proposal.proposalHash
+            && typeof app.surface === "string"
+            && app.surface.length > 0
+            && isCanonicalValue(app.target)
+            && isCanonicalValue(app.value)
+            && app.surface === input.proposal.recommendation.surface
+            && sameCanonicalValue(app.target, input.proposal.recommendation.target)
+            && sameCanonicalValue(app.value, input.proposal.recommendation.to));
+        if (!matchingApplication) {
+            return { ok: false, reason: "proposal_hash_mismatch" };
+        }
+        if (typeof input.ownerEvidence.applicationHash !== "string" || !/^[a-f0-9]{64}$/.test(input.ownerEvidence.applicationHash)) {
+            return { ok: false, reason: "trial_malformed" };
+        }
+        // Owner authority asserted via explicit ownerEvidence binding the exact proposal.
+        // No mutation, no apply path performed or implied. Validate then evaluate the trial.
+        const trialInput = {
+            proposal: input.proposal,
+            currentTarget: input.currentTarget,
+            currentGuards: input.currentGuards,
+            occurrences: input.occurrences,
+            distinctRuns: input.distinctRuns,
+            ageDays: input.ageDays,
+            minEffect: input.minEffect,
+            noiseFloor: input.noiseFloor,
+        };
+        return evaluateTrial(trialInput);
     }
     catch {
         return { ok: false, reason: "trial_malformed" };

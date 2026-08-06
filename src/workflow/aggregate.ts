@@ -14,8 +14,21 @@ import {
   hashCommand,
   hashEvent,
 } from "../contracts/run.js";
+import {
+  hashExecutionContractBody,
+  hashLegacyRoleRoutes,
+  roleRoutesShape,
+  type ApprovedExecutionContract,
+  type ExecutionContractBody,
+  type RoleRoute,
+} from "../contracts/execution-contract.js";
 import { recommendExecutionMode, recommendExecutionModeV2, type ExecutionMode, type ModeRecommendation } from "../execution/execution-mode.js";
 import { isSelectionSignals } from "../execution/selection-score.js";
+
+function extractContractBody(contract: ApprovedExecutionContract): ExecutionContractBody {
+  const { contentHash: _hash, ownerApproval: _approval, ...body } = contract;
+  return body as ExecutionContractBody;
+}
 
 const issuedStates = new WeakSet<object>();
 const durableEvidence = new WeakSet<object>();
@@ -82,6 +95,18 @@ export interface RunState {
   readonly executionRecommendation: (ModeRecommendation & { readonly eventId: string }) | null;
   readonly executionApproval: { readonly eventId: string; readonly kind: DurableOwnerEvidence["kind"]; readonly selectedMode: "explorer" | "expedition" } | null;
   readonly journeyCheckpoint: (RecordJourneyCheckpointPayload & { readonly eventId: string }) | null;
+  /**
+   * Owner-approved role bindings for a run created before execution contracts carried role
+   * routes. Control-plane provenance only: it is never consulted by any transition rule and
+   * never participates in journey progress. An approved execution contract stays
+   * authoritative wherever one resolves.
+   */
+  readonly legacyRoleRoutes: readonly RoleRoute[] | null;
+  /**
+   * Owner-approved execution contract for a run created before execution contracts were written
+   * to the plan directory. Control-plane provenance only: it never advances journey progress.
+   */
+  readonly legacyExecutionContract: ApprovedExecutionContract | null;
 }
 
 /** Injected pure suppliers so the reducer stays deterministic and side-effect free. */
@@ -102,6 +127,12 @@ export type DecideFailure =
   | "non_owner_approval"
   | "recommendation_missing"
   | "recommendation_mismatch"
+  | "role_routes_invalid"
+  | "role_routes_hash_mismatch"
+  | "role_routes_already_bound"
+  | "execution_contract_invalid"
+  | "execution_contract_hash_mismatch"
+  | "execution_contract_already_bound"
   | "illegal_transition";
 
 export type DecideResult =
@@ -133,6 +164,8 @@ export function initialRunState(runId: string): RunState {
     executionRecommendation: null,
     executionApproval: null,
     journeyCheckpoint: null,
+    legacyRoleRoutes: null,
+    legacyExecutionContract: null,
   });
 }
 
@@ -155,6 +188,8 @@ function applyEvent(state: RunState, event: EventEnvelopeV1): RunState {
   let executionRecommendation = state.executionRecommendation;
   let executionApproval = state.executionApproval;
   let journeyCheckpoint = state.journeyCheckpoint;
+  let legacyRoleRoutes = state.legacyRoleRoutes;
+  let legacyExecutionContract = state.legacyExecutionContract;
   switch (event.type) {
     case "workRequestCreated":
       workRequestCreated = true;
@@ -181,6 +216,17 @@ function applyEvent(state: RunState, event: EventEnvelopeV1): RunState {
         pendingDecision = { decisionId: event.payload.questionDecisionId, question: event.payload.question };
       }
       break;
+    case "ownerImprovementApplicationRecorded":
+      // Typed evidence is carried by the event; no additional RunState projection required.
+      break;
+    case "legacyRoleRoutesApproved":
+      // Exactly one projected field. `pendingDecision` is deliberately untouched: this event
+      // records owner provenance, it never answers or clears a decision.
+      legacyRoleRoutes = event.payload.roleRoutes as readonly RoleRoute[];
+      break;
+    case "legacyExecutionContractApproved":
+      legacyExecutionContract = (event.payload.contract as unknown) as ApprovedExecutionContract;
+      break;
   }
 
   return issueRunState({
@@ -193,6 +239,8 @@ function applyEvent(state: RunState, event: EventEnvelopeV1): RunState {
     executionRecommendation,
     executionApproval,
     journeyCheckpoint,
+    legacyRoleRoutes,
+    legacyExecutionContract,
   });
 }
 
@@ -271,6 +319,30 @@ function validateReplayEvent(state: RunState, event: EventEnvelopeV1): void {
       if (!state.workRequestCreated || event.actor !== "bearing") throw new ReplayError("invalid journey checkpoint during replay");
       if (event.payload.questionDecisionId !== undefined && (state.pendingDecision !== null || typeof event.payload.question !== "string")) throw new ReplayError("invalid journey question checkpoint during replay");
       return;
+    case "ownerImprovementApplicationRecorded":
+      if (!state.workRequestCreated || event.actor !== OWNER_ACTOR) throw new ReplayError("invalid owner improvement application during replay");
+      if (state.pendingDecision !== null
+        || state.journeyCheckpoint?.stage !== "review"
+        || state.journeyCheckpoint.status !== "complete") {
+        throw new ReplayError("owner improvement application requires a settled run");
+      }
+      return;
+    case "legacyRoleRoutesApproved":
+      if (!state.workRequestCreated || event.actor !== OWNER_ACTOR) throw new ReplayError("invalid legacy role-route approval during replay");
+      if (state.legacyRoleRoutes !== null) throw new ReplayError("legacy role routes are already bound");
+      if (!roleRoutesShape(event.payload.roleRoutes)) throw new ReplayError("legacy role routes are not a complete registered binding");
+      if (event.payload.approvedContentHash !== hashLegacyRoleRoutes(state.runId, event.payload.roleRoutes)) {
+        throw new ReplayError("legacy role routes do not match their approved content hash");
+      }
+      return;
+    case "legacyExecutionContractApproved":
+      if (!state.workRequestCreated || event.actor !== OWNER_ACTOR) throw new ReplayError("invalid legacy execution-contract approval during replay");
+      if (state.legacyExecutionContract !== null) throw new ReplayError("legacy execution contract is already bound");
+      if (typeof event.payload.contract !== "object" || event.payload.contract === null) throw new ReplayError("legacy execution contract payload is invalid");
+      if (event.payload.approvedContentHash !== hashExecutionContractBody(extractContractBody((event.payload.contract as unknown) as ApprovedExecutionContract))) {
+        throw new ReplayError("legacy execution contract does not match its approved content hash");
+      }
+      return;
   }
 }
 
@@ -305,9 +377,19 @@ export function decide(
     return fail(state, "stale_revision");
   }
 
-  // Pending consequential decision gates every transition except a matching
-  // owner answer for the active decision.
+  // Pending consequential decision gates every transition except a matching owner answer for
+  // the active decision, and one owner-only command that records control-plane provenance
+  // without touching journey progress. `approveLegacyRoleRoutes` and `approveLegacyExecutionContract`
+  // are admitted here because they cannot advance, answer, or settle anything: they project
+  // control-plane provenance alone and leave `pendingDecision` exactly as they found it. Every other
+  // command — including `recordOwnerImprovementApplication` and every journey transition — stays blocked.
   if (state.pendingDecision !== null) {
+    if (command.type === "approveLegacyRoleRoutes") {
+      return decideLegacyRoleRoutes(state, command, contentHash, deps);
+    }
+    if (command.type === "approveLegacyExecutionContract") {
+      return decideLegacyExecutionContract(state, command, contentHash, deps);
+    }
     if (command.type !== "recordOwnerAnswer") {
       return fail(state, "pending_decision_blocks");
     }
@@ -350,7 +432,71 @@ export function decide(
     case "recordJourneyCheckpoint":
       if (!state.workRequestCreated || command.session.actor !== "bearing") return fail(state, "illegal_transition");
       return succeed(state, command, contentHash, deps, "journeyCheckpointRecorded", cmdPayload(command));
+    case "recordOwnerImprovementApplication":
+      if (command.session.actor !== OWNER_ACTOR) return fail(state, "non_owner_approval");
+      if (!state.workRequestCreated
+        || state.pendingDecision !== null
+        || state.journeyCheckpoint?.stage !== "review"
+        || state.journeyCheckpoint.status !== "complete") return fail(state, "illegal_transition");
+      return succeed(state, command, contentHash, deps, "ownerImprovementApplicationRecorded", cmdPayload(command));
+    case "approveLegacyRoleRoutes":
+      return decideLegacyRoleRoutes(state, command, contentHash, deps);
+    case "approveLegacyExecutionContract":
+      return decideLegacyExecutionContract(state, command, contentHash, deps);
   }
+}
+
+function decideLegacyExecutionContract(
+  state: RunState,
+  command: Extract<CommandEnvelopeV1, { readonly type: "approveLegacyExecutionContract" }>,
+  contentHash: string,
+  deps: DecideDeps,
+): DecideResult {
+  if (command.session.actor !== OWNER_ACTOR) return fail(state, "non_owner_approval");
+  if (!state.workRequestCreated) return fail(state, "illegal_transition");
+  if (state.legacyExecutionContract !== null) return fail(state, "execution_contract_already_bound");
+  const { contract, approvedContentHash } = command.payload;
+  const body = extractContractBody((contract as unknown) as ApprovedExecutionContract);
+  if (approvedContentHash !== hashExecutionContractBody(body)) {
+    return fail(state, "execution_contract_hash_mismatch");
+  }
+  return succeed(state, command, contentHash, deps, "legacyExecutionContractApproved", {
+    contract,
+    approvedContentHash,
+  });
+}
+
+/**
+ * Decide the one owner-only role-route binding, whether or not a decision is pending.
+ *
+ * Every gate is fail-closed and none of them is relaxed by the pending-decision path above:
+ * the actor must be the owner, the run must exist, the bindings must be a complete set of
+ * registered routes for every required role, and the owner must have signed this exact
+ * canonical content for this exact run. The binding is write-once — a second, different
+ * approval is refused rather than silently overwriting owner provenance. An identical
+ * re-submission under the same command id replays through the outcome map above and emits
+ * nothing.
+ */
+function decideLegacyRoleRoutes(
+  state: RunState,
+  command: Extract<CommandEnvelopeV1, { readonly type: "approveLegacyRoleRoutes" }>,
+  contentHash: string,
+  deps: DecideDeps,
+): DecideResult {
+  if (command.session.actor !== OWNER_ACTOR) return fail(state, "non_owner_approval");
+  if (!state.workRequestCreated) return fail(state, "illegal_transition");
+  if (state.legacyRoleRoutes !== null) return fail(state, "role_routes_already_bound");
+  const { roleRoutes, approvedContentHash } = command.payload;
+  if (!roleRoutesShape(roleRoutes)) return fail(state, "role_routes_invalid");
+  if (approvedContentHash !== hashLegacyRoleRoutes(state.runId, roleRoutes)) {
+    return fail(state, "role_routes_hash_mismatch");
+  }
+  // The payload is rebuilt from the validated values so no unvalidated key can reach the
+  // durable event, and so the recorded bytes are exactly what the approved hash covers.
+  return succeed(state, command, contentHash, deps, "legacyRoleRoutesApproved", {
+    roleRoutes: roleRoutes.map((route) => ({ role: route.role, primary: route.primary, fallbacks: [...route.fallbacks] })),
+    approvedContentHash,
+  });
 }
 
 function succeed(

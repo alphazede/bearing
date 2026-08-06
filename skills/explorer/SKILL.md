@@ -21,6 +21,9 @@ data without owner consent. Do not repeat an identical failed gate without a new
 hypothesis or evidence. Run focused validation after a repair and the full gate
 once after integration. Finish when every acceptance criterion has evidence.
 
+Explorer orchestrates only its assigned complex route. It has no wave
+selection, credit, or cross-lane integration duties.
+
 ## Authority and prohibited actions
 
 Use the plan, Explorer mode, review cadence, and `BEARING_FOCUS`.

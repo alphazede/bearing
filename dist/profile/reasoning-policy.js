@@ -21,6 +21,18 @@ export const DEFAULT_REASONING_TIERS = {
     "trail-boss": "medium",
 };
 export const GLOBAL_DEFAULT_REASONING_TIER = "medium";
+const BACKGROUND_BRIEF_POLICY = {
+    defaults: { "background-brief": "medium" },
+    escalation: { maxSteps: 0, onNewFailureFingerprint: false, onCrossBoundaryDefect: false },
+};
+export function resolveBackgroundReasoning(providerName, ownerCeiling) {
+    return resolveReasoning({
+        role: "background-brief",
+        provider: providerName,
+        policy: BACKGROUND_BRIEF_POLICY,
+        ...(ownerCeiling === undefined ? {} : { globalOverride: ownerCeiling }),
+    });
+}
 function isReasoningTier(value) {
     return typeof value === "string" && REASONING_TIERS.includes(value);
 }
@@ -39,7 +51,9 @@ export function resolveReasoning(input) {
         return { ok: false, code: "reasoning_unmappable" };
     if (input.escalationStep !== undefined && !Number.isFinite(input.escalationStep))
         return { ok: false, code: "reasoning_unmappable" };
-    const baseTier = input.policy.defaults[input.role] ?? GLOBAL_DEFAULT_REASONING_TIER;
+    if (input.ownerRequest !== undefined && !isReasoningTier(input.ownerRequest))
+        return { ok: false, code: "reasoning_unmappable" };
+    const baseTier = input.ownerRequest !== undefined ? input.ownerRequest : (input.policy.defaults[input.role] ?? GLOBAL_DEFAULT_REASONING_TIER);
     if (!isReasoningTier(baseTier) || input.globalOverride !== undefined && !isReasoningTier(input.globalOverride))
         return { ok: false, code: "reasoning_unmappable" };
     const baseIndex = REASONING_TIERS.indexOf(baseTier);
@@ -50,6 +64,6 @@ export function resolveReasoning(input) {
     const ceiling = Math.min(providerCeiling(input.provider), input.globalOverride === undefined ? REASONING_TIERS.length - 1 : REASONING_TIERS.indexOf(input.globalOverride));
     const clamped = requestedIndex > ceiling;
     const tier = REASONING_TIERS[Math.min(requestedIndex, ceiling)];
-    const reason = clamped ? "clamped" : escalationSteps > 0 ? "escalated" : "default";
+    const reason = clamped ? "clamped" : escalationSteps > 0 ? "escalated" : (input.ownerRequest !== undefined ? "override" : "default");
     return { ok: true, tier, providerLevel: REASONING_PROVIDER_MAP[tier][input.provider], clamped, reason };
 }

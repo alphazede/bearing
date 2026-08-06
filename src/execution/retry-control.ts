@@ -32,6 +32,7 @@ export type RetryWarrant = (typeof RETRY_WARRANTS)[number];
 
 export type RetryRefusal =
   | "retry_requires_warrant"
+  | "retry_warrant_scope_mismatch"
   | "same_attempt_higher_reasoning"
   | "retry_limit_reached"
   | "escalation_required";
@@ -79,6 +80,10 @@ const ESCALATION_TARGETS: Readonly<Record<EscalationScope, EscalationTarget>> = 
   "contract-change": "owner",
 };
 
+export function retryWarrantAllowed(scope: EscalationScope, warrant: RetryWarrant): boolean {
+  return warrant !== "approved_amendment" || scope === "contract-change";
+}
+
 export function failureFingerprint(input: FailureFingerprintInput): string {
   const canonical = canonicalStringify({
     stage: input.stage,
@@ -120,6 +125,10 @@ export function admitRetry(
   ledger: readonly RetryLedgerEntry[],
   attempt: RetryAttempt,
 ): RetryDecision {
+  if (attempt.warrant !== undefined && !retryWarrantAllowed(attempt.scope, attempt.warrant)) {
+    const reason = "retry_warrant_scope_mismatch";
+    return { ok: false, reason, ledger: append(ledger, attempt, reason) };
+  }
   const previous = lastEquivalentAdmission(ledger, attempt.fingerprint);
   const tierRaised = previous !== undefined
     && REASONING_TIERS.indexOf(attempt.reasoningTier) > REASONING_TIERS.indexOf(previous.reasoningTier);

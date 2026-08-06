@@ -157,14 +157,22 @@ function nestedUnexpectedKey(value: Record<string, unknown>): boolean {
 export function graderVerdict(report: GraderReport): GraderReport["verdict"] {
   let weightedScore = 0;
   let totalWeight = 0;
+  let hasBelowFloorDimension = false;
   for (const dimension of GRADER_RUBRIC) {
     const score = report.scores.find(({ dimensionId }) => dimensionId === dimension.id);
-    weightedScore += (score?.level ?? 0) * dimension.weight;
+    const level = score?.level ?? 0;
+    if (level < 3) {
+      hasBelowFloorDimension = true;
+    }
+    weightedScore += level * dimension.weight;
     totalWeight += dimension.weight;
+  }
+  if (hasBelowFloorDimension) {
+    return "weak";
   }
   const average = weightedScore / totalWeight;
   if (average >= 3.5) return "strong";
-  if (average >= 2.5) return "acceptable";
+  if (average >= 3.0) return "acceptable";
   return "weak";
 }
 
