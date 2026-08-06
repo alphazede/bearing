@@ -100,22 +100,22 @@ describe("profile schema", () => {
     expect(new Set(result.value.roles.map((role) => JSON.stringify({ allow: role.toolAllow, deny: role.toolDeny }))).size).toBe(4);
   });
 
-  it("projects distinct provider reasoning levels by role", () => {
+  // Issue 89: the owner's requested tier binds every role. A role policy default must not lower it.
+  it("projects the requested reasoning tier onto every role", () => {
     const result = resolveRun(valid({ selection: { provider: "codex", model: "model", reasoning: "high" } }), {}, "reasoning-by-role");
     expect(result.status).toBe("ready"); if (result.status !== "ready") return;
-    expect(result.value.roles.find(({ role }) => role === "navigator")?.reasoning).toEqual({ tier: "high", providerLevel: "high", clamped: false });
-    expect(result.value.roles.find(({ role }) => role === "explorer")?.reasoning).toEqual({ tier: "medium", providerLevel: "medium", clamped: false });
-    expect(new Set(result.value.roles.map(({ reasoning }) => reasoning.providerLevel)).size).toBeGreaterThan(1);
+    for (const role of result.value.roles) expect(role.reasoning).toEqual({ tier: "high", providerLevel: "high", clamped: false });
+    expect(new Set(result.value.roles.map(({ reasoning }) => reasoning.providerLevel))).toEqual(new Set(["high"]));
   });
 
   it.each([
     ["minimal", ["minimal", "minimal", "minimal", "minimal"], ["low", "low", "low", "low"]],
     ["low", ["low", "low", "low", "low"], ["low", "low", "low", "low"]],
     ["medium", ["medium", "medium", "medium", "medium"], ["medium", "medium", "medium", "medium"]],
-    ["high", ["high", "medium", "medium", "medium"], ["high", "medium", "medium", "medium"]],
-    ["very-high", ["high", "medium", "medium", "medium"], ["high", "medium", "medium", "medium"]],
-    ["max", ["high", "medium", "medium", "medium"], ["high", "medium", "medium", "medium"]],
-  ] as const)("caps every role at the owner's %s reasoning ceiling", (ceiling, tiers, providerLevels) => {
+    ["high", ["high", "high", "high", "high"], ["high", "high", "high", "high"]],
+    ["very-high", ["very-high", "very-high", "very-high", "very-high"], ["xhigh", "xhigh", "xhigh", "xhigh"]],
+    ["max", ["max", "max", "max", "max"], ["max", "max", "max", "max"]],
+  ] as const)("binds every role to the owner's requested %s reasoning tier", (ceiling, tiers, providerLevels) => {
     const result = resolveRun(valid({ selection: { provider: "codex", model: "model", reasoning: ceiling } }), {}, `ceiling-${ceiling}`);
     expect(result.status).toBe("ready"); if (result.status !== "ready") return;
     expect(result.value.roles.map(({ reasoning }) => reasoning.tier)).toEqual(tiers);
@@ -125,7 +125,8 @@ describe("profile schema", () => {
 
   it("keeps every projected role reasoning level inside every built-in route", () => {
     for (const route of BUILTIN_ROUTES) {
-      const result = resolveRun(valid({ selection: { provider: route.provider, model: route.model, reasoning: "medium" } }), {}, `route-${route.id}`);
+      const reasoning = route.reasoningLevels.includes("medium") ? "medium" : route.reasoningLevels[0]!;
+      const result = resolveRun(valid({ selection: { provider: route.provider, model: route.model, reasoning } }), {}, `route-${route.id}`);
       expect(result.status).toBe("ready");
       if (result.status !== "ready") continue;
       for (const role of result.value.roles) expect(route.reasoningLevels).toContain(role.reasoning.providerLevel);

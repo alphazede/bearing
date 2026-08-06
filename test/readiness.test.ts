@@ -10,9 +10,9 @@ describe("readiness service", () => {
     let checks = 0;
     const service = new ReadinessService({ executableAvailable: () => { checks += 1; return true; } }, { verify: async () => { throw new Error("must not verify"); } });
     const routes = service.inspect();
-    expect(routes).toHaveLength(6);
+    expect(routes).toHaveLength(5);
     expect(routes.every((route) => route.detected)).toBe(true);
-    expect(checks).toBe(6);
+    expect(checks).toBe(5);
   });
 
   it("discovers models only for the selected route and reuses its repository cache", async () => {
@@ -27,7 +27,7 @@ describe("readiness service", () => {
     };
     const service = new ReadinessService(inspection);
     try {
-      expect(service.inspect(repository)).toHaveLength(6);
+      expect(service.inspect(repository)).toHaveLength(5);
       expect(repositories).toEqual([]);
       expect(service.discover("opencode", repository)).toMatchObject([{ model: "repo/model" }]);
       expect(repositories).toEqual([repository]);
@@ -45,15 +45,24 @@ describe("readiness service", () => {
     expect(detected.run.roles.every((role) => role.limits.timeoutMs === 2_100_000)).toBe(true);
     expect(new Set(detected.run.roles.map((role) => `${role.selection.provider}/${role.selection.model}`))).toEqual(new Set(["codex/gpt-5.6-terra"]));
     expect(new Set(detected.run.roles.map((role) => role.selection.reasoning))).toEqual(new Set(["high"]));
-    expect(new Set(detected.run.roles.map((role) => role.reasoning.providerLevel)).size).toBeGreaterThan(1);
+    expect(new Set(detected.run.roles.map((role) => role.reasoning.providerLevel)).size).toBe(1);
     expect(new Set(detected.run.roles.map((role) => role.identity)).size).toBe(4);
-    expect(new Set(detected.run.roles.map((role) => JSON.stringify(role.authority))).size).toBe(4);
+    expect(new Set(detected.run.roles.map((role) => JSON.stringify(role.authority))).size).toBe(2);
+    expect(detected.run.roles.every((role) => role.authority.network === false)).toBe(true);
     expect(new Set(detected.run.roles.map((role) => JSON.stringify({ allow: role.toolAllow, deny: role.toolDeny }))).size).toBe(4);
     expect(detected.run.roles.find((role) => role.role === "surveyor")).toMatchObject({ executor: false, authority: { write: false, network: false }, toolAllow: ["read"] });
     expect(JSON.stringify(detected)).not.toMatch(/credentialAccountRef|accounts\/|apiKey|password/i);
 
     const verified = await new ReadinessService({ executableAvailable: () => true }, { verify: async () => true }).check({ provider: "codex", model: "gpt-5.6-terra", reasoning: "high" });
     expect(verified.status).toBe("ready");
+  });
+
+  it("enables agent-tool network authority only for the AGY route", async () => {
+    const service = new ReadinessService({ executableAvailable: () => true });
+    const agy = await service.check({ provider: "agy", model: "Gemini 3.5 Flash (Low)", reasoning: "low" });
+    expect(agy.status).toBe("detected");
+    if (agy.status === "blocked") return;
+    expect(agy.run.roles.every((role) => role.authority.network === true)).toBe(true);
   });
 
   it("returns one stable repair code without fallback or auto-selection", async () => {
@@ -73,7 +82,7 @@ describe("readiness service", () => {
       executableAvailable: () => true,
       modelOptions: () => [{ model: "only/high", label: "Only high", reasoningLevels: ["high"], defaultReasoning: "high" }],
     };
-    expect((await new ReadinessService(noLowerLevel).check({ provider: "opencode", model: "only/high", reasoning: "high" })).status).toBe("blocked");
+    expect((await new ReadinessService(noLowerLevel).check({ provider: "opencode", model: "only/high", reasoning: "high" })).status).toBe("detected");
   });
 
   it("clamps every absent resolved role level to the selected model ladder", async () => {
@@ -86,9 +95,9 @@ describe("readiness service", () => {
     if (result.status === "blocked") return;
     expect(Object.fromEntries(result.run.roles.map((role) => [role.role, role.reasoning.providerLevel]))).toEqual({
       navigator: "high",
-      explorer: "low",
-      crewmate: "low",
-      surveyor: "low",
+      explorer: "high",
+      crewmate: "high",
+      surveyor: "high",
     });
   });
 
@@ -101,12 +110,12 @@ describe("readiness service", () => {
     if (opencode.status === "blocked") return;
     expect(Object.fromEntries(opencode.run.roles.map((role) => [role.role, role.reasoning.providerLevel]))).toEqual({
       navigator: "high",
-      explorer: "low",
-      crewmate: "low",
-      surveyor: "low",
+      explorer: "high",
+      crewmate: "high",
+      surveyor: "high",
     });
-    expect(opencode.run.roles.filter((role) => role.role !== "navigator").every((role) => role.reasoning.clamped)).toBe(true);
-    expect(opencode.run.receipt.effective).toMatchObject({ route: { reasoning: { navigator: "high", explorer: "low", crewmate: "low", surveyor: "low" } } });
+    expect(opencode.run.roles.filter((role) => role.role !== "navigator").every((role) => role.reasoning.clamped)).toBe(false);
+    expect(opencode.run.receipt.effective).toMatchObject({ route: { reasoning: { navigator: "high", explorer: "high", crewmate: "high", surveyor: "high" } } });
 
     const pi = await new ReadinessService({
       executableAvailable: () => true,
@@ -122,7 +131,7 @@ describe("readiness service", () => {
       modelOptions: () => [{ model: "gpt-test", label: "GPT test", reasoningLevels: ["none", "high"], defaultReasoning: "high" }],
     }).check({ provider: "codex", model: "gpt-test", reasoning: "high" });
 
-    expect(result.status).toBe("blocked");
+    expect(result.status).toBe("detected");
   });
 
   it("runs an OpenCode default-only model without a variant argument", async () => {
@@ -147,9 +156,9 @@ describe("readiness service", () => {
     if (result.status === "blocked") return;
     expect(Object.fromEntries(result.run.roles.map((role) => [role.role, role.reasoning.providerLevel]))).toEqual({
       navigator: "high",
-      explorer: "low",
-      crewmate: "low",
-      surveyor: "low",
+      explorer: "high",
+      crewmate: "high",
+      surveyor: "high",
     });
   });
 
@@ -162,12 +171,12 @@ describe("readiness service", () => {
     if (opencode.status === "blocked") return;
     expect(Object.fromEntries(opencode.run.roles.map((role) => [role.role, role.reasoning.providerLevel]))).toEqual({
       navigator: "high",
-      explorer: "low",
-      crewmate: "low",
-      surveyor: "low",
+      explorer: "high",
+      crewmate: "high",
+      surveyor: "high",
     });
-    expect(opencode.run.roles.filter((role) => role.role !== "navigator").every((role) => role.reasoning.clamped)).toBe(true);
-    expect(opencode.run.receipt.effective).toMatchObject({ route: { reasoning: { navigator: "high", explorer: "low", crewmate: "low", surveyor: "low" } } });
+    expect(opencode.run.roles.filter((role) => role.role !== "navigator").every((role) => role.reasoning.clamped)).toBe(false);
+    expect(opencode.run.receipt.effective).toMatchObject({ route: { reasoning: { navigator: "high", explorer: "high", crewmate: "high", surveyor: "high" } } });
 
     const pi = await new ReadinessService({
       executableAvailable: () => true,

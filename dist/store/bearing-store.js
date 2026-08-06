@@ -3,6 +3,7 @@ import { mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promis
 import { join, resolve } from "node:path";
 import { canonicalStringify, hashEvent, parseCommandEnvelope, parseEventEnvelope, } from "../contracts/run.js";
 import { decide, initialRunState, replay, } from "../workflow/aggregate.js";
+import { assertContained, assertWorkspaceRoot, isWorkspaceRootError, pinWorkspaceRoot, safeRollbackCreatedDirectory, } from "../repository/workspace-root.js";
 const STORE_INTEGRITY_ERROR_CODE_LIST = [
     "corrupt_ledger",
     "future_schema",
@@ -36,13 +37,55 @@ const queues = new Map();
 /** Durable per-run JSONL store. `root` is the repository/workspace root. */
 export class BearingStore {
     options;
+    repositoryRoot;
     runsRoot;
+    pinnedRoot = null;
     constructor(root, options = {}) {
         this.options = options;
+        this.repositoryRoot = resolve(root);
         this.runsRoot = resolve(root, ".bearing", "runs");
+    }
+    async ensureWorkspaceRoot() {
+        if (this.pinnedRoot) {
+            try {
+                await assertWorkspaceRoot(this.pinnedRoot);
+                return this.pinnedRoot;
+            }
+            catch (err) {
+                if (isWorkspaceRootError(err)) {
+                    throw storeError("workspace_root_changed", err.message, err);
+                }
+                throw err;
+            }
+        }
+        try {
+            this.pinnedRoot = await pinWorkspaceRoot(this.repositoryRoot);
+            return this.pinnedRoot;
+        }
+        catch (err) {
+            if (isWorkspaceRootError(err)) {
+                throw storeError("workspace_root_changed", err.message, err);
+            }
+            throw err;
+        }
+    }
+    async checkWorkspaceRootIfPresent() {
+        try {
+            return await this.ensureWorkspaceRoot();
+        }
+        catch (err) {
+            if (typeof err === "object" && err !== null && err.code === "ENOENT") {
+                return null;
+            }
+            if (isWorkspaceRootError(err) || (err instanceof BearingStoreError && err.code === "workspace_root_changed")) {
+                throw storeError("workspace_root_changed", err.message, err);
+            }
+            return null;
+        }
     }
     async load(runId) {
         this.assertRunId(runId);
+        await this.checkWorkspaceRootIfPresent();
         return await this.serialized(runId, () => this.loadUnlocked(runId));
     }
     async apply(command) {
@@ -53,11 +96,13 @@ export class BearingStore {
             const reason = parsed.reason === "future_schema" ? "future_schema" : "malformed_command";
             return { ok: false, reason, state: initialRunState("") };
         }
+        await this.checkWorkspaceRootIfPresent();
         return await this.serialized(parsed.value.runId, () => this.applyUnlocked(parsed.value));
     }
     async compact(runId, cleanlinessProof) {
         this.assertRunId(runId);
         assertCallerCleanlinessProof(cleanlinessProof);
+        await this.checkWorkspaceRootIfPresent();
         return await this.serialized(runId, () => this.compactUnlocked(runId, cleanlinessProof));
     }
     async retentionPlan(policy, cleanlinessProof) {
@@ -65,6 +110,14 @@ export class BearingStore {
             return [];
         assertRetentionPolicy(policy);
         assertCallerCleanlinessProof(cleanlinessProof);
+        const pinned = await this.checkWorkspaceRootIfPresent();
+        if (pinned) {
+            await assertContained(pinned, this.runsRoot).catch((err) => {
+                if (isWorkspaceRootError(err))
+                    throw storeError("workspace_root_changed", err.message, err);
+                throw err;
+            });
+        }
         let entries;
         try {
             entries = await readdir(this.runsRoot, { withFileTypes: true });
@@ -155,6 +208,14 @@ export class BearingStore {
         return actions;
     }
     async list(limit = 20) {
+        const pinned = await this.checkWorkspaceRootIfPresent();
+        if (pinned) {
+            await assertContained(pinned, this.runsRoot).catch((err) => {
+                if (isWorkspaceRootError(err))
+                    throw storeError("workspace_root_changed", err.message, err);
+                throw err;
+            });
+        }
         let entries;
         try {
             entries = await readdir(this.runsRoot, { withFileTypes: true });
@@ -186,6 +247,9 @@ export class BearingStore {
                 state = await this.load(entry.name);
             }
             catch (error) {
+                if (isWorkspaceRootError(error) || (error instanceof BearingStoreError && error.code === "workspace_root_changed")) {
+                    throw error;
+                }
                 if (!isStoreIntegrityError(error))
                     throw error;
                 return {
@@ -214,9 +278,18 @@ export class BearingStore {
     }
     async delete(runId) {
         this.assertRunId(runId);
+        await this.ensureWorkspaceRoot();
         await this.serialized(runId, () => this.deleteUnlocked(runId));
     }
     async clear() {
+        const pinned = await this.checkWorkspaceRootIfPresent();
+        if (pinned) {
+            await assertContained(pinned, this.runsRoot).catch((err) => {
+                if (isWorkspaceRootError(err))
+                    throw storeError("workspace_root_changed", err.message, err);
+                throw err;
+            });
+        }
         let entries;
         try {
             entries = await readdir(this.runsRoot, { withFileTypes: true });
@@ -350,12 +423,23 @@ export class BearingStore {
         }
     }
     async readLedger(runId) {
+        const pinned = await this.checkWorkspaceRootIfPresent();
         const path = join(this.runDir(runId), "events.jsonl");
+        if (pinned) {
+            await assertContained(pinned, path).catch((err) => {
+                if (isWorkspaceRootError(err))
+                    throw storeError("workspace_root_changed", err.message, err);
+                throw err;
+            });
+        }
         let text;
         try {
             text = await readFile(path, "utf8");
         }
         catch (error) {
+            if (isWorkspaceRootError(error) || (isObject(error) && error.code === "workspace_root_changed")) {
+                throw error;
+            }
             if (isMissing(error))
                 return [];
             if (isMalformedRequiredFile(error)) {
@@ -400,11 +484,23 @@ export class BearingStore {
         return events;
     }
     async readSnapshot(runId) {
+        const pinned = await this.checkWorkspaceRootIfPresent();
+        const path = join(this.runDir(runId), "snapshot.json");
+        if (pinned) {
+            await assertContained(pinned, path).catch((err) => {
+                if (isWorkspaceRootError(err))
+                    throw storeError("workspace_root_changed", err.message, err);
+                throw err;
+            });
+        }
         let text;
         try {
-            text = await readFile(join(this.runDir(runId), "snapshot.json"), "utf8");
+            text = await readFile(path, "utf8");
         }
         catch (error) {
+            if (isWorkspaceRootError(error) || (isObject(error) && error.code === "workspace_root_changed")) {
+                throw error;
+            }
             if (isMissing(error))
                 return null;
             if (isMalformedRequiredFile(error)) {
@@ -434,7 +530,31 @@ export class BearingStore {
     }
     async append(runId, event) {
         const dir = this.runDir(runId);
-        const firstCreated = await mkdir(dir, { recursive: true });
+        let pinned = null;
+        let firstCreated;
+        try {
+            firstCreated = await mkdir(dir, { recursive: true });
+            pinned = await pinWorkspaceRoot(this.repositoryRoot);
+            this.pinnedRoot = pinned;
+        }
+        catch (err) {
+            if (isWorkspaceRootError(err)) {
+                await safeRollbackCreatedDirectory(this.pinnedRoot ?? undefined, firstCreated);
+                throw storeError("workspace_root_changed", err.message, err);
+            }
+            throw err;
+        }
+        try {
+            await assertContained(pinned, dir);
+            await assertContained(pinned, join(dir, "events.jsonl"));
+        }
+        catch (err) {
+            await safeRollbackCreatedDirectory(pinned, firstCreated);
+            if (isWorkspaceRootError(err)) {
+                throw storeError("workspace_root_changed", err.message, err);
+            }
+            throw err;
+        }
         const file = await open(join(dir, "events.jsonl"), "a+");
         const originalSize = (await file.stat()).size;
         let boundary = "before-ledger-append";
@@ -506,7 +626,14 @@ export class BearingStore {
         }
     }
     async truncateLedger(runId) {
-        const file = await open(join(this.runDir(runId), "events.jsonl"), "r+");
+        const pinned = await this.ensureWorkspaceRoot();
+        const path = join(this.runDir(runId), "events.jsonl");
+        await assertContained(pinned, path).catch((err) => {
+            if (isWorkspaceRootError(err))
+                throw storeError("workspace_root_changed", err.message, err);
+            throw err;
+        });
+        const file = await open(path, "r+");
         try {
             await file.truncate(0);
             await file.sync();
@@ -516,7 +643,14 @@ export class BearingStore {
         }
     }
     async deleteUnlocked(runId) {
-        await rm(this.runDir(runId), { recursive: true, force: true });
+        const pinned = await this.ensureWorkspaceRoot();
+        const dir = this.runDir(runId);
+        await assertContained(pinned, dir).catch((err) => {
+            if (isWorkspaceRootError(err))
+                throw storeError("workspace_root_changed", err.message, err);
+            throw err;
+        });
+        await rm(dir, { recursive: true, force: true });
     }
     replayLedger(events) {
         try {
@@ -530,8 +664,25 @@ export class BearingStore {
         await this.writeSnapshotBody(runId, snapshotBody(state));
     }
     async writeSnapshotBody(runId, body) {
+        const pinned = await this.ensureWorkspaceRoot();
         const dir = this.runDir(runId);
+        await assertContained(pinned, dir).catch((err) => {
+            if (isWorkspaceRootError(err))
+                throw storeError("workspace_root_changed", err.message, err);
+            throw err;
+        });
         const temp = join(dir, "snapshot.json.tmp");
+        await assertContained(pinned, temp).catch((err) => {
+            if (isWorkspaceRootError(err))
+                throw storeError("workspace_root_changed", err.message, err);
+            throw err;
+        });
+        const target = join(dir, "snapshot.json");
+        await assertContained(pinned, target).catch((err) => {
+            if (isWorkspaceRootError(err))
+                throw storeError("workspace_root_changed", err.message, err);
+            throw err;
+        });
         const bytes = `${JSON.stringify({ ...body, hash: digest(canonicalStringify(body)) })}\n`;
         let boundary = "before-snapshot-temp-write";
         try {
@@ -611,6 +762,8 @@ function snapshotBody(state) {
         executionRecommendation: state.executionRecommendation,
         executionApproval: state.executionApproval,
         ...(state.journeyCheckpoint ? { journeyCheckpoint: state.journeyCheckpoint } : {}),
+        ...(state.legacyRoleRoutes ? { legacyRoleRoutes: state.legacyRoleRoutes } : {}),
+        ...(state.legacyExecutionContract ? { legacyExecutionContract: state.legacyExecutionContract } : {}),
     };
 }
 function snapshotProjectionBody(snapshot) {
@@ -631,6 +784,8 @@ function stateFromSnapshot(snapshot) {
         executionRecommendation: snapshot.executionRecommendation,
         executionApproval: snapshot.executionApproval,
         journeyCheckpoint: snapshot.journeyCheckpoint ?? null,
+        legacyRoleRoutes: snapshot.legacyRoleRoutes ?? null,
+        legacyExecutionContract: snapshot.legacyExecutionContract ?? null,
     });
 }
 function stateFromCompactedSnapshot(snapshot) {
@@ -724,6 +879,9 @@ function validSnapshotShape(value) {
         (value.executionRecommendation === null || isObject(value.executionRecommendation)) &&
         (value.executionApproval === null || isObject(value.executionApproval)) &&
         (value.journeyCheckpoint === undefined || value.journeyCheckpoint === null || isObject(value.journeyCheckpoint)) &&
+        (value.legacyRoleRoutes === undefined || value.legacyRoleRoutes === null ||
+            (Array.isArray(value.legacyRoleRoutes) && value.legacyRoleRoutes.every((route) => isObject(route)))) &&
+        (value.legacyExecutionContract === undefined || value.legacyExecutionContract === null || isObject(value.legacyExecutionContract)) &&
         (value.pendingDecision === null ||
             (isObject(value.pendingDecision) && typeof value.pendingDecision.decisionId === "string" &&
                 typeof value.pendingDecision.question === "string")) &&

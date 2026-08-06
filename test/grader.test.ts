@@ -84,6 +84,36 @@ describe("grader rubric and arithmetic", () => {
     expect(graderVerdict({ ...mixed, scores, verdict: "weak" })).toBe("weak");
   });
 
+  it("requires weighted aggregate >= 3.0 and every individual dimension >= 3.0 to pass (issue 98)", () => {
+    const highAvgLowDim = report(4);
+    const scoresHighAvg = highAvgLowDim.scores.map((score) =>
+      score.dimensionId === "residual-risk-and-confidence" ? { ...score, level: 2 as 0 | 1 | 2 | 3 | 4 } : score
+    );
+    expect(graderVerdict({ ...highAvgLowDim, scores: scoresHighAvg, verdict: "weak" })).toBe("weak");
+
+    const lowAvg = report(3);
+    const scoresLowAvg = lowAvg.scores.map((score) =>
+      score.dimensionId === "residual-risk-and-confidence" ? { ...score, level: 2 as 0 | 1 | 2 | 3 | 4 } : score
+    );
+    expect(graderVerdict({ ...scoresLowAvg ? { ...lowAvg, scores: scoresLowAvg, verdict: "weak" } : lowAvg })).toBe("weak");
+  });
+
+  it("enforces a strict 3.0 pass floor rejecting sub-3.0 averages in the [2.5, 3.0) band", () => {
+    const unsafeReport = report(3);
+    const unsafeScores = unsafeReport.scores.map((s) => s.dimensionId === "residual-risk-and-confidence" ? { ...s, level: 0 as const } : s);
+    expect(graderVerdict({ ...unsafeReport, scores: unsafeScores })).toBe("weak");
+
+    const deficientReport = report(3);
+    const deficientScores = deficientReport.scores.map((s) => s.dimensionId === "correctness-and-requirement-fit" ? { ...s, level: 1 as const } : s);
+    expect(graderVerdict({ ...deficientReport, scores: deficientScores })).toBe("weak");
+
+    const sub3Report = report(3);
+    const sub3Scores = sub3Report.scores.map((s) => s.dimensionId === "scope-discipline-and-minimal-change" ? { ...s, level: 2 as const } : s);
+    expect(graderVerdict({ ...sub3Report, scores: sub3Scores })).toBe("weak");
+
+    expect(parseGraderReport({ ...unsafeReport, scores: unsafeScores, verdict: "acceptable" }, CONTRACT_HASH, APPROVED_SCOPE_IDS)).toEqual({ ok: false, reason: "verdict_mismatch" });
+  });
+
   it("accepts a complete report bound to the approved contract hash", () => {
     expect(parseGraderReport(report(), CONTRACT_HASH, APPROVED_SCOPE_IDS)).toEqual({ ok: true, value: report() });
   });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1016,5 +1016,27 @@ describe("ledger validation", () => {
     const corrupted = `${JSON.stringify({ ...body, hash: hashEvent(body) })}\n`;
     await writeFile(path, corrupted, "utf8");
     await expect(store(dir).load(RUN)).rejects.toMatchObject({ code: "corrupt_ledger" });
+  });
+
+  it("throws workspace_root_changed on .bearing symlink swap during store operations", async () => {
+    const dir = await root();
+    const durable = store(dir);
+    await acceptedCreate(dir);
+
+    // Swap .bearing to a symlink to external dir
+    const external = join(tmpdir(), `test-ext-store-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(external, { recursive: true });
+    const bearing = join(dir, ".bearing");
+    await rm(bearing, { recursive: true, force: true });
+    await symlink(external, bearing);
+
+    try {
+      await expect(durable.load(RUN)).rejects.toMatchObject({ code: "workspace_root_changed" });
+      await expect(durable.list()).rejects.toMatchObject({ code: "workspace_root_changed" });
+      await expect(durable.retentionPlan({ maxCompletedRuns: 0 }, CLEANLINESS_PROOF)).rejects.toMatchObject({ code: "workspace_root_changed" });
+      await expect(durable.delete(RUN)).rejects.toMatchObject({ code: "workspace_root_changed" });
+    } finally {
+      await rm(external, { recursive: true, force: true });
+    }
   });
 });

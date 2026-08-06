@@ -15,6 +15,7 @@ import {
 } from "../store/bearing-store.js";
 import { ignoresBearingDirectory } from "./bootstrap.js";
 import { assessRepositorySafety } from "./safety.js";
+import { assertContained, assertWorkspaceRoot, isWorkspaceRootError, pinWorkspaceRoot } from "./workspace-root.js";
 
 const BEARING_DIR = ".bearing";
 const TEMP_PREFIX = ".bearing.tmp-";
@@ -216,11 +217,14 @@ export async function writeWorkspaceBusyLease(
     return;
   }
   const workspace = await safeWorkspaceDirectory(root, true);
+  const pinned = await pinWorkspaceRoot(root);
   const leasePath = join(workspace, BUSY_LEASE_FILE);
   const expiresAt = new Date(now.getTime() + BUSY_LEASE_TTL_MS).toISOString();
   if (!Number.isFinite(now.getTime())) throw new Error("busy lease clock is invalid");
   const body = `${JSON.stringify({ schemaVersion: 1, runIds: uniqueRunIds, expiresAt })}\n`;
   const temporary = join(workspace, `.${BUSY_LEASE_FILE}.${randomUUID()}.tmp`);
+  await assertContained(pinned, temporary);
+  await assertContained(pinned, leasePath);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(temporary, "wx", 0o600);
@@ -249,6 +253,12 @@ async function safeWorkspaceDirectory(repository: string, create: boolean): Prom
   }
   if (!entry.isDirectory() || entry.isSymbolicLink() || await realpath(workspace) !== workspace) {
     throw new Error("Bearing workspace is symlinked or resolves outside the selected repository");
+  }
+  try {
+    const pinned = await pinWorkspaceRoot(repository);
+    await assertWorkspaceRoot(pinned);
+  } catch (err) {
+    throw new Error("Bearing workspace is symlinked or resolves outside the selected repository", { cause: err });
   }
   return workspace;
 }
@@ -433,11 +443,12 @@ function parseWorktrees(output: string): readonly WorktreeRecord[] {
 async function busyLeaseState(repository: string, now: Date): Promise<"idle" | "busy"> {
   const workspace = join(repository, BEARING_DIR);
   try {
-    const workspaceEntry = await lstat(workspace);
-    if (!workspaceEntry.isDirectory() || workspaceEntry.isSymbolicLink()) {
-      throw new Error("busy lease is unreadable or ambiguous");
-    }
+    const pinned = await pinWorkspaceRoot(repository);
+    await assertWorkspaceRoot(pinned);
   } catch (error) {
+    if (isWorkspaceRootError(error)) {
+      throw new Error("busy lease is unreadable or ambiguous", { cause: error });
+    }
     if (isNodeError(error, "ENOENT")) return "idle";
     throw error;
   }

@@ -39,6 +39,7 @@ export interface CommandEvidence {
 export interface FocusContext {
   readonly envelope: FocusEnvelope;
   readonly reviewPath: string;
+  readonly reviewBefore: string;
   readonly beforeHead: string | null;
   readonly before: ReadonlyMap<string, string>;
 }
@@ -318,6 +319,7 @@ export async function createFocusContext(input: {
 }): Promise<FocusContextResult> {
   if (!safePath(input.planDirectory)) return reject("input_invalid", { field: "planDirectory" });
   if (!boundedText(input.objective)) return reject("input_invalid", { field: "objective" });
+  if (input.role === "navigator" && input.currentSlice === undefined) return reject("input_invalid", { field: "currentSlice" });
   const planPath = posix.join(input.planDirectory, "plan-spec.md");
   const implementationPath = posix.join(input.planDirectory, "implementation.md");
   const seitPath = posix.join(input.planDirectory, "seit.md");
@@ -335,6 +337,7 @@ export async function createFocusContext(input: {
   if (!boundedText(blocker)) return reject("input_invalid", { field: "currentBlocker" });
   if (!boundedText(gate, 512)) return reject("input_invalid", { field: "gateFailureFingerprint" });
   const reviewPath = posix.join(input.planDirectory, "review.html");
+  const reviewBefore = await fingerprint(input.root, reviewPath);
   return { ok: true, value: {
     envelope: {
       version: 1,
@@ -347,6 +350,7 @@ export async function createFocusContext(input: {
       prohibition: "Do not perform unrelated work.",
     },
     reviewPath,
+    reviewBefore,
     beforeHead: snapshot.head,
     before: snapshot.paths,
   } };
@@ -363,13 +367,19 @@ function validEvidence(required: readonly string[], evidence: readonly CommandEv
 }
 
 export async function validateFocusCompletion(context: FocusContext, root: string, artifacts: readonly string[], evidence: readonly CommandEvidence[]): Promise<FocusCompletion> {
-  const after = await snapshotGitState(root, context.beforeHead);
+  const [after, reviewAfter] = await Promise.all([
+    snapshotGitState(root, context.beforeHead),
+    fingerprint(root, context.reviewPath),
+  ]);
   if (!after) return { ok: false, reason: "git_state" };
   if (after.head !== context.beforeHead && after.committedPaths.size === 0) return { ok: false, reason: "git_state" };
-  const changed = [...new Set([...context.before.keys(), ...after.paths.keys(), ...after.committedPaths])]
-    .filter((path) => after.committedPaths.has(path) || context.before.get(path) !== after.paths.get(path))
-    .sort();
+  const changed = [...new Set([
+    ...[...new Set([...context.before.keys(), ...after.paths.keys(), ...after.committedPaths])]
+      .filter((path) => after.committedPaths.has(path) || context.before.get(path) !== after.paths.get(path)),
+    ...(reviewAfter !== context.reviewBefore ? [context.reviewPath] : []),
+  ])].sort();
   const allowed = new Set([...context.envelope.allowedPaths, context.reviewPath]);
+  if (artifacts.some((path) => !allowed.has(path))) return { ok: false, reason: "path_outside_write_set" };
   if (changed.some((path) => !allowed.has(path))) return { ok: false, reason: "path_outside_write_set" };
   if (changed.some((path) => !artifacts.includes(path))) return { ok: false, reason: "artifact_missing" };
   // The receipt's artifact list and the paths that actually changed must be the SAME set, not merely

@@ -11,6 +11,7 @@ const exec = promisify(execFile);
 describe("Bearing plugin contract", () => {
   it("declares matching Codex and Claude Code plugins", async () => {
     const codexManifest = JSON.parse(await read("../.codex-plugin/plugin.json"));
+    const codexMcp = JSON.parse(await read("../.mcp.json"));
     const claudeManifest = JSON.parse(await read("../.claude-plugin/plugin.json"));
     const marketplace = JSON.parse(await read("../.claude-plugin/marketplace.json"));
     expect(codexManifest).toMatchObject({
@@ -39,12 +40,23 @@ describe("Bearing plugin contract", () => {
     expect(packageJson.author).toBe("William Rumph / AlphaZede");
     expect(packageJson.license).toBe("MIT OR Apache-2.0");
     expect(packageJson.files).toEqual(expect.arrayContaining([
-      ".claude-plugin/", ".codex-plugin/", "plugin-skills/", "skills/", "hooks/", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE",
+      ".mcp.json", ".claude-plugin/", ".codex-plugin/", "plugin-skills/", "skills/", "hooks/", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE",
     ]));
     expect(codexManifest.license).toBe(packageJson.license);
     expect(claudeManifest.license).toBe(packageJson.license);
     expect(packageJson.files).not.toContain("commands/");
     await expect(read("../commands/bearing.toml")).rejects.toMatchObject({ code: "ENOENT" });
+    // Codex resolves the companion descriptor from the installed plugin root.
+    expect(codexManifest.mcpServers).toBe("./.mcp.json");
+    expect(codexMcp.mcpServers.bearing).toEqual({
+      command: "node",
+      args: ["./dist/cli.js", "mcp"],
+      cwd: ".",
+    });
+    expect(claudeManifest.mcpServers.bearing.command).toBe("node");
+    expect(claudeManifest.mcpServers.bearing.args[0]).toMatch(/^\$\{CLAUDE_PLUGIN_ROOT\}\/dist\/cli\.js$/);
+    expect(claudeManifest.mcpServers.bearing.args[1]).toBe("mcp");
+    expect(codexMcp.mcpServers.bearing.args[0]).not.toBe(claudeManifest.mcpServers.bearing.args[0]);
   });
 
   it("ships a private vulnerability-reporting policy", async () => {
@@ -65,8 +77,10 @@ describe("Bearing plugin contract", () => {
     expect(matches("Plan a bounded repository repair")).toBe(false);
     expect(skillProse).toContain("If mode is named, do not ask again");
     expect(skillProse).toContain("How would you like to use Bearing: guided workflow here, browser UI, or headless CLI?");
-    expect(skillProse).toContain("keep PATH first");
+    expect(skillProse).toContain("run `node <bundled dist/cli.js> resolve-cli`");
     expect(skillProse).toContain("`../../dist/cli.js` relative to this `SKILL.md`");
+    expect(skillProse).toContain("used only when the receipt's `reason` is `path_preferred`");
+    expect(skillProse).toContain("never silently fall back to an older or unverified PATH binary");
     expect(skillProse).toContain("Never search the current or target repository");
     expect(skillProse).toContain("Never reuse another or stale installation's listener");
     expect(skillProse).toContain("filesystem-wide plugin discovery");
@@ -105,8 +119,17 @@ describe("Bearing plugin contract", () => {
       const skill = await read(`../plugin-skills/${name}/SKILL.md`);
       const skillProse = prose(skill);
       expect(skill).toMatch(new RegExp(`^---\\nname: ${name}\\ndescription: [^\\n]+\\n---\\n`));
-      expect(skillProse).toContain("bearing focus begin --request");
-      expect(skillProse).toContain("bearing focus validate --run");
+      expect(skillProse).toContain(`Persist a bounded request containing only \`role: "${name}"\``);
+      expect(skillProse).toContain("under the repository's existing `.bearing/focus/` area");
+      expect(skillProse).toContain("call the `bearing_focus_begin` MCP tool with `repository` and that exact `requestPath`");
+      expect(skillProse).toContain("Keep its returned `focusRunId` and envelope");
+      expect(skillProse).toContain("persist a receipt containing every changed artifact");
+      expect(skillProse).toContain("call the `bearing_focus_validate` MCP tool with `repository`, the kept `focusRunId`, and that exact `receiptPath`");
+      expect(skillProse).toContain("is unavailable, return `MCP_SETUP_REQUIRED` and stop.");
+      expect(skillProse).toContain("Never silently fall back to a shell command, an executable, or parsed CLI output.");
+      expect(skillProse).not.toContain("bearing focus begin --request");
+      expect(skillProse).not.toContain("bearing focus validate --run");
+      expect(skillProse).not.toContain("dist/cli.js");
       expect(skillProse).toContain(`../../skills/${name}/SKILL.md`);
       expect(skillProse).toContain("Do not claim completion unless it returns `ok: true`");
     }
@@ -162,10 +185,11 @@ describe("Bearing plugin contract", () => {
     const rawHeadlessJourney = rawReadme.split("## Headless journey", 2)[1]!.split("## Real browser journey", 1)[0]!;
     const readme = prose(rawHeadlessJourney);
     const rawSkill = await read("../plugin-skills/bearing/SKILL.md");
+    expect(rawSkill).toContain("## Guided workflow");
     expect(rawSkill).toContain("## Browser UI");
-    expect(rawSkill).toContain("## Guided workflow or headless CLI");
-    const rawBrowserSkill = rawSkill.split("## Browser UI", 2)[1]!.split("## Guided workflow or headless CLI", 1)[0]!;
-    const rawHeadlessSkill = rawSkill.split("## Guided workflow or headless CLI", 2)[1]!;
+    expect(rawSkill).toContain("## Headless CLI");
+    const rawBrowserSkill = rawSkill.split("## Browser UI", 2)[1]!.split("## Headless CLI", 1)[0]!;
+    const rawHeadlessSkill = rawSkill.split("## Headless CLI", 2)[1]!;
     const skill = prose(rawHeadlessSkill);
     expect(rawBrowserSkill).toContain("start --detach");
     expect(rawHeadlessSkill).not.toContain("start --detach");
@@ -205,6 +229,17 @@ describe("Bearing plugin contract", () => {
       expect(surface).not.toMatch(/okf_status|BRAN|bearer\s+[A-Za-z0-9._-]+/i);
     }
     expect(rawSkill).toMatch(/guided workflow.*headless CLI/i);
+    // Guided mode is MCP-only: it must never be described as falling back to the CLI.
+    const rawGuidedSkill = rawSkill.split("## Guided workflow", 2)[1]!.split("## Browser UI", 1)[0]!;
+    const guided = prose(rawGuidedSkill);
+    expect(guided).toContain("bearing_attach");
+    expect(guided).toContain("bearing_transition");
+    expect(guided).toContain("bearing_handoff");
+    expect(guided).toContain("Never silently fall back to the CLI");
+    expect(guided).toContain("typed setup blocker naming the missing `bearing` MCP server");
+    expect(guided).toContain("`revision` back as `expectedRevision`");
+    expect(rawGuidedSkill).not.toContain("bearing journey ");
+    expect(rawGuidedSkill).not.toContain("start --detach");
     expect(rawHeadlessJourney).not.toContain("--stage repository-fit");
     expect(rawHeadlessJourney).toContain("--stage set-bearings");
     expect(rawHeadlessJourney.indexOf("journey decide")).toBeLessThan(

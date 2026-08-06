@@ -11,6 +11,7 @@
   "license": "MIT OR Apache-2.0",
   "skills": "./plugin-skills/",
   "hooks": "./hooks/claude-codex-hooks.json",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Bearing",
     "shortDescription": "Local planning-first repository workflow.",

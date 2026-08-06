@@ -68,5 +68,20 @@ export function validateScope(scope) {
         addReason("unsupported_readiness_claim");
     }
     const verdict = composeValidatorVerdict(reasons);
-    return { verdict, reasons, escalation: deriveValidatorEscalation(verdict, reasons) };
+    const completedRequirements = new Map();
+    for (const slice of scope.slices) {
+        if (slice.completion?.ok !== true)
+            continue;
+        const requirements = completedRequirements.get(slice.sliceId) ?? new Set();
+        for (const requirementId of slice.requirementIds)
+            requirements.add(requirementId);
+        completedRequirements.set(slice.sliceId, requirements);
+    }
+    const completedSlices = [...completedRequirements.entries()]
+        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .map(([sliceId, requirementIds]) => ({
+        sliceId,
+        requirementIds: [...requirementIds].sort((left, right) => left < right ? -1 : left > right ? 1 : 0),
+    }));
+    return { verdict, reasons, escalation: deriveValidatorEscalation(verdict, reasons), completedSlices };
 }

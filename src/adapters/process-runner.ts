@@ -205,7 +205,6 @@ export class NodeProcessRunner implements ProcessRunner {
         const reasoning = match[2].toLowerCase();
         return [{ model: line, label: line, reasoningLevels: [reasoning], defaultReasoning: reasoning }];
       }).slice(0, 64);
-      if (route.provider === "grok") return [{ model: "grok-build", label: "Grok Build", reasoningLevels: route.reasoningLevels, defaultReasoning: route.reasoningLevels.includes(current.reasoning) ? current.reasoning : "medium" }];
       if (route.provider === "opencode") return this.inspectRoute(route, ["models"], repositoryPath).filter((line) => /^[a-z0-9._-]+\/[A-Za-z0-9._:/-]+$/.test(line)).slice(0, 64).map((model) => {
         const levels = opencodeReasoning(model.split("/", 1)[0] ?? "");
         return { model, label: model, reasoningLevels: levels, defaultReasoning: levels[0] };

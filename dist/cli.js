@@ -7,15 +7,19 @@ import { isAbsolute, posix, relative, resolve, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { NodeProcessRunner } from "./adapters/process-runner.js";
 import { exportContributionBundle, } from "./improvement/improvement-export.js";
+import { buildRecommendationProposal, } from "./improvement/improvement-proposal.js";
 import { nativePlanDirectoryPath, planDirectoryValid } from "./journey/plan-directory.js";
 import { validatePlan } from "./journey/planning-validator.js";
 import { REASONING_TIERS } from "./profile/reasoning-policy.js";
 import { normalizeReasoningTier } from "./profile/profile.js";
 import { beginStandaloneFocus, validateStandaloneFocus } from "./journey/standalone-focus.js";
+import { resolveBearingCli } from "./repository/executable-path.js";
 import { workspaceCompact, workspaceDoctor, workspacePrune, workspaceStatus, } from "./repository/workspace-tools.js";
 import { BearingStore } from "./store/bearing-store.js";
 import { LocalSessionService, buildImprovementReport, buildImprovementHandoffFacts, createRequestHandler, executeHeadlessJourney, renderImprovementHandoff, } from "./server/local-session.js";
 import { RECORD_JOURNEY_CHECKPOINT_STAGES } from "./contracts/run.js";
+import { RETRY_WARRANTS } from "./execution/retry-control.js";
+import { createDispatcher, serveStdio } from "./mcp/server.js";
 const REASONING_VALUES = [...REASONING_TIERS, "default", "off", "none", "xhigh", "ultra", "thinking"];
 const USAGE = [
     "usage: bearing start [--detach] [--no-open] [safe shared overrides]",
@@ -25,9 +29,10 @@ const USAGE = [
     "       bearing journey create --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --goal <text>",
     "       bearing journey (resume|status|approve-route|confirm-amendment) --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id>",
     "       bearing journey decide --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --answer <text>",
-    "       bearing journey select-execution --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --mode <explorer|expedition> --review-cadence <slice|phase|end>",
+    "       bearing journey select-execution --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --mode <explorer|expedition> --review-cadence <slice|phase|end> [--slice <id>]",
     "       bearing journey select-explorer --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --review-cadence <slice|phase|end>",
-    "       bearing journey progress --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --stage <stage>",
+    "       bearing journey progress --repo <abs> --provider <id> --model <id> --reasoning <level> --run <id> --stage <stage> [--retry-warrant <w> --expected-revision <n>]",
+    "       bearing mcp",
     "       bearing plan validate <plan-directory>",
     "       bearing workspace status [--repo <abs>]",
     "       bearing workspace doctor [--scan <abs>...] [--relocate <abs>]",
@@ -104,7 +109,7 @@ export function parseJourneyArgs(args) {
     const values = new Map();
     for (let index = 2; index < args.length; index += 2) {
         const name = args[index], value = args[index + 1];
-        if (!/^--(?:repo|provider|model|reasoning|run|goal|answer|mode|review-cadence|stage)$/.test(name ?? "") || value === undefined || value.startsWith("--") || values.has(name))
+        if (!/^--(?:repo|provider|model|reasoning|run|goal|answer|mode|review-cadence|stage|slice|retry-warrant|expected-revision)$/.test(name ?? "") || value === undefined || value.startsWith("--") || values.has(name))
             return { ok: false };
         values.set(name, value);
     }
@@ -113,6 +118,16 @@ export function parseJourneyArgs(args) {
     if (!repository || !isAbsolute(repository) || !safeJourneyText(provider) || !safeJourneyText(model) || !JOURNEY_REASONING.has(reasoning ?? "") || !runId || !/^[A-Za-z0-9_-]{1,128}$/.test(runId))
         return { ok: false };
     const common = { action, repository, provider, model, reasoning: reasoning, runId };
+    const rw = values.get("--retry-warrant");
+    const retryWarrant = rw && RETRY_WARRANTS.includes(rw) ? rw : undefined;
+    if (rw !== undefined && retryWarrant === undefined)
+        return { ok: false };
+    const revisionText = values.get("--expected-revision");
+    const expectedRevision = revisionText !== undefined && /^(?:0|[1-9][0-9]*)$/.test(revisionText) && Number.isSafeInteger(Number(revisionText))
+        ? Number(revisionText)
+        : undefined;
+    if (revisionText !== undefined && expectedRevision === undefined)
+        return { ok: false };
     if (action === "create") {
         const goal = values.get("--goal");
         return values.size === 6 && safeJourneyText(goal) ? { ok: true, ...common, goal } : { ok: false };
@@ -126,16 +141,23 @@ export function parseJourneyArgs(args) {
         return values.size === 6 && (reviewCadence === "slice" || reviewCadence === "phase" || reviewCadence === "end") ? { ok: true, ...common, reviewCadence } : { ok: false };
     }
     if (action === "select-execution") {
-        const executionMode = values.get("--mode"), reviewCadence = values.get("--review-cadence");
-        return values.size === 7
+        const executionMode = values.get("--mode"), reviewCadence = values.get("--review-cadence"), currentSlice = values.get("--slice");
+        return values.size === 7 + (currentSlice === undefined ? 0 : 1)
             && (executionMode === "explorer" || executionMode === "expedition")
             && (reviewCadence === "slice" || reviewCadence === "phase" || reviewCadence === "end")
-            ? { ok: true, ...common, executionMode, reviewCadence }
+            && (currentSlice === undefined || executionMode === "expedition" && /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/.test(currentSlice))
+            ? { ok: true, ...common, executionMode, reviewCadence, ...(currentSlice ? { currentSlice } : {}) }
             : { ok: false };
     }
     if (action === "progress") {
         const stage = values.get("--stage");
-        return values.size === 6 && stage !== undefined && JOURNEY_STAGES.has(stage) ? { ok: true, ...common, stage: stage } : { ok: false };
+        const expectedSize = 6 + (rw ? 2 : 0);
+        return values.size === expectedSize
+            && stage !== undefined
+            && JOURNEY_STAGES.has(stage)
+            && ((retryWarrant === undefined && expectedRevision === undefined) || (retryWarrant !== undefined && expectedRevision !== undefined))
+            ? { ok: true, ...common, stage: stage, ...(retryWarrant ? { retryWarrant, expectedRevision } : {}) }
+            : { ok: false };
     }
     return values.size === 5 ? { ok: true, ...common } : { ok: false };
 }
@@ -615,11 +637,13 @@ function contributionAtom(value) {
 }
 function contributionBundle(report) {
     const policyValues = [];
-    for (let index = 0; index < report.recommendation.recommendations.length; index += 1) {
-        if (report.trialVerdicts[index]?.status !== "retain")
+    for (const recommendation of report.recommendation.recommendations) {
+        const built = buildRecommendationProposal(recommendation);
+        if (!built.ok)
             continue;
-        const recommendation = report.recommendation.recommendations[index];
-        if (!recommendation)
+        const ph = built.value.proposalHash;
+        const matching = report.trialVerdicts.find((v) => v.proposalHash === ph);
+        if (matching?.status !== "retain")
             continue;
         policyValues.push({
             surface: recommendation.surface,
@@ -920,6 +944,27 @@ export function run(args, deps = {}) {
             exit(1);
             return undefined;
         });
+    }
+    if (args[0] === "mcp") {
+        if (args.length !== 1) {
+            stderr.write(USAGE);
+            exit(2);
+            return Promise.resolve(undefined);
+        }
+        // stdout is the protocol channel here, so nothing else may ever be written to it.
+        return (deps.mcpServer ?? (() => serveStdio(createDispatcher())))().then(() => undefined);
+    }
+    if (args[0] === "resolve-cli") {
+        if (args.length !== 1) {
+            stderr.write(USAGE);
+            exit(2);
+            return Promise.resolve(undefined);
+        }
+        // Deterministic guided-skill/headless-CLI entry (issue 71): reports which Bearing
+        // CLI is effective -- bundled or PATH -- and never silently prefers a stale PATH
+        // install once compatibility is proven false.
+        stdout.write(`${JSON.stringify(resolveBearingCli())}\n`);
+        return Promise.resolve(undefined);
     }
     const parsed = parseStartArgs(args);
     if (!parsed.ok) {

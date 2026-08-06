@@ -15,6 +15,9 @@ const ESCALATION_TARGETS = {
     "cross-phase": "navigator",
     "contract-change": "owner",
 };
+export function retryWarrantAllowed(scope, warrant) {
+    return warrant !== "approved_amendment" || scope === "contract-change";
+}
 export function failureFingerprint(input) {
     const canonical = canonicalStringify({
         stage: input.stage,
@@ -44,6 +47,10 @@ function lastEquivalentAdmission(ledger, fingerprint) {
     return undefined;
 }
 export function admitRetry(ledger, attempt) {
+    if (attempt.warrant !== undefined && !retryWarrantAllowed(attempt.scope, attempt.warrant)) {
+        const reason = "retry_warrant_scope_mismatch";
+        return { ok: false, reason, ledger: append(ledger, attempt, reason) };
+    }
     const previous = lastEquivalentAdmission(ledger, attempt.fingerprint);
     const tierRaised = previous !== undefined
         && REASONING_TIERS.indexOf(attempt.reasoningTier) > REASONING_TIERS.indexOf(previous.reasoningTier);

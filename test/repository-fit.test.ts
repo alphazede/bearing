@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
+  canonicalizeFitOwnerAnswer,
   isFitDiagnostic,
   validateFitReceipt,
   type FitAssumption,
@@ -48,6 +49,75 @@ const diagnostics = [
 ] as const satisfies readonly [FitDiagnostic["check"], FitDiagnostic["field"]][];
 
 describe("repository fit", () => {
+  it("canonicalizes supported affirmations without accepting ambiguous prose", () => {
+    for (const answer of ["Confirm", "yes", "YES!", "approved", "looks good.", "I confirm all of these"]) {
+      expect(canonicalizeFitOwnerAnswer(answer)).toEqual({ ok: true, answer: "Confirm" });
+    }
+    expect(canonicalizeFitOwnerAnswer("Use the repository I mentioned")).toEqual({
+      ok: false,
+      error: "repository_fit_answer_invalid",
+      remedy: 'Answer "Confirm", enter an exact docs/plans/... path, or answer "Decline".',
+      correctionAction: "decide",
+    });
+  });
+
+  it("canonicalizes relative and same-root absolute plan paths", () => {
+    expect(canonicalizeFitOwnerAnswer("docs/plans/bearing-improvements/phase-2a", "/workspace/repository"))
+      .toEqual({ ok: true, answer: "docs/plans/bearing-improvements/phase-2a" });
+    expect(canonicalizeFitOwnerAnswer(
+      "/workspace/repository/docs/plans/bearing-improvements/phase-2a",
+      "/workspace/repository",
+    ))
+      .toEqual({ ok: true, answer: "docs/plans/bearing-improvements/phase-2a" });
+    expect(canonicalizeFitOwnerAnswer(
+      String.raw`C:\workspace\repository\docs\plans\bearing-improvements\phase-2a`,
+      String.raw`C:\workspace\repository`,
+    ))
+      .toEqual({ ok: true, answer: "docs/plans/bearing-improvements/phase-2a" });
+  });
+
+  it("rejects a Windows absolute plan path under a different repository", () => {
+    expect(canonicalizeFitOwnerAnswer(
+      String.raw`C:\workspace\other\docs\plans\bearing-improvements\phase-2a`,
+      String.raw`C:\workspace\repository`,
+    )).toEqual({
+      ok: false,
+      error: "repository_fit_answer_invalid",
+      remedy: 'Answer "Confirm", enter an exact docs/plans/... path, or answer "Decline".',
+      correctionAction: "decide",
+    });
+  });
+
+  it("rejects a POSIX absolute plan path under a different repository", () => {
+    expect(canonicalizeFitOwnerAnswer(
+      "/workspace/other/docs/plans/bearing-improvements/phase-2a",
+      "/workspace/repository",
+    )).toEqual({
+      ok: false,
+      error: "repository_fit_answer_invalid",
+      remedy: 'Answer "Confirm", enter an exact docs/plans/... path, or answer "Decline".',
+      correctionAction: "decide",
+    });
+  });
+
+  it("retains specific containment diagnostics around the absolute-path case", () => {
+    for (const { changed, diagnostic } of [
+      { changed: { repository: "/workspace/other" }, diagnostic: ["assumption_repository", "repository"] as const },
+      { changed: { repository: String.raw`C:workspace\repository` }, diagnostic: ["assumption_repository", "repository"] as const },
+      { changed: { planDirectory: "docs/plans/../escape" }, diagnostic: ["assumption_plan_directory", "planDirectory"] as const },
+      {
+        changed: { evidence: [{ kind: "manifest", path: "/workspace/outside/package.json", detail: "Outside scope." }] },
+        diagnostic: ["evidence_containment", "path"] as const,
+      },
+    ]) {
+      expect(receipt({
+        ok: true,
+        assumption: { ...assumption, ...changed },
+        question: "Use this repository and plan directory?",
+      })).toEqual(malformed(diagnostic[0], diagnostic[1]));
+    }
+  });
+
   it("accepts only emitted bounded check-and-field diagnostics", () => {
     for (const [check, field] of diagnostics) expect(isFitDiagnostic({ check, field })).toBe(true);
     expect(isFitDiagnostic({ check: "receipt_ok", field: "detail" })).toBe(false);

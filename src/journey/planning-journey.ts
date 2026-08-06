@@ -3,17 +3,19 @@ import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
-import { BUILTIN_ROUTES, createAgentAdapter, type ProcessActivity, type ProcessRunner, type RouteDescriptor } from "../adapters/adapters.js";
+import { BUILTIN_ROUTES, createAgentAdapter, MAX_BACKGROUND_BRIEF_CHARS, type ProcessActivity, type ProcessRunner, type RouteDescriptor } from "../adapters/adapters.js";
+import { validateExecutionRoleBoundary, validateReviewerAuthorship } from "../execution/execution-mode.js";
 import type { ResolvedRun, Selection } from "../profile/profile.js";
 import { createFocusContext, snapshotGitState, validateFocusCompletion, type CommandEvidence, type FocusContext, type FocusContextResult } from "./focus-mode.js";
 import { resolvePlanDirectory } from "./plan-resolution.js";
-import { artifactComplete, parsePlanDocuments, structuralFindings, type PlanDocuments, type StructuralFindingCode } from "./plan-structure.js";
+import { artifactComplete, parsePlanDocuments, sectionPresent, structuralFindings, type PlanDocuments, type StructuralFindingCode } from "./plan-structure.js";
 import { advancePlanning, next, planningValidationSignal, type PlanningSignal, type PlanningState, type PlanningValidationRecord } from "./planning-state.js";
 import { validatePlan, type Finding } from "./planning-validator.js";
 import { routeRecon, type ReconBrief, type ReconReport } from "./recon.js";
 import { FIT_EVIDENCE_KINDS, fitMalformed, validateFitReceipt, type FitAssumption, type FitDiagnostic, type FitReceipt } from "./repository-fit.js";
 import { setBearingsWorkspace } from "./repository-map.js";
 import { RECORD_JOURNEY_CHECKPOINT_STAGES } from "../contracts/run.js";
+import { ROLE_KINDS, roleRoutesShape, SURVEYOR_FALLBACK_ROUTE, type RoleRoute } from "../contracts/execution-contract.js";
 import { validateScope, type ValidatorReport, type ValidatorScope } from "../verification/validator.js";
 
 // ponytail: derived from the ledger tuple rather than restated. A hand-written
@@ -220,16 +222,19 @@ export interface JourneyRequest {
   readonly requestedPlanDirectory?: string;
   readonly reviewPrompt?: string;
   readonly gateFailureFingerprint?: string;
+  readonly currentSlice?: string;
   readonly focusAmendmentConfirmed?: boolean;
   readonly providerSessionId?: string;
 }
-export type JourneyFailureCode = "input_invalid" | "plan_directory_invalid" | "plan_directory_absent" | "plan_directory_ambiguous" | "selection_mismatch" | "crewmate_unavailable" | "adapter_failed" | "session_unavailable" | "cancelled" | "interrupted" | "token_budget" | "result_missing" | "result_malformed" | "artifact_invalid" | "focus_invalid" | "focus_amendment_required" | "completion_invalid" | "fit_unavailable" | "fit_malformed" | "fit_undecidable";
+export type JourneyFailureCode = "input_invalid" | "plan_directory_invalid" | "plan_directory_absent" | "plan_directory_ambiguous" | "selection_mismatch" | "crewmate_unavailable" | "authority_invalid" | "role_boundary_violation" | "adapter_failed" | "session_unavailable" | "cancelled" | "interrupted" | "token_budget" | "result_missing" | "result_malformed" | "artifact_invalid" | "focus_invalid" | "focus_amendment_required" | "completion_invalid" | "fit_unavailable" | "fit_malformed" | "fit_undecidable";
 const FOCUS_PLAN_SOURCES = ["plan-spec.md", "design.md", "seit.md", "implementation.md"] as const;
 export type FocusPlanSourceName = (typeof FOCUS_PLAN_SOURCES)[number];
 export type FocusPlanHashes = Readonly<Record<FocusPlanSourceName, string>>;
 export interface FocusContractSnapshot {
   readonly context: FocusContext;
   readonly planHashes: FocusPlanHashes;
+  readonly targetRepository: string;
+  readonly planDirectory: string;
 }
 export interface FocusDrift {
   readonly addedAllowedPaths: readonly string[];
@@ -240,6 +245,8 @@ export interface FocusDrift {
   readonly changedRemainingSlices?: { readonly previous: readonly string[]; readonly candidate: readonly string[] };
   readonly changedObjective?: { readonly previous: string; readonly candidate: string };
   readonly changedRole?: { readonly previous: string; readonly candidate: string };
+  readonly changedTargetRepository?: { readonly previous: string; readonly candidate: string };
+  readonly changedPlanDirectory?: { readonly previous: string; readonly candidate: string };
   readonly changedPlanSources: readonly string[];
 }
 export interface PlanningAssignment {
@@ -266,13 +273,34 @@ export interface NextStageEstimate {
   readonly maxMinutes: number;
   readonly basis: string;
 }
+export interface JourneySelectedScope {
+  readonly currentSlice: string;
+  readonly remainingSlices: readonly string[];
+  readonly allowedPaths: readonly string[];
+  readonly seitCommandIds: readonly string[];
+}
+/**
+ * Names the distinct implementation worker Bearing actually dispatched for a
+ * coordinated Expedition slice (issue 93), so a receipt can never be credited
+ * to an unnamed or planner/coordinator authorship. `base` is the exact Git
+ * HEAD the Focus envelope was built from (`"unborn"` for a repository with no
+ * commits yet); `mutationStart` is the instant the pre-dispatch write probe
+ * proved that base was still unchanged, immediately before the worker began.
+ */
+export interface ImplementationProvenance {
+  readonly workerIdentity: string;
+  readonly base: string;
+  readonly focus: string;
+  readonly mutationStart: string;
+}
 export type JourneyResult = (
   | { readonly status: "question"; readonly question?: string; readonly questions?: readonly string[]; readonly fitAssumption?: FitAssumption; readonly tokens: number; readonly nextStageEstimate?: NextStageEstimate }
-  | { readonly status: "action"; readonly summary: string; readonly artifacts: readonly string[]; readonly tokens: number; readonly recon?: JourneyReconResult; readonly planningReview?: PlanningReview; readonly planningValidation?: PlanningValidationRecord; readonly verification?: ValidatorReport; readonly nextStageEstimate?: NextStageEstimate }
+  | { readonly status: "action"; readonly summary: string; readonly artifacts: readonly string[]; readonly tokens: number; readonly recon?: JourneyReconResult; readonly planningReview?: PlanningReview; readonly planningValidation?: PlanningValidationRecord; readonly verification?: ValidatorReport; readonly nextStageEstimate?: NextStageEstimate; readonly ownerDecisionId?: string; readonly ownerDecisionQuestion?: string; readonly ownerDecisionAnswered?: true; readonly implementationProvenance?: ImplementationProvenance }
   | { readonly status: "failure"; readonly code: "focus_amendment_required"; readonly focusDrift: FocusDrift; readonly tokens: number; readonly failureStage?: never }
   | { readonly status: "failure"; readonly code: "fit_malformed"; readonly fitDiagnostic: FitDiagnostic; readonly tokens: number; readonly failureStage?: "map-route" | "recon" | "draft-implementation" }
-  | { readonly status: "failure"; readonly code: Exclude<JourneyFailureCode, "focus_amendment_required" | "fit_malformed">; readonly tokens: number; readonly failureStage?: "map-route" | "recon" | "draft-implementation" }
-) & { readonly sessionContinuity?: "lost" };
+  | { readonly status: "failure"; readonly code: "role_boundary_violation"; readonly mutatedPaths?: readonly string[]; readonly tokens: number; readonly failureStage?: never }
+  | { readonly status: "failure"; readonly code: Exclude<JourneyFailureCode, "focus_amendment_required" | "fit_malformed" | "role_boundary_violation">; readonly tokens: number; readonly failureStage?: "map-route" | "recon" | "draft-implementation"; readonly findings?: readonly Finding[] }
+) & { readonly sessionContinuity?: "lost"; readonly selectedScope?: JourneySelectedScope };
 
 function malformedFitResult(tokens: number, check: FitDiagnostic["check"], field: FitDiagnostic["field"]): Extract<JourneyResult, { readonly code: "fit_malformed" }> {
   return { status: "failure", code: "fit_malformed", fitDiagnostic: fitMalformed(check, field).diagnostic, tokens };
@@ -285,6 +313,16 @@ export type JourneyReconResult =
     readonly brief: ReconBrief;
     readonly report: ReconReport;
   };
+
+/** Smallest shared derivation for the durable free-text decision question shown for recon OWNER_DECISION_REQUIRED. */
+export function reconOwnerDecisionQuestion(recon: { readonly report: ReconReport }): string {
+  const report = recon.report;
+  const keys = ["cost", "architecture", "scope", "risk"] as const;
+  const mat = keys.filter((k) => report.materialChange[k]).join(", ");
+  const rec = report.recommendation ?? "decide";
+  const base = mat ? `Recon material change (${mat}).` : "Recon requires owner decision.";
+  return `${base} Agent recommendation: ${rec}. Enter your free-text decision and rationale to resume the same planning stage.`;
+}
 
 const STAGE_SKILLS: Readonly<Record<JourneyStage, readonly string[]>> = {
   "repository-fit": ["repository-fit"],
@@ -303,7 +341,7 @@ const STAGE_BOUNDARY: Readonly<Record<JourneyStage, string>> = {
   "gather-supplies": "Use the complete owner Q&A and update only the validated plan specification. Do not run design, draft implementation.md, or implement the work. Return an action receipt whose artifacts include the validated plan-spec.md path.",
   "map-route": "Use the design substep of Map the Route. Before writing any design artifact, stop at its normal owner lens-approval question when lens approval is not already recorded in the prior owner Q&A. After approval, produce valid complete or amended design.md and seit.md, including stable DES/CONTRACT IDs, Use Cases and Communication Flows, Interface Option Check, OOPDSA Implementation Design, and the prospective SEIT Traceability Matrix. Bearing generates review.html deterministically from the current Markdown sources; do not write or summarize review.html. Stop at the design-and-SEIT validation checkpoint. Do not write implementation.md or execute implementation in this substep. A successful action receipt must include design.md and seit.md in the validated plan directory.",
   recon: "After architecture and before implementation drafting, run at most one smallest bounded experiment for one material assumption. If no material assumption needs Recon, return the explicit skipped Recon receipt with no brief, report, or artifacts. Otherwise return one complete brief and matching report in the Recon receipt; a brief without its report is incomplete. Prototype paths remain non-production and must be returned as the complete artifact list. Do not draft implementation.md or execute implementation.",
-  "draft-implementation": "Continue the implementation-drafting substep of Map the Route after the validated design and SEIT checkpoint. Draft implementation.md without executing any slice. Keep each slice reference-only with Goal, Requirement IDs, Design IDs, SEIT proof rows, Type, Design lenses, Implementation role, Agent model route, Agent reasoning level, and Review path. Ponytail mode is optional; when present, use the lowercase value `full` or `off`; trailing sentence punctuation such as `full.` is normalized. Requirement, design, and SEIT IDs must exist in their owning documents and each slice's referenced SEIT rows must map its requirement and design IDs. Follow every slice with a matching `### <slice-id> execution manifest` containing Write set, Command IDs, Stop condition, and Human decision. Close each write set with `only` and exact backticked paths, or explicitly declare no writes. Command IDs must be defined in seit.md and mapped by the slice's SEIT proof rows. Declare contiguous Wave 1 through Wave N dependencies when there is more than one slice. Do not restate acceptance, design contracts, test cases, commands, evidence, or execution packet prose. Preserve per-slice assignments for execution; do not replace them with onboarding settings. The Review path must use the harness-native reviewer when available or the Surveyor fallback when unavailable. Bearing generates review.html deterministically from plan-spec.md, design.md, seit.md, and implementation.md; do not write or summarize it. A successful action receipt must include implementation.md.",
+  "draft-implementation": "Continue the implementation-drafting substep of Map the Route after the validated design and SEIT checkpoint. Draft implementation.md without executing any slice. Keep each slice reference-only with Goal, Requirement IDs, Design IDs, SEIT proof rows, Type, Design lenses, Implementation role, Agent model route, Agent reasoning level, and Review path. Ponytail mode is optional; when present, use the lowercase value `full` or `off`; trailing sentence punctuation such as `full.` is normalized. Requirement, design, and SEIT IDs must exist in their owning documents and each slice's referenced SEIT rows must map its requirement and design IDs. Follow every slice with a matching `### <slice-id> execution manifest` containing Write set, Command IDs, Stop condition, and Human decision. Close each write set with `only` and exact backticked paths, or explicitly declare no writes. Command IDs must be defined in seit.md and mapped by the slice's SEIT proof rows. Declare contiguous Wave 1 through Wave N dependencies when there is more than one slice. Do not restate acceptance, design contracts, test cases, commands, evidence, or execution packet prose. Preserve per-slice assignments for execution; do not replace them with onboarding settings. The Review path must use the harness-native reviewer when available or the Surveyor fallback when unavailable. Bearing generates review.html deterministically from plan-spec.md, design.md, seit.md, and implementation.md; do not write or summarize it. Read the plan's recorded \"## Role routes\" decision and honor those exact primary and ordered fallback routes for delegation; never substitute the onboarding provider or model selection when a role route is missing. A successful action receipt must include implementation.md.",
   "execute-explorer": "Execute the approved implementation plan with Explorer and honor each recorded slice model route, reasoning level, Ponytail mode, and review cadence. Do not overwrite slice assignments with onboarding settings. After implementation and validation, replace the one Bearing-owned `<section id=\"bearing-final-qa\" data-status=\"pending\">` baseline with exactly one `<section id=\"bearing-final-qa\" data-status=\"complete\">` containing non-empty `Planned versus actual: <evidence>` and `Validation evidence: <evidence>` text. Put each labeled value in its own attribute-free `<p>` and use plain text only: no nested HTML, markup, `<`, or `>` in either evidence value. Preserve every current embedded planning source and canonical source link. The action receipt must include review.html and every actual changed artifact. Return only paths that actually exist.",
   "execute-expedition": "Execute the approved implementation plan with Expedition and honor each recorded slice model route, reasoning level, Ponytail mode, and review cadence. Do not overwrite slice assignments with onboarding settings. After implementation and validation, replace the one Bearing-owned `<section id=\"bearing-final-qa\" data-status=\"pending\">` baseline with exactly one `<section id=\"bearing-final-qa\" data-status=\"complete\">` containing non-empty `Planned versus actual: <evidence>` and `Validation evidence: <evidence>` text. Put each labeled value in its own attribute-free `<p>` and use plain text only: no nested HTML, markup, `<`, or `>` in either evidence value. Preserve every current embedded planning source and canonical source link. The action receipt must include review.html and every actual changed artifact. Return only paths that actually exist.",
   review: "Perform a read-only review of the integrated uncommitted work. Do not modify files. Return existing evidence paths relevant to the review.",
@@ -316,6 +354,7 @@ const MAX_ARTIFACTS = 32;
 const MAX_ENVELOPE_BYTES = 512 * 1024;
 const MAX_ESTIMATE_BASIS = 280;
 const MAX_ACTIVITY_TRAIL = 20;
+const BACKGROUND_BRIEF_STAGES = ["gather-supplies", "map-route", "recon", "draft-implementation"] as const satisfies readonly JourneyStage[];
 const SAFE_ACTIVITY_VALUE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const SECRET_ACTIVITY = /(?:\b(?:api[_ -]?key|secret|token|password|authorization)\s*[=:]\s*|\bBearer\s+|\bsk-[A-Za-z0-9_-]{8,}|\bAKIA[A-Z0-9]{16})[^\s,;]*/i;
 
@@ -361,6 +400,7 @@ function validRequest(request: JourneyRequest): boolean {
     (request.providerSessionId === undefined || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.providerSessionId)) &&
     (request.reviewPrompt === undefined || text(request.reviewPrompt)) &&
     (request.gateFailureFingerprint === undefined || text(request.gateFailureFingerprint, 512)) &&
+    (request.currentSlice === undefined || (request.stage === "execute-explorer" || request.stage === "execute-expedition") && /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/.test(request.currentSlice)) &&
     (request.focusAmendmentConfirmed === undefined || typeof request.focusAmendmentConfirmed === "boolean") &&
     request.priorOwnerQa.every((entry) => typeof entry === "object" && entry !== null && text(entry.question) && text(entry.answer));
 }
@@ -375,13 +415,41 @@ async function packagedSkills(stage: JourneyStage): Promise<string> {
   return ["Packaged Bearing skills (authoritative workflow instructions for this stage):", ...sources].join("\n\n");
 }
 
+/** The durable owner Q&A question marking a recorded role-route decision; an exact repeat suppresses re-asking. */
+export const ROLE_ROUTES_QUESTION = `Which agent should be primary and which ordered fallbacks are authorized for each required role (${ROLE_KINDS.join(", ")})?`;
+const ROLE_ROUTES_HEADING = "Role routes";
+const ROLE_ROUTE_LINE = /^-\s+\*\*([a-z][a-z-]*)\*\*\s+[—-]\s+primary:\s+`([^`\r\n]+)`;\s+fallbacks:\s+(none|`[^`\r\n]+`(?:,\s*`[^`\r\n]+`)*)\s*$/gmi;
+
+/** Renders the owner's exact primary/fallback decision as the plan-spec.md "Role routes" section. */
+export function renderRoleRoutesSection(routes: readonly RoleRoute[]): string {
+  const lines = routes.map((route) => `- **${route.role}** — primary: \`${route.primary}\`; fallbacks: ${
+    route.fallbacks.length ? route.fallbacks.map((fallback) => `\`${fallback}\``).join(", ") : "none"
+  }`);
+  return `## ${ROLE_ROUTES_HEADING}\n\n${lines.join("\n")}\n`;
+}
+
+/** Parses the durable "Role routes" decision back out of plan-spec.md; undefined when absent or incomplete. */
+export function parseRoleRoutesSection(planSpec: string): readonly RoleRoute[] | undefined {
+  const section = new RegExp(`^##[ \\t]+${ROLE_ROUTES_HEADING}[ \\t]*\\r?\\n([\\s\\S]*?)(?=^##[ \\t]+|(?![\\s\\S]))`, "mi").exec(planSpec)?.[1];
+  if (!section) return undefined;
+  const candidates: RoleRoute[] = [];
+  for (const match of section.matchAll(ROLE_ROUTE_LINE)) {
+    const fallbacks = match[3].toLowerCase() === "none" ? [] : [...match[3].matchAll(/`([^`]+)`/g)].map((fallback) => fallback[1]);
+    candidates.push({ role: match[1] as RoleRoute["role"], primary: match[2], fallbacks });
+  }
+  return roleRoutesShape(candidates) ? candidates : undefined;
+}
+
 function prompt(request: JourneyRequest, planDirectory: string | undefined, skillInstructions: string, focus?: FocusContext): string {
   const gatheringQuestions = request.stage === "gather-supplies" && request.gatherMode === "questions";
   const availableQuestions = Math.min(MAX_GATHER_QUESTIONS, Math.max(0, MAX_QA - request.priorOwnerQa.length));
+  const roleRoutesAnswered = request.priorOwnerQa.some((entry) => entry.question === ROLE_ROUTES_QUESTION);
   const grilling = gatheringQuestions
-    ? ` Inspect the repository once and return at most ${availableQuestions} unresolved owner questions. Ask only when the answer materially changes scope, architecture, security, authority, or acceptance. Lead each question with **Recommendation:**, then give concise evidence, 2-3 viable options with material tradeoffs, the affected plan-spec section, and the safe default if unanswered; ask the owner to select explicitly. A recommendation is advice, never approval. State safe defaults as assumptions instead of questions when no owner choice is required. Return an empty array when no material owner decision remains.`
+    ? ` Inspect the repository once and return at most ${availableQuestions} unresolved owner questions. Ask only when the answer materially changes scope, architecture, security, authority, or acceptance. Lead each question with **Recommendation:**, then give concise evidence, 2-3 viable options with material tradeoffs, the affected plan-spec section, and the safe default if unanswered; ask the owner to select explicitly. A recommendation is advice, never approval. State safe defaults as assumptions instead of questions when no owner choice is required. Return an empty array when no material owner decision remains.${
+      roleRoutesAnswered ? "" : ` Ask exactly this question verbatim among them: ${JSON.stringify(ROLE_ROUTES_QUESTION)} Offer only ${JSON.stringify(BUILTIN_ROUTES.map((route) => route.id))} as primary or fallback choices, plus ${JSON.stringify(SURVEYOR_FALLBACK_ROUTE)} as an additional allowed fallback for review-general and review-security only; a role may have zero fallbacks. Never ask for credentials.`
+    }`
     : request.stage === "gather-supplies"
-      ? " All grilling questions are answered. Apply the complete owner Q&A without asking another question; record reasonable assumptions or blockers in the plan specification."
+      ? ` All grilling questions are answered. Apply the complete owner Q&A without asking another question; record reasonable assumptions or blockers in the plan specification. Record the owner's exact answer to ${JSON.stringify(ROLE_ROUTES_QUESTION)} as a "## Role routes" section in plan-spec.md, one line per role in this exact format: "- **execution-author** — primary: \`codex\`; fallbacks: \`claude\`" or "- **review-general** — primary: \`claude\`; fallbacks: none". Never substitute the onboarding provider or model selection for a role route the owner did not answer.`
       : " Ask one owner question only when a decision blocks honest progress.";
   const boundary = gatheringQuestions ? "Read and inspect only. Do not create or modify files during question discovery." : STAGE_BOUNDARY[request.stage];
   const reviewCadence = request.stage === "execute-explorer" || request.stage === "execute-expedition" ? ["Read the prior owner Q&A for the recorded Review cadence (each slice, each phase, or end) and enforce that cadence during execution. Use the harness-native reviewer when available and the read-only Surveyor fallback only when no native reviewer is available."] : [];
@@ -391,6 +459,9 @@ function prompt(request: JourneyRequest, planDirectory: string | undefined, skil
       ? "Preserve every temporary worktree and branch; the owner disabled automatic cleanup."
       : `Cleanup merged worktrees is on. Merge only through the approved integration or phase gate. Before removing a temporary worktree, prove that it is clean, its branch commit is merged into the integration branch, and no active review, retry, or recovery reference needs it. ${request.stage === "execute-explorer" ? "Clean eligible worktrees after each completed phase." : "Keep parallel lanes until the entire phase is integrated, then clean eligible worktrees."} Delete only the corresponding proven-merged temporary branch. Never force-remove a worktree or branch. Preserve every dirty, unmerged, failed, or blocked lane and report its path and branch with a Resume or Resolve next action.`]
     : [];
+  const commandPolicy = request.stage === "execute-explorer" || request.stage === "execute-expedition"
+    ? "Run only the selected slice commands during Focus; defer build and dist-guard to integrated closeout after Focus validates."
+    : "Planning-only validation must not run build, dist-guard, formatters, or any command known to mutate tracked output.";
   const nextActionStage = nextStage(request.stage);
   const selectedRoute = BUILTIN_ROUTES.find((route) => route.provider === request.selection.provider && (route.model === "*" || route.model === request.selection.model));
   const routeCatalog = BUILTIN_ROUTES.map((route) => {
@@ -414,6 +485,7 @@ function prompt(request: JourneyRequest, planDirectory: string | undefined, skil
     `Prior owner Q&A: ${JSON.stringify(request.priorOwnerQa)}`,
     ...reviewCadence,
     ...cleanupPolicy,
+    commandPolicy,
     `Validated plan directory: ${planDirectory ? JSON.stringify(planDirectory) : "none"}`,
     ...(planDirectory && request.stage !== "repository-fit" && request.stage !== "set-bearings" ? ["Reuse current session context and perform only bounded live verification when necessary. Do not require or create plan-local prompt artifacts."] : []),
     ...(request.reviewPrompt ? [`Review guidance: ${JSON.stringify(request.reviewPrompt)}`] : []),
@@ -434,6 +506,18 @@ function prompt(request: JourneyRequest, planDirectory: string | undefined, skil
         : focus
           ? `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question"} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["every relative path changed during this invocation"],"evidence":[{"commandId":"CMD-ID","status":"passed","summary":"bounded observed result"}]}. On success include every command ID from BEARING_FOCUS exactly once. Never mark failed, skipped, missing, unknown, or duplicate evidence as passed.`
           : `End the final assistant message with exactly one single-line envelope: BEARING_RESULT {"kind":"question","question":"one blocking question","nextStageEstimate":{"stage":"${request.stage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific remaining-work basis"}} or BEARING_RESULT {"kind":"action","summary":"what actually happened","artifacts":["relative/existing/path"],"nextStageEstimate":{"stage":"${nextActionStage}","minMinutes":MINIMUM_INTEGER,"maxMinutes":MAXIMUM_INTEGER,"basis":"specific full-phase workload basis"}}. Replace the uppercase placeholders with honest integer estimates; do not copy a canned duration. A question estimate covers all work remaining in the same stage after the answer. Omit nextStageEstimate when you cannot honestly estimate it.`,
+  ].join("\n");
+}
+
+function backgroundBriefPrompt(request: JourneyRequest, planDirectory: string | undefined): string {
+  return [
+    "You are producing a bounded read-only background planning brief.",
+    `Stage: ${request.stage}. Work goal: ${JSON.stringify(request.workGoal)}.`,
+    `Validated plan directory: ${planDirectory ? JSON.stringify(planDirectory) : "none"}.`,
+    `Prior owner decisions: ${JSON.stringify(request.priorOwnerQa).slice(0, MAX_BACKGROUND_BRIEF_CHARS)}.`,
+    "Inspect existing repository context only and return one concise evidence-backed brief for the foreground planner.",
+    "Do not write, execute, ask questions, request approval, claim a receipt, name artifacts as completed, or report validation. The foreground planner alone owns questions, approvals, receipts, artifacts, writes, execution, and validation.",
+    `Keep the brief at most ${MAX_BACKGROUND_BRIEF_CHARS} characters.`,
   ].join("\n");
 }
 
@@ -570,6 +654,37 @@ async function reconCompletionValid(
   return changed.every((path) => allowed.has(path) && artifacts.includes(path));
 }
 
+async function planningCompletionValid(
+  root: string,
+  before: GitStateSnapshot,
+  planDirectory: string | undefined,
+): Promise<boolean> {
+  const after = await snapshotGitState(root, before.head);
+  if (!after || after.head !== before.head) return false;
+  const changed = [...new Set([...before.paths.keys(), ...after.paths.keys(), ...after.committedPaths])]
+    .filter((path) => after.committedPaths.has(path) || before.paths.get(path) !== after.paths.get(path));
+  return planDirectory === undefined
+    ? changed.length === 0
+    : changed.every((path) => path.startsWith(`${planDirectory}/`));
+}
+
+/**
+ * Issue 93's write probe. Diffs the live Git state against the exact base a
+ * Focus envelope was built from (`focus.beforeHead`/`focus.before`) — the
+ * same base `validateFocusCompletion` diffs against at the end of the call.
+ * Run between the coordinator's dispatch and the productAuthor's dispatch, it
+ * proves the coordinator/planner session mutated nothing before the
+ * authorized worker ever started. `undefined` means Git state could not be
+ * read (fail closed, same as a real mutation); an array is the exact set of
+ * paths that changed, empty only when the base is provably untouched.
+ */
+async function focusPreDispatchMutation(root: string, focus: FocusContext): Promise<readonly string[] | undefined> {
+  const after = await snapshotGitState(root, focus.beforeHead);
+  if (!after || (after.head !== focus.beforeHead && after.committedPaths.size === 0)) return undefined;
+  return [...new Set([...focus.before.keys(), ...after.paths.keys(), ...after.committedPaths])]
+    .filter((path) => after.committedPaths.has(path) || focus.before.get(path) !== after.paths.get(path));
+}
+
 const MAX_PLANNING_ARTIFACT = 2 * 1024 * 1024;
 
 async function readPlanningArtifact(root: string, value: string, allowEmpty = false): Promise<string | undefined> {
@@ -611,6 +726,16 @@ async function focusPlanHashes(root: string, planDirectory: string): Promise<Foc
     "seit.md": hash(contents[2]),
     "implementation.md": hash(contents[3]),
   };
+}
+
+async function solePlanSlice(root: string, planDirectory: string): Promise<string | undefined> {
+  const contents = await Promise.all(
+    FOCUS_PLAN_SOURCES.map((name) => readPlanningArtifact(root, posix.join(planDirectory, name))),
+  );
+  if (!contents.every((content): content is string => content !== undefined)) return undefined;
+  const [plan, design, seit, implementation] = contents;
+  const slices = [...parsePlanDocuments({ plan, design, seit, implementation }).slices.keys()];
+  return slices.length === 1 ? slices[0] : undefined;
 }
 
 export async function currentPlanningVerdict(root: string, planDirectory: string): Promise<ReturnType<typeof validatePlan> | undefined> {
@@ -687,6 +812,12 @@ export function focusContractDrift(previous: FocusContractSnapshot, candidate: F
   const changedRole = left.role === right.role
     ? undefined
     : { previous: boundedEscaped(left.role), candidate: boundedEscaped(right.role) };
+  const changedTargetRepository = previous.targetRepository === candidate.targetRepository
+    ? undefined
+    : { previous: boundedEscaped(previous.targetRepository), candidate: boundedEscaped(candidate.targetRepository) };
+  const changedPlanDirectory = previous.planDirectory === candidate.planDirectory
+    ? undefined
+    : { previous: boundedEscaped(previous.planDirectory), candidate: boundedEscaped(candidate.planDirectory) };
   const changedPlanSources = FOCUS_PLAN_SOURCES
     .filter((name) => previous.planHashes[name] !== candidate.planHashes[name])
     .map(boundedEscaped);
@@ -699,6 +830,8 @@ export function focusContractDrift(previous: FocusContractSnapshot, candidate: F
     !changedRemainingSlices &&
     !changedObjective &&
     !changedRole &&
+    !changedTargetRepository &&
+    !changedPlanDirectory &&
     !changedPlanSources.length
   ) return null;
   return {
@@ -710,6 +843,8 @@ export function focusContractDrift(previous: FocusContractSnapshot, candidate: F
     ...(changedRemainingSlices ? { changedRemainingSlices } : {}),
     ...(changedObjective ? { changedObjective } : {}),
     ...(changedRole ? { changedRole } : {}),
+    ...(changedTargetRepository ? { changedTargetRepository } : {}),
+    ...(changedPlanDirectory ? { changedPlanDirectory } : {}),
     changedPlanSources,
   };
 }
@@ -853,6 +988,75 @@ async function designReviewArtifacts(root: string, planDirectory: string | undef
   return ["design.md", "seit.md", reviewName].map((name) => posix.join(planDirectory, name));
 }
 
+const DESIGN_CHECKPOINT_HEADINGS = ["Use Cases and Communication Flows", "Interface Option Check", "OOPDSA Implementation Design"] as const;
+const SEIT_CHECKPOINT_HEADINGS = ["Traceability Matrix", "Cross-cutting Checks"] as const;
+const FINDING_OBSERVED_MAX = 512;
+
+function boundedFindingValue(value: string): string {
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, FINDING_OBSERVED_MAX);
+  return cleaned || "missing value";
+}
+
+/**
+ * Deterministic structural findings for the design-and-SEIT checkpoint (issue 78). Mirrors
+ * exactly the `artifactComplete` gate used by {@link designReviewArtifacts}: each artifact's
+ * frontmatter (`type`, then `status`) and each required exact heading, in a fixed per-artifact
+ * order. Findings expose only bounded structural facts — artifact name, field or heading,
+ * observed value (truncated), required value, remedy — never document body text.
+ */
+function designCheckpointStructuralFindings(design: string, seit: string): readonly Finding[] {
+  const findings: Finding[] = [];
+  const frontmatterFinding = (artifact: "design.md" | "seit.md", kind: "design" | "seit", content: string): void => {
+    const required = `type: ${kind} and status: complete or amended`;
+    const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content)?.[1];
+    if (frontmatter === undefined) {
+      findings.push({ code: "artifact_frontmatter_invalid", severity: "amendment", artifact, observed: "frontmatter block missing", required, remedy: "repair the artifact frontmatter" });
+      return;
+    }
+    // Mirror `artifactComplete` exactly: a field is satisfied when ANY frontmatter line
+    // matches it, so the finding can never contradict the gate. Every separator and capture
+    // is horizontal-only whitespace, keeping the observed value on its own line — `\s*`
+    // crosses newlines, which would let a blank `type:` echo the following line verbatim
+    // into the receipt. Both fields are reported, so the actually-failing one is never
+    // suppressed by an earlier one.
+    if (!new RegExp(`^type:[^\\S\\r\\n]*${kind}[^\\S\\r\\n]*$`, "mi").test(frontmatter)) {
+      const typeValue = /^type:[^\S\r\n]*([^\r\n]*)$/mi.exec(frontmatter)?.[1]?.trim();
+      findings.push({ code: "artifact_frontmatter_invalid", severity: "amendment", artifact, observed: `type: ${boundedFindingValue(typeValue ?? "")}`, required, remedy: "repair the artifact frontmatter" });
+    }
+    if (!/^status:[^\S\r\n]*(?:complete|amended)[^\S\r\n]*$/mi.test(frontmatter)) {
+      const statusValue = /^status:[^\S\r\n]*([^\r\n]*)$/mi.exec(frontmatter)?.[1]?.trim();
+      findings.push({ code: "artifact_frontmatter_invalid", severity: "amendment", artifact, observed: `status: ${boundedFindingValue(statusValue ?? "")}`, required, remedy: "repair the artifact frontmatter" });
+    }
+  };
+  frontmatterFinding("design.md", "design", design);
+  for (const heading of DESIGN_CHECKPOINT_HEADINGS) {
+    if (!sectionPresent(design, heading)) findings.push({ code: "design_section_missing", severity: "amendment", artifact: "design.md", observed: heading, required: `non-empty ${heading} section`, remedy: `add the ${heading} section` });
+  }
+  frontmatterFinding("seit.md", "seit", seit);
+  for (const heading of SEIT_CHECKPOINT_HEADINGS) {
+    if (!sectionPresent(seit, heading)) findings.push({ code: "seit_section_missing", severity: "amendment", artifact: "seit.md", observed: heading, required: `non-empty ${heading} section`, remedy: `add the ${heading} section` });
+  }
+  return findings;
+}
+
+/**
+ * Reads the three design-checkpoint artifacts and returns the bounded structural findings for
+ * the current Map Route documents. Mirrors {@link designReviewArtifacts}' preconditions: when the
+ * checkpoint is absent or its documents are unreadable there are no structural findings, so the
+ * failure stays a bare `artifact_invalid` exactly as before.
+ */
+async function designCheckpointFindings(root: string, planDirectory: string | undefined): Promise<readonly Finding[]> {
+  if (!planDirectory) return [];
+  try {
+    const directory = resolve(root, planDirectory), names = await readdir(directory);
+    const planName = names.find(isPlanSpecArtifactName);
+    if (!planName || !names.includes("design.md") || !names.includes("seit.md")) return [];
+    const sourceContents = await Promise.all([planName, "design.md", "seit.md"].map((name) => readPlanningArtifact(root, posix.join(planDirectory, name))));
+    if (!sourceContents.every((content): content is string => content !== undefined)) return [];
+    return designCheckpointStructuralFindings(sourceContents[1]!, sourceContents[2]!);
+  } catch { return []; }
+}
+
 function routeLabel(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]+/g, ""); }
 
 function planningRoute(value: string, selection: Selection): RouteDescriptor | undefined {
@@ -971,7 +1175,7 @@ export class JourneyService {
     return JSON.stringify([repositoryPath, runId, selection.provider, selection.model, selection.reasoning]);
   }
 
-  private focusKey(repositoryPath: string, runId: string): string { return JSON.stringify([repositoryPath, runId]); }
+  private focusKey(_repositoryPath: string, runId: string): string { return runId; }
 
   private reconKey(repositoryPath: string, runId: string): string { return JSON.stringify([repositoryPath, runId]); }
 
@@ -993,7 +1197,7 @@ export class JourneyService {
     if (current.trail.length > MAX_ACTIVITY_TRAIL) current.trail.shift();
   }
 
-  private async executeOnce(request: JourneyRequest, activityStage = request.stage, recordStageStart = true, freshSessionFallback = { used: false }): Promise<JourneyResult> {
+  private async executeOnce(request: JourneyRequest, activityStage = request.stage, recordStageStart = true, freshSessionFallback: { used: boolean; backgroundBriefUsed: boolean } = { used: false, backgroundBriefUsed: false }): Promise<JourneyResult> {
     if (!validRequest(request)) return { status: "failure", code: "input_invalid", tokens: 0 };
     const fitStage = request.stage === "repository-fit";
     let repositoryPath: string;
@@ -1003,8 +1207,23 @@ export class JourneyService {
     } catch { return { status: "failure", code: "input_invalid", tokens: 0 }; }
     const planDirectory = request.planDirectory === undefined ? undefined : await containedPath(repositoryPath, request.planDirectory, true);
     if (request.planDirectory !== undefined && planDirectory === undefined) return { status: "failure", code: "input_invalid", tokens: 0 };
-    const projected = request.run.roles.find((role) => request.stage === "review" ? role.role === "surveyor" && !role.authority.write : role.role === "crewmate" && role.executor && role.authority.write);
+    const coordinatorRole = request.stage === "execute-expedition" ? "navigator" : undefined;
+    const projected = request.run.roles.find((role) => request.stage === "review"
+      ? role.role === "surveyor" && !role.authority.write
+      : coordinatorRole
+        ? role.role === coordinatorRole && role.executor
+        : role.role === "crewmate" && role.executor && role.authority.write);
     if (!projected) return { status: "failure", code: fitStage ? "fit_unavailable" : "crewmate_unavailable", tokens: 0 };
+    if (request.stage === "review") {
+      // Issue 93: a Surveyor sharing identity with the role that authored the candidate cannot
+      // independently verify it, even outside the coordinated-Expedition dispatch this same
+      // repository's execute-expedition path already checks.
+      const author = request.run.roles.find((role) => role.role === "crewmate" && role.executor && role.authority.write);
+      if (author && !validateReviewerAuthorship({
+        reviewer: { role: projected.role, identity: projected.identity },
+        author: { role: author.role, identity: author.identity },
+      }).ok) return { status: "failure", code: "role_boundary_violation", tokens: 0 };
+    }
     if (!sameRoute(request.selection, projected.selection) || request.run.roles.some((role) => !sameRoute(role.selection, request.selection))) return { status: "failure", code: "selection_mismatch", tokens: 0 };
     let resolvedPlanDirectory: string | undefined;
     if (request.stage === "set-bearings") {
@@ -1028,16 +1247,26 @@ export class JourneyService {
       } catch { return { status: "failure", code: "artifact_invalid", tokens: 0 }; }
     }
     const executionStage = request.stage === "execute-explorer" || request.stage === "execute-expedition";
+    const coordinatedExpedition = request.stage === "execute-expedition";
+    const productAuthor = coordinatedExpedition ? request.run.roles.find((role) => role.role === "crewmate" && role.executor && role.authority.write) : undefined;
+    const reviewer = coordinatedExpedition ? request.run.roles.find((role) => role.role === "surveyor" && !role.authority.write && !role.executor) : undefined;
+    if (coordinatedExpedition && (!productAuthor || !reviewer || !validateExecutionRoleBoundary({
+      coordinator: { role: projected.role, identity: projected.identity },
+      productAuthor: { role: productAuthor.role, identity: productAuthor.identity },
+      reviewer: { role: reviewer.role, identity: reviewer.identity },
+    }).ok)) return { status: "failure", code: "authority_invalid", tokens: 0 };
     let focus: FocusContext | undefined;
     let focusKey: string | undefined;
     if (executionStage) {
       if (!planDirectory) return { status: "failure", code: "focus_invalid", tokens: 0 };
+      const currentSlice = request.currentSlice ?? (coordinatedExpedition ? await solePlanSlice(repositoryPath, planDirectory).catch(() => undefined) : undefined);
       const [parsed, planHashes] = await Promise.all([
         createFocusContext({
           root: repositoryPath,
           planDirectory,
           role: request.stage === "execute-expedition" ? "navigator" : "explorer",
           objective: request.workGoal,
+          ...(currentSlice ? { currentSlice } : {}),
           ...(request.reviewPrompt ? { currentBlocker: request.reviewPrompt } : {}),
           ...(request.gateFailureFingerprint ? { gateFailureFingerprint: request.gateFailureFingerprint } : {}),
         }).catch(() => undefined),
@@ -1052,7 +1281,7 @@ export class JourneyService {
         });
         return { status: "failure", code: "focus_invalid", tokens: 0 };
       }
-      const candidate: FocusContractSnapshot = { context: parsed.value, planHashes };
+      const candidate: FocusContractSnapshot = { context: parsed.value, planHashes, targetRepository: repositoryPath, planDirectory };
       const drift = original ? focusContractDrift(original, candidate) : null;
       if (drift && !request.focusAmendmentConfirmed) {
         this.recordActivity(request.runId, activityStage, { kind: "focus.amendment_required", status: "unconfirmed" });
@@ -1098,11 +1327,24 @@ export class JourneyService {
       this.recordActivity(request.runId, activityStage, { kind: "recon.rejected", status: "git_state" });
       return { status: "failure", code: "completion_invalid", tokens: 0 };
     }
+    const planningOnly = fitStage
+      || request.stage === "gather-supplies"
+      || request.stage === "map-route"
+      || request.stage === "draft-implementation";
+    const planningWriteDirectory = request.stage === "gather-supplies" && request.gatherMode === "questions" || fitStage
+      ? undefined
+      : planDirectory;
+    const planningBaseline = planningOnly ? await snapshotGitState(repositoryPath) : undefined;
+    if (planningOnly && !planningBaseline && await gitRepositoryAvailable(repositoryPath) !== false) {
+      this.recordActivity(request.runId, activityStage, { kind: "planning.rejected", status: "git_state" });
+      return { status: "failure", code: "completion_invalid", tokens: 0 };
+    }
     let taskPrompt: string;
     try { taskPrompt = prompt(request, planDirectory, await packagedSkills(request.stage), focus); }
     catch { return { status: "failure", code: fitStage ? "fit_unavailable" : "adapter_failed", tokens: 0 }; }
     let tokens = 0;
     let events: unknown;
+    let mutationStart: string | undefined;
     if (this.cancelled.has(request.runId)) return { status: "failure", code: "cancelled", tokens: 0 };
     const processRunId = `${request.runId.slice(0, 70)}-${randomUUID()}`;
     this.active.set(request.runId, processRunId);
@@ -1132,29 +1374,93 @@ export class JourneyService {
       };
       const adapter = createAgentAdapter(projected.selection, observedRunner);
       if (!adapter) return { status: "failure", code: fitStage ? "fit_unavailable" : "crewmate_unavailable", tokens: 0 };
+      if (!freshSessionFallback.backgroundBriefUsed && BACKGROUND_BRIEF_STAGES.some((stage) => stage === request.stage)) {
+        freshSessionFallback.backgroundBriefUsed = true;
+        const brief = await adapter.readOnlyBackgroundBrief({ runId: processRunId, repositoryPath, role: projected, task: { prompt: backgroundBriefPrompt(request, planDirectory) } }).catch(() => undefined);
+        if (brief) taskPrompt = `${taskPrompt}\n\nBackground planning brief (advisory context only):\n${brief}`;
+      }
       let receipt;
       const questionDiscovery = fitStage || request.stage === "gather-supplies" && request.gatherMode === "questions";
       const journeySession = request.stage !== "review";
       const providerSessionKey = this.providerSessionKey(repositoryPath, request.runId, projected.selection);
       const continuation = journeySession ? request.providerSessionId ?? this.providerSessions.get(providerSessionKey) : undefined;
-      try { receipt = await adapter.execute({ runId: processRunId, sessionScope: request.runId, repositoryPath, role: { ...projected, sessionId: journeySession ? projected.sessionId : null, authority: { ...projected.authority, write: questionDiscovery ? false : projected.authority.write, network: request.selection.provider === "agy", externalAction: false }, toolAllow: questionDiscovery ? projected.toolAllow.filter((tool) => !/write|edit/i.test(tool)) : projected.toolAllow }, task: { prompt: taskPrompt }, onActivity: (activity) => this.recordActivity(request.runId, activityStage, activity), ...(continuation ? { providerSessionId: continuation } : {}), ...(executionStage ? { focusMode: true } : {}), ...(request.stage === "execute-expedition" ? { allowSubagents: true } : {}) }); }
+      const productAuthorSessionKey = coordinatedExpedition && productAuthor ? `${providerSessionKey}::product-author` : undefined;
+      const productAuthorContinuation = productAuthorSessionKey && journeySession ? this.providerSessions.get(productAuthorSessionKey) : undefined;
+      const executionIdentity = coordinatedExpedition && productAuthor && reviewer
+        ? `\n\nCoordinator identity: ${projected.identity}. Product authorship is reserved for ${productAuthor.identity}.\nReviewer identity: ${reviewer.identity}; the reviewer never implements or coordinates.`
+        : "";
+      const readOnlyDispatch = coordinatedExpedition || questionDiscovery;
+      let coordinationTokens = 0;
+      let productAuthorDispatched = false;
+      try { receipt = await adapter.execute({ runId: processRunId, sessionScope: request.runId, repositoryPath, role: { ...projected, sessionId: journeySession ? projected.sessionId : null, authority: { ...projected.authority, write: readOnlyDispatch ? false : projected.authority.write, network: request.selection.provider === "agy", externalAction: false }, toolAllow: readOnlyDispatch ? projected.toolAllow.filter((tool) => !/write|edit|shell|bash/i.test(tool)) : projected.toolAllow }, task: { prompt: `${taskPrompt}${executionIdentity}` }, onActivity: (activity) => this.recordActivity(request.runId, activityStage, activity), ...(continuation ? { providerSessionId: continuation } : {}), ...(executionStage ? { focusMode: true } : {}), ...(request.stage === "execute-expedition" ? { allowSubagents: true } : {}) }); }
       catch { return { status: "failure", code: fitStage ? "fit_unavailable" : "adapter_failed", tokens: 0 }; }
+      if (receipt.status === "completed" && coordinatedExpedition && productAuthor) {
+        if (journeySession && receipt.providerSessionId) this.providerSessions.set(providerSessionKey, receipt.providerSessionId);
+        coordinationTokens = receipt.usage.tokens;
+        const handoff = receipt.events.flatMap((event) => typeof event.data?.content === "string" ? [event.data.content] : []).at(-1);
+        if (!handoff) return { status: "failure", code: "result_missing", tokens: coordinationTokens };
+        // Issue 93's write probe: prove the exact base the Focus envelope was built from is still
+        // untouched before the distinct authorized worker is ever dispatched. `readOnlyDispatch` and
+        // the filtered `toolAllow` above are advisory to a cooperative provider; this Git-based check
+        // is the structural backstop when a coordinator session (or a subagent it spawned) ignores
+        // them and mutates the product/slice write set anyway. Fail closed with a typed role-boundary
+        // violation rather than falling through to the end-of-run Focus completion check, which would
+        // otherwise surface this as ordinary, recoverable Focus drift instead of an authority breach.
+        const preDispatchMutated = focus ? await focusPreDispatchMutation(repositoryPath, focus) : undefined;
+        if (!focus || preDispatchMutated === undefined || preDispatchMutated.length > 0) {
+          this.recordActivity(request.runId, activityStage, { kind: "expedition.rejected", status: "role_boundary_violation" });
+          return { status: "failure", code: "role_boundary_violation", ...(preDispatchMutated ? { mutatedPaths: preDispatchMutated } : {}), tokens: coordinationTokens };
+        }
+        mutationStart = new Date().toISOString();
+        const productAdapter = createAgentAdapter(productAuthor.selection, observedRunner);
+        if (!productAdapter) return { status: "failure", code: "crewmate_unavailable", tokens: coordinationTokens };
+        if (this.cancelled.has(request.runId)) return { status: "failure", code: "cancelled", tokens: coordinationTokens };
+        // Bound the Crewmate to what remains of the coordinator's own per-call ceiling so the two
+        // dispatches together cannot exceed it. MAX_SAFE_INTEGER is the unlimited-route sentinel
+        // (e.g. AGY, which rejects any other value); leave it untouched rather than subtracting.
+        const remainingTokenBudget = projected.limits.tokenBudget === Number.MAX_SAFE_INTEGER
+          ? Number.MAX_SAFE_INTEGER
+          : Math.max(0, projected.limits.tokenBudget - coordinationTokens);
+        productAuthorDispatched = true;
+        try {
+          receipt = await productAdapter.execute({
+            runId: processRunId,
+            sessionScope: request.runId,
+            repositoryPath,
+            role: {
+              ...productAuthor,
+              sessionId: journeySession ? productAuthor.sessionId : null,
+              authority: { ...productAuthor.authority, network: request.selection.provider === "agy", externalAction: false },
+              limits: { ...productAuthor.limits, tokenBudget: remainingTokenBudget },
+            },
+            task: { prompt: `${taskPrompt}${executionIdentity}\n\nNavigator coordination handoff (read-only; advisory to the product author):\n${handoff}` },
+            onActivity: (activity) => this.recordActivity(request.runId, activityStage, activity),
+            focusMode: true,
+            ...(productAuthorContinuation ? { providerSessionId: productAuthorContinuation } : {}),
+          });
+        } catch { return { status: "failure", code: "adapter_failed", tokens: coordinationTokens }; }
+      }
       if (receipt.status !== "completed") {
         if (receipt.failure === "session_unavailable") {
-          this.providerSessions.delete(providerSessionKey);
+          this.providerSessions.delete(productAuthorDispatched && productAuthorSessionKey ? productAuthorSessionKey : providerSessionKey);
           if (!freshSessionFallback.used && lastAttemptSideEffectFree) {
             freshSessionFallback.used = true;
             const { providerSessionId: _deadProviderSessionId, ...freshRequest } = request;
             const fallback = await this.executeOnce(freshRequest, activityStage, false, freshSessionFallback);
-            return { ...fallback, tokens: receipt.usage.tokens + fallback.tokens, sessionContinuity: "lost" };
+            return { ...fallback, tokens: coordinationTokens + receipt.usage.tokens + fallback.tokens, sessionContinuity: "lost" };
           }
-          return { status: "failure", code: "session_unavailable", tokens: receipt.usage.tokens, sessionContinuity: "lost" };
+          return { status: "failure", code: "session_unavailable", tokens: coordinationTokens + receipt.usage.tokens, sessionContinuity: "lost" };
         }
-        return { status: "failure", code: this.cancelled.has(request.runId) && (receipt.status === "blocked_reconcile" || receipt.failure === "unknown_side_effect") ? "interrupted" : receipt.failure === "token_budget" ? "token_budget" : receipt.failure === "cancelled" ? "cancelled" : fitStage ? "fit_unavailable" : "adapter_failed", tokens: receipt.usage.tokens };
+        return { status: "failure", code: this.cancelled.has(request.runId) && (receipt.status === "blocked_reconcile" || receipt.failure === "unknown_side_effect") ? "interrupted" : receipt.failure === "token_budget" ? "token_budget" : receipt.failure === "cancelled" ? "cancelled" : fitStage ? "fit_unavailable" : "adapter_failed", tokens: coordinationTokens + receipt.usage.tokens };
       }
-      if (journeySession && receipt.providerSessionId) this.providerSessions.set(providerSessionKey, receipt.providerSessionId);
-      tokens = receipt.usage.tokens;
+      if (!coordinatedExpedition && journeySession && receipt.providerSessionId) this.providerSessions.set(providerSessionKey, receipt.providerSessionId);
+      if (coordinatedExpedition && productAuthorSessionKey && journeySession && receipt.providerSessionId) this.providerSessions.set(productAuthorSessionKey, receipt.providerSessionId);
+      tokens = coordinationTokens + receipt.usage.tokens;
       events = receipt.events;
+    }
+    if (planningBaseline && !await planningCompletionValid(repositoryPath, planningBaseline, planningWriteDirectory)) {
+      this.recordActivity(request.runId, activityStage, { kind: "planning.rejected", status: "tracked_output_mutation" });
+      return { status: "failure", code: "completion_invalid", tokens };
     }
     if (this.cancelled.has(request.runId)) return { status: "failure", code: "cancelled", tokens };
     const assistantText = (events as unknown[]).flatMap((event) => typeof event === "object" && event !== null && !Array.isArray(event) && typeof (event as { data?: { content?: unknown } }).data?.content === "string" ? [(event as { data: { content: string } }).data.content] : []).at(-1);
@@ -1227,7 +1533,6 @@ export class JourneyService {
         parsed.summary,
       ));
       this.recordActivity(request.runId, activityStage, { kind: "focus.completed", status: "validated" });
-      this.focusContexts.delete(focusKey!);
     } else if (parsed.kind === "action" && parsed.evidence) return { status: "failure", code: "result_malformed", tokens };
     const artifacts = request.stage === "draft-implementation" && planDirectory ? [...new Set([...parsed.artifacts, posix.join(planDirectory, "review.html")])] : parsed.artifacts;
     if (parsed.kind === "recon") this.reconBaselines.delete(reconKey);
@@ -1240,25 +1545,45 @@ export class JourneyService {
       ...(planned ? { planningReview: planned.review, planningValidation: planned.planningValidation } : {}),
       ...(verification === undefined ? {} : { verification }),
       ...(nextStageEstimate ? { nextStageEstimate } : {}),
+      ...(coordinatedExpedition && productAuthor && focus && mutationStart
+        ? { implementationProvenance: { workerIdentity: productAuthor.identity, base: focus.beforeHead ?? "unborn", focus: focus.envelope.currentAcceptanceCriterion, mutationStart } }
+        : {}),
     };
   }
 
   private async executeMapRoute(request: JourneyRequest): Promise<JourneyResult> {
-    const freshSessionFallback = { used: false };
+    const freshSessionFallback = { used: false, backgroundBriefUsed: false };
     const design = await this.executeOnce(request, "map-route", true, freshSessionFallback);
     if (design.status !== "action") return design;
     let designArtifacts: readonly string[] | undefined;
     try { designArtifacts = await designReviewArtifacts(request.repositoryPath, request.planDirectory, true, () => this.cancelled.has(request.runId)); }
     catch { designArtifacts = undefined; }
     if (this.cancelled.has(request.runId)) return { status: "failure", code: "cancelled", tokens: design.tokens, ...(design.sessionContinuity ? { sessionContinuity: design.sessionContinuity } : {}) };
-    if (!designArtifacts) return { status: "failure", code: "artifact_invalid", tokens: design.tokens, ...(design.sessionContinuity ? { sessionContinuity: design.sessionContinuity } : {}) };
+    if (!designArtifacts) {
+      const findings = await designCheckpointFindings(request.repositoryPath, request.planDirectory);
+      return { status: "failure", code: "artifact_invalid", ...(findings.length ? { findings } : {}), tokens: design.tokens, ...(design.sessionContinuity ? { sessionContinuity: design.sessionContinuity } : {}) };
+    }
     this.recordActivity(request.runId, "map-route", { kind: "design.ready", status: "completed" });
     return { ...design, artifacts: [...new Set([...design.artifacts, ...designArtifacts])] };
   }
 
   async execute(request: JourneyRequest): Promise<JourneyResult> {
     if (request.stage !== "recon") this.reconBaselines.delete(this.reconKey(request.repositoryPath, request.runId));
-    try { return request.stage === "map-route" ? await this.executeMapRoute(request) : await this.executeOnce(request); }
+    try {
+      const result = request.stage === "map-route" ? await this.executeMapRoute(request) : await this.executeOnce(request);
+      const focusKey = this.focusKey(request.repositoryPath, request.runId);
+      const focus = request.stage === "execute-expedition" ? this.focusContexts.get(focusKey)?.context : undefined;
+      const selectedScope = focus && focus.envelope.remainingSlices.length === 1
+        ? {
+            currentSlice: focus.envelope.remainingSlices[0]!,
+            remainingSlices: [...focus.envelope.remainingSlices],
+            allowedPaths: [...focus.envelope.allowedPaths],
+            seitCommandIds: [...focus.envelope.seitCommandIds],
+          }
+        : undefined;
+      if ((request.stage === "execute-explorer" || request.stage === "execute-expedition") && result.status === "action" && result.verification) this.focusContexts.delete(focusKey);
+      return selectedScope ? { ...result, selectedScope } : result;
+    }
     finally { this.active.delete(request.runId); this.cancelled.delete(request.runId); }
   }
 }

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { win32 } from "node:path";
 import { describe, expect, it } from "vitest";
-import { nativePlanDirectoryPath, planDirectoryValid, proposePlanDirectory } from "../src/journey/plan-directory.js";
+import { absolutePlanDirectoryPath, nativePlanDirectoryPath, planDirectoryValid, proposePlanDirectory } from "../src/journey/plan-directory.js";
 
 describe("plan directory", () => {
   it("accepts the relaxed bounded grammar", () => {
@@ -37,6 +37,32 @@ describe("plan directory", () => {
     expect(nativePlanDirectoryPath(nativeRelative, win32.sep)).toBe("docs/plans/import");
     expect(planDirectoryValid(nativeRelative)).toBe(false);
     expect(planDirectoryValid(nativePlanDirectoryPath(nativeRelative, win32.sep))).toBe(true);
+  });
+
+  it("keeps full, traversing, and drive-relative paths outside the relative grammar", () => {
+    for (const value of [
+      "/workspace/repository/docs/plans/import",
+      "docs/plans/../escape",
+      String.raw`C:workspace\repository\docs\plans\import`,
+    ]) expect(planDirectoryValid(value)).toBe(false);
+  });
+
+  it("extracts only canonical contained absolute plan-directory paths", () => {
+    expect(absolutePlanDirectoryPath("/workspace/repository/docs/plans/import", "/workspace/repository"))
+      .toBe("docs/plans/import");
+    expect(absolutePlanDirectoryPath(
+      String.raw`C:\workspace\repository\docs\plans\import`,
+      String.raw`C:\workspace\repository`,
+    ))
+      .toBe("docs/plans/import");
+    for (const [value, root] of [
+      ["docs/plans/import", "/workspace/repository"],
+      ["/workspace/repository/docs/plans/../escape", "/workspace/repository"],
+      ["/workspace/other/docs/plans/import", "/workspace/repository"],
+      [String.raw`C:workspace\repository\docs\plans\import`, String.raw`C:\workspace\repository`],
+      [String.raw`C:\workspace\repository\docs\plans\..\escape`, String.raw`C:\workspace\repository`],
+      [String.raw`C:\workspace\other\docs\plans\import`, String.raw`C:\workspace\repository`],
+    ]) expect(absolutePlanDirectoryPath(value, root)).toBeUndefined();
   });
 
   it("is a strict superset of generated values accepted by the legacy regex", () => {

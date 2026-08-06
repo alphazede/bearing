@@ -1,4 +1,4 @@
-import type { ProjectOutcomesInput, OutcomeRecord } from "./outcome-projection.js";
+import { MAX_OUTCOME_RECORDS_PER_RUN, type ProjectOutcomesInput, type OutcomeRecord } from "./outcome-projection.js";
 import {
   BearingStoreError,
   type StoredRunListEntry,
@@ -14,6 +14,7 @@ export interface ImprovementWindow {
   readonly generatedAt: string;
   readonly settledRuns: number;
   readonly records: readonly OutcomeRecord[];
+  readonly recordsTruncated?: boolean;
 }
 
 export interface ImprovementStages<Thresholds, Metrics, RecommendationResult> {
@@ -162,6 +163,7 @@ export class ImprovementService<Thresholds, Metrics, RecommendationResult> {
       } catch {
         return { ok: false, reason: "stage_failed" };
       }
+      if (projected.length >= MAX_OUTCOME_RECORDS_PER_RUN) recordsTruncated = true;
       const remaining = this.#maxRecords - records.length;
       if (projected.length > remaining) recordsTruncated = true;
       const retained = Math.min(projected.length, remaining);
@@ -176,6 +178,7 @@ export class ImprovementService<Thresholds, Metrics, RecommendationResult> {
       generatedAt,
       settledRuns,
       records: frozenRecords,
+      recordsTruncated,
     });
 
     let metrics: Metrics;

@@ -1,12 +1,38 @@
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assertContributionBundle,
   exportContributionBundle,
   type ContributionBundle,
 } from "../src/improvement/improvement-export.js";
+
+// Deterministic TOCTOU harness state. Armed only by the race regression test
+// below; a no-op passthrough for every other test in this file.
+let raceArmed = false;
+let raceContribPath: string | null = null;
+let raceOutsidePath: string | null = null;
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    async realpath(path: Parameters<typeof actual.realpath>[0], options?: never) {
+      const resolved = await actual.realpath(path, options);
+      // Simulate a concurrent local process winning the race: the instant
+      // the containment check resolves the real parent directory, swap that
+      // exact path for a symlink pointing outside the repository, before the
+      // export writer acts on the path it just verified.
+      if (raceArmed && raceContribPath !== null && path === raceContribPath) {
+        raceArmed = false;
+        await actual.rm(raceContribPath, { recursive: true, force: true });
+        await actual.symlink(raceOutsidePath as string, raceContribPath);
+      }
+      return resolved;
+    },
+  };
+});
 
 const roots: string[] = [];
 
@@ -151,6 +177,34 @@ describe("improvement contribution export", () => {
 
     expect(result).toEqual({ ok: false, reason: "destination_invalid" });
     expect(await absent(join(outside, "improvement.json"))).toBe(true);
+  });
+
+  it("refuses a write when the parent directory becomes a symlink between the containment check and the write (TOCTOU race)", async () => {
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    const contribPath = join(root, "contrib");
+    await mkdir(contribPath);
+
+    raceContribPath = contribPath;
+    raceOutsidePath = outside;
+    raceArmed = true;
+
+    let result: unknown;
+    try {
+      result = await exportContributionBundle({
+        repositoryRoot: root,
+        destination: "contrib/improvement.json",
+        bundle: bundle(),
+      });
+    } finally {
+      raceArmed = false;
+      raceContribPath = null;
+      raceOutsidePath = null;
+    }
+
+    expect(result).toEqual({ ok: false, reason: "destination_invalid" });
+    expect(await absent(join(outside, "improvement.json"))).toBe(true);
+    expect(await readdir(outside)).toEqual([]);
   });
 
   it("fails closed rather than overwriting an existing file", async () => {

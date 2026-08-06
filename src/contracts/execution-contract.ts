@@ -1,5 +1,6 @@
 import { posix, win32 } from "node:path";
 import { canonicalStringify, hashEvent } from "./run.js";
+import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 import { provenIndependent, type SliceFacts } from "../execution/concurrency-control.js";
 import type { FocusEnvelope, FocusRole } from "../journey/focus-mode.js";
 import { REASONING_TIERS, type ReasoningTier } from "../profile/reasoning-policy.js";
@@ -45,6 +46,19 @@ export interface ExecutionContractDependencyEdge {
   readonly to: string;
 }
 
+/** Required delegation roles a guided run must route before wave artifacts exist. */
+export const ROLE_KINDS = ["execution-author", "review-general", "review-security"] as const;
+export type RoleKind = (typeof ROLE_KINDS)[number];
+
+/** The built-in read-only reviewer, authorized only as a review-role fallback, never a primary or author route. */
+export const SURVEYOR_FALLBACK_ROUTE = "surveyor" as const;
+
+export interface RoleRoute {
+  readonly role: RoleKind;
+  readonly primary: string;
+  readonly fallbacks: readonly string[];
+}
+
 export interface ExecutionContractBody {
   readonly schemaVersion: typeof EXECUTION_CONTRACT_SCHEMA_VERSION;
   readonly contractId: string;
@@ -56,6 +70,8 @@ export interface ExecutionContractBody {
   readonly phases: readonly ExecutionContractPhase[];
   readonly slices: readonly ExecutionContractSlice[];
   readonly dependencyEdges: readonly ExecutionContractDependencyEdge[];
+  /** Owner-selected primary/fallback agent per delegation role. Absent on pre-Phase-3 contracts. */
+  readonly roleRoutes?: readonly RoleRoute[];
 }
 
 /**
@@ -223,6 +239,35 @@ function edgeShape(value: unknown): value is ExecutionContractDependencyEdge {
   return hasExactKeys(value, ["from", "to"]) && focusSliceId(value.from) && focusSliceId(value.to);
 }
 
+const AGENT_ROUTE_IDS = new Set(BUILTIN_ROUTES.map((route) => route.id));
+
+function agentRouteId(value: unknown): value is string {
+  return typeof value === "string" && AGENT_ROUTE_IDS.has(value);
+}
+
+// Surveyor is a built-in read-only reviewer, never an author: it may fill a review
+// fallback slot but is refused as a primary route or as the execution-author's fallback.
+function fallbackRouteId(role: RoleKind, value: unknown): value is string {
+  return agentRouteId(value) || (role !== "execution-author" && value === SURVEYOR_FALLBACK_ROUTE);
+}
+
+function roleRouteShape(value: unknown): value is RoleRoute {
+  if (!hasExactKeys(value, ["role", "primary", "fallbacks"])) return false;
+  if (typeof value.role !== "string" || !(ROLE_KINDS as readonly string[]).includes(value.role)) return false;
+  const role = value.role as RoleKind;
+  if (!agentRouteId(value.primary)) return false;
+  if (!denseArray(value.fallbacks, (item): item is string => fallbackRouteId(role, item))) return false;
+  const fallbacks = value.fallbacks as readonly string[];
+  return !duplicate(fallbacks) && !fallbacks.includes(value.primary as string);
+}
+
+/** Exactly one route per required role: no duplicate, missing, or extra role. */
+export function roleRoutesShape(value: unknown): value is readonly RoleRoute[] {
+  if (!denseArray(value, roleRouteShape) || value.length !== ROLE_KINDS.length) return false;
+  const roles = new Set(value.map((route) => route.role));
+  return roles.size === ROLE_KINDS.length && ROLE_KINDS.every((kind) => roles.has(kind));
+}
+
 function approvalShape(value: unknown): value is ExecutionContractOwnerApproval {
   return hasExactKeys(value, ["kind", "recordedBy", "durable", "recordId", "contentHash"])
     && value.kind === "owner-approval"
@@ -240,6 +285,20 @@ function approvalShape(value: unknown): value is ExecutionContractOwnerApproval 
 export function hashExecutionContractBody(body: ExecutionContractBody): string {
   const canonicalBody = JSON.parse(canonicalStringify(body)) as Parameters<typeof hashEvent>[0];
   return hashEvent(canonicalBody);
+}
+
+/**
+ * Canonical content hash for an owner-approved legacy role-route binding.
+ *
+ * This is an unkeyed integrity binding, not a signature and not an authorization token: it
+ * proves the routes recorded durably are byte-for-byte the routes the owner approved for this
+ * run id, so nothing can be substituted between approval and the ledger. It grants no
+ * authority on its own — anyone able to reach the binding path can compute it — and the
+ * caller's owner actor plus the run's contract state are what decide admission.
+ */
+export function hashLegacyRoleRoutes(runId: string, roleRoutes: readonly RoleRoute[]): string {
+  const canonical = JSON.parse(canonicalStringify({ runId, roleRoutes })) as Parameters<typeof hashEvent>[0];
+  return hashEvent(canonical);
 }
 
 function bodyOf(contract: ApprovedExecutionContract): ExecutionContractBody {
@@ -415,10 +474,10 @@ export function parseApprovedExecutionContract(value: unknown): ExecutionContrac
   if (value.reviewCadence !== "per-slice" && value.reviewCadence !== "per-phase" && value.reviewCadence !== "completion-only") {
     return { ok: false, reason: "invalid_review_cadence" };
   }
-  if (!hasExactKeys(value, [
+  if (!hasAllowedKeys(value, [
     "schemaVersion", "contractId", "runId", "planDirectory", "objective", "mode",
     "reviewCadence", "phases", "slices", "dependencyEdges", "contentHash", "ownerApproval",
-  ])
+  ], ["roleRoutes"])
     || !boundedText(value.contractId)
     || !boundedText(value.runId)
     || !repoRelativePath(value.planDirectory)
@@ -431,6 +490,7 @@ export function parseApprovedExecutionContract(value: unknown): ExecutionContrac
     || typeof value.contentHash !== "string"
     || !HASH.test(value.contentHash)
     || !approvalShape(value.ownerApproval)
+    || (value.roleRoutes !== undefined && !roleRoutesShape(value.roleRoutes))
   ) {
     return { ok: false, reason: "malformed" };
   }

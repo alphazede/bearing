@@ -13,6 +13,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 async function assertInstall(root: string): Promise<void> {
   await Promise.all([
     access(join(root, "dist/cli.js")),
+    access(join(root, ".mcp.json")),
     access(join(root, ".codex-plugin/plugin.json")),
     access(join(root, ".claude-plugin/plugin.json")),
     access(join(root, "plugin-skills/bearing/SKILL.md")),
@@ -22,6 +23,14 @@ async function assertInstall(root: string): Promise<void> {
     access(join(root, "skills/crewmate/SKILL.md")),
     access(join(root, "hooks/focus-reminder.cjs")),
   ]);
+  const codexManifest = JSON.parse(await readFile(join(root, ".codex-plugin/plugin.json"), "utf8"));
+  const codexMcp = JSON.parse(await readFile(join(root, ".mcp.json"), "utf8"));
+  expect(codexManifest.mcpServers).toBe("./.mcp.json");
+  expect(codexMcp.mcpServers.bearing).toEqual({
+    command: "node",
+    args: ["./dist/cli.js", "mcp"],
+    cwd: ".",
+  });
   await expect(exec("bearing", ["--version"], { cwd: root, env: { PATH: join(root, "empty-path") } })).rejects.toMatchObject({ code: "ENOENT" });
   const fallback: { code?: number; stderr?: string } = await exec(process.execPath, [join(root, "dist/cli.js"), "bogus"], { cwd: root, env: { PATH: join(root, "empty-path") } })
     .then(({ stderr }) => ({ stderr }))

@@ -20,6 +20,9 @@ commands. Preserve unrelated work. Return the changed paths, exact command
 results, remaining risks, and any recoverable error that was repaired. Never
 publish an issue or transmit repository data without explicit owner consent.
 
+Crewmate implements exactly one packet, with no delegation, review,
+integration, ledger update, or authority interpretation.
+
 ## Authority and prohibited actions
 
 Treat objective, acceptance, writes, commands, stop condition, decision, and

@@ -409,4 +409,58 @@ describe("RepositoryBootstrap", () => {
       code: "ENOENT",
     });
   });
+
+  it("uses legacyWorkspaceProof to resume valid legacy state without creating workspace.json", async () => {
+    const root = await tempRepo();
+    await mkdir(join(root, ".bearing"), { recursive: true });
+    await writeFile(join(root, ".bearing", "owner.json"), JSON.stringify({ name: "Smokie" }));
+
+    const proofCalls: string[] = [];
+    const bootstrap = new RepositoryBootstrap();
+
+    // 1. Proof returns false -> manifest_missing
+    const refused = await bootstrap.choose(root, {
+      legacyWorkspaceProof: async (path) => {
+        proofCalls.push(path);
+        return false;
+      },
+    });
+    expect(refused).toEqual({ ok: false, reason: "manifest_missing" });
+    expect(proofCalls).toEqual([await realpath(root)]);
+    await expect(lstat(join(root, ".bearing", "workspace.json"))).rejects.toThrow();
+
+    // 2. Proof receives canonicalized path when inputPath is a symlinked prefix
+    const linkDir = await mkdtemp(join(tmpdir(), "bearing-symlink-prefix-"));
+    roots.push(linkDir);
+    const symlinkPath = join(linkDir, "linked-repo");
+    await symlink(root, symlinkPath);
+
+    proofCalls.length = 0;
+    const resumed = await bootstrap.choose(symlinkPath, {
+      legacyWorkspaceProof: async (path) => {
+        proofCalls.push(path);
+        return true;
+      },
+    });
+    expect(resumed).toEqual({
+      ok: true,
+      status: "resumed",
+      repositoryPath: await realpath(root),
+      ownerName: "Smokie",
+    });
+    expect(proofCalls).toEqual([await realpath(root)]);
+    await expect(lstat(join(root, ".bearing", "workspace.json"))).rejects.toThrow();
+
+    // 3. Proof is NOT called when workspace.json is present but malformed
+    await writeFile(join(root, ".bearing", "workspace.json"), "{ invalid json");
+    proofCalls.length = 0;
+    const malformed = await bootstrap.choose(root, {
+      legacyWorkspaceProof: async (path) => {
+        proofCalls.push(path);
+        return true;
+      },
+    });
+    expect(malformed).toEqual({ ok: false, reason: "manifest_malformed" });
+    expect(proofCalls).toEqual([]);
+  });
 });

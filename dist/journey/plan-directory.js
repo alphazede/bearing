@@ -1,10 +1,30 @@
-import { posix, sep } from "node:path";
+import { posix, sep, win32 } from "node:path";
 const PREFIX = "docs/plans/";
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MAX_SEGMENT = 64;
 /** Convert a path returned by the host path.relative() into repository POSIX form. */
 export function nativePlanDirectoryPath(value, separator = sep) {
     return separator === posix.sep ? value : value.split(separator).join(posix.sep);
+}
+/** Return the repository-relative plan directory from one contained canonical absolute path. */
+export function absolutePlanDirectoryPath(value, repositoryRoot) {
+    if (!value || value !== value.trim() || /[\u0000-\u001f\u007f]/.test(value))
+        return undefined;
+    const windows = /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+    if (windows !== (/^[A-Za-z]:[\\/]/.test(repositoryRoot) || repositoryRoot.startsWith("\\\\")))
+        return undefined;
+    const paths = windows ? win32 : posix;
+    if (windows) {
+        if (!win32.isAbsolute(value) || !win32.isAbsolute(repositoryRoot) || nativePlanDirectoryPath(win32.normalize(value), win32.sep) !== value.replaceAll("\\", "/"))
+            return undefined;
+    }
+    else if (!posix.isAbsolute(value) || !posix.isAbsolute(repositoryRoot) || value.includes("\\") || posix.normalize(value) !== value)
+        return undefined;
+    const relative = paths.relative(repositoryRoot, value);
+    if (!relative || relative.startsWith("..") || paths.isAbsolute(relative))
+        return undefined;
+    const candidate = nativePlanDirectoryPath(relative, paths.sep);
+    return planDirectoryValid(candidate) ? candidate : undefined;
 }
 export function planDirectoryValid(value) {
     if (!value.startsWith(PREFIX) || posix.isAbsolute(value) || posix.normalize(value) !== value)

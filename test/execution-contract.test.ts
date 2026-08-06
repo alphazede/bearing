@@ -6,6 +6,7 @@ import {
   parseApprovedExecutionContract,
   type ApprovedExecutionContract,
   type ExecutionContractBody,
+  type RoleRoute,
 } from "../src/contracts/execution-contract.js";
 
 const body: ExecutionContractBody = {
@@ -445,6 +446,63 @@ describe("Approved Execution Contract", () => {
     ["invalid evidence command", "malformed", (value: Record<string, any>) => { value.slices[0].evidenceCommandIds = ["run tests"]; }],
   ] as const)("rejects a projection-incompatible %s during parsing", (_name, reason, mutate) => {
     expect(parseApprovedExecutionContract(changed(mutate))).toEqual({ ok: false, reason });
+  });
+});
+
+describe("roleRoutes", () => {
+  const roleRoutes: readonly RoleRoute[] = [
+    { role: "execution-author", primary: "codex", fallbacks: ["claude"] },
+    { role: "review-general", primary: "claude", fallbacks: [] },
+    { role: "review-security", primary: "claude", fallbacks: ["surveyor"] },
+  ];
+  const withRoleRoutes = (routes: readonly RoleRoute[]): ApprovedExecutionContract => approve({ ...body, roleRoutes: routes });
+
+  it("accepts a contract with valid roleRoutes and changes the content hash", () => {
+    expect(hashExecutionContractBody({ ...body, roleRoutes })).not.toBe(hashExecutionContractBody(body));
+    expect(parseApprovedExecutionContract(withRoleRoutes(roleRoutes))).toMatchObject({ ok: true });
+  });
+
+  it("keeps a pre-Phase-3 contract without roleRoutes parseable and byte-identical", () => {
+    expect(parseApprovedExecutionContract(approve())).toMatchObject({ ok: true });
+    expect(hashExecutionContractBody(body)).toBe("edee3f047847e3512efe58cd5288546ee19269dca1169127991e747f7d66f79e");
+  });
+
+  it("preserves exact primary/fallback order through parsing", () => {
+    const parsed = parseApprovedExecutionContract(withRoleRoutes(roleRoutes));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error("valid roleRoutes contract did not parse");
+    expect(parsed.value.roleRoutes).toEqual(roleRoutes);
+  });
+
+  it("changes the content hash when fallback order changes", () => {
+    const forward = roleRoutes.map((route) =>
+      route.role === "execution-author" ? { ...route, fallbacks: ["claude", "agy"] } : route);
+    const reversed = roleRoutes.map((route) =>
+      route.role === "execution-author" ? { ...route, fallbacks: ["agy", "claude"] } : route);
+    expect(hashExecutionContractBody({ ...body, roleRoutes: forward }))
+      .not.toBe(hashExecutionContractBody({ ...body, roleRoutes: reversed }));
+  });
+
+  it.each([
+    ["duplicate role (and an implicitly missing role)", (routes: RoleRoute[]) => { routes[2] = { ...routes[1] }; }],
+    ["missing role", (routes: RoleRoute[]) => { routes.pop(); }],
+    ["duplicate fallback", (routes: RoleRoute[]) => { routes[0] = { ...routes[0], fallbacks: ["claude", "claude"] }; }],
+    ["primary repeated as fallback", (routes: RoleRoute[]) => { routes[0] = { ...routes[0], primary: "codex", fallbacks: ["codex"] }; }],
+    ["unknown key", (routes: RoleRoute[]) => { (routes[0] as unknown as Record<string, unknown>).extra = true; }],
+    ["oversized unknown route id", (routes: RoleRoute[]) => { routes[0] = { ...routes[0], primary: `sk-${"a".repeat(200)}` }; }],
+    ["unrecognized route id", (routes: RoleRoute[]) => { routes[0] = { ...routes[0], primary: "totally-unknown-route" }; }],
+    ["surveyor as a primary route", (routes: RoleRoute[]) => { routes[0] = { ...routes[0], primary: "surveyor" }; }],
+    ["surveyor as the execution-author fallback", (routes: RoleRoute[]) => { routes[0] = { ...routes[0], fallbacks: ["surveyor"] }; }],
+  ] as const)("fails closed on %s", (_name, mutate) => {
+    const mutated = structuredClone(roleRoutes) as RoleRoute[];
+    mutate(mutated);
+    expect(parseApprovedExecutionContract(withRoleRoutes(mutated))).toEqual({ ok: false, reason: "malformed" });
+  });
+
+  it("accepts surveyor as the review-general fallback", () => {
+    const withSurveyorFallback = roleRoutes.map((route) =>
+      route.role === "review-general" ? { ...route, fallbacks: ["surveyor"] } : route);
+    expect(parseApprovedExecutionContract(withRoleRoutes(withSurveyorFallback))).toMatchObject({ ok: true });
   });
 });
 

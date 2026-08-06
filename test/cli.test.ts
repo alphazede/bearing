@@ -10,11 +10,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ImprovementCliReport, LauncherDeps } from "../src/cli.js";
 import { defaultOpenBrowser, isDirectInvocation, parseFocusArgs, parseImproveArgs, parseJourneyArgs, parseStartArgs, run } from "../src/cli.js";
-import { executeHeadlessJourney } from "../src/server/local-session.js";
-import type { ProcessRunner } from "../src/adapters/adapters.js";
+import { buildProposal } from "../src/improvement/improvement-proposal.js";
+import { createRequestHandler, executeHeadlessJourney, LocalSessionService, type HeadlessJourneyReceipt } from "../src/server/local-session.js";
+import type { ProcessInvocation, ProcessRunner } from "../src/adapters/adapters.js";
 import { BearingStore } from "../src/store/bearing-store.js";
 import { currentPlanningVerdict, renderPlanningReview } from "../src/journey/planning-journey.js";
 import { parseRuntimeState } from "../src/contracts/runtime-state.js";
+import { createDispatcher } from "../src/mcp/server.js";
 
 function newCtx() {
   const out: string[] = [];
@@ -39,12 +41,51 @@ function newCtx() {
   return { d, out, err, opened, getExitCode: () => state.exitCode };
 }
 
+/** Minimal direct authenticated handler invoker for deterministic journey body regression (mirrors internal test seam without relying on non-exported symbols). */
+async function invokeDirect(
+  handler: ReturnType<typeof createRequestHandler>,
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  body?: unknown,
+): Promise<{ status: number; body: string; headers: Record<string, string | readonly string[]> }> {
+  return new Promise((resolveResponse) => {
+    const request = new EventEmitter() as any;
+    Object.assign(request, { method, url: path, headers });
+    let status = 200;
+    const responseHeaders: Record<string, string | readonly string[]> = {};
+    const chunks: Buffer[] = [];
+    let settled = false;
+    const finish = (chunk?: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (chunk !== undefined) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      resolveResponse({ status, body: Buffer.concat(chunks).toString("utf8"), headers: responseHeaders });
+    };
+    const response = {
+      writeHead: (nextStatus: number, nextHeaders?: Record<string, string | number | readonly string[]>) => {
+        status = nextStatus;
+        for (const [name, value] of Object.entries(nextHeaders ?? {})) responseHeaders[name.toLowerCase()] = Array.isArray(value) ? value.map(String) : String(value);
+        return response;
+      },
+      setHeader: (name: string, value: string | readonly string[]) => { responseHeaders[name.toLowerCase()] = Array.isArray(value) ? value : value; },
+      end: finish,
+    };
+    handler(request, response as any);
+    queueMicrotask(() => {
+      if (body !== undefined) request.emit("data", Buffer.from(JSON.stringify(body)));
+      request.emit("end");
+    });
+  });
+}
+
 const servers: Server[] = [];
 const roots: string[] = [];
 const validPlan = "---\ntype: plan-spec\nstatus: complete\n---\n\n## Acceptance criteria\n\n- **AC-1** — Bounded account data is imported.\n\n## Risks and open questions\n\n- **RISK-1** — Invalid input must fail closed.\n\n## Entry criteria\n\nApproved scope.\n\n## Exit criteria\n\nAll evidence passes.\n\n## Rollback or repair\n\nRepair the bounded slice.\n\n## Accountable controller\n\nNavigator.\n";
 const validDesign = "---\ntype: design\nstatus: complete\n---\n\n## Use Cases and Communication Flows\n\nComplete flow.\n\n## Interface Option Check\n\ninterface_options: not needed - fixture\n\n## OOPDSA Implementation Design\n\n- **DES-1** — Use the existing import boundary.\n- **CONTRACT-1** — Reject invalid input without writes.\n";
 const validSeit = "---\ntype: seit\nstatus: complete\n---\n\n## Required Commands\n\n- **CMD-UNIT** — `pnpm test`\n\n## Traceability Matrix\n\n| SEIT row ID | Acceptance/risk ID | Design/contract ID | Boundary/test layer | Positive case | Negative/failure case | Command/procedure ID | Evidence |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| SEIT-1 | AC-1 | DES-1, CONTRACT-1 | unit | valid input imports | invalid input fails closed | CMD-UNIT | test report |\n| SEIT-2 | RISK-1 | CONTRACT-1 | unit | bounded input remains valid | invalid input is rejected | CMD-UNIT | test report |\n\n## Cross-cutting Checks\n\nComplete checks.\n";
 const validImplementation = "---\ntype: implementation\nstatus: complete\n---\n\n# Implementation\n\n## Phase 1 — Build\n\n### Slice 1.1 — Import\n\n**Goal.** Import bounded account data.\n\n**Requirement IDs.** AC-1\n\n**Design IDs.** DES-1, CONTRACT-1\n\n**SEIT proof rows.** SEIT-1\n\n**Type.** /tdd\n\n**Design lenses.** CDD\n\n**Implementation role.** Backend Engineer\n\n**Agent model route.** Codex agent default\n\n**Agent reasoning level.** medium.\n\n**Ponytail mode.** full\n\n**Review path.** native review\n\n### 1.1 execution manifest\n\n**Write set.** `src/import.ts` only.\n\n**Command IDs.** CMD-UNIT\n\n**Stop condition.** Stop if focused validation fails.\n\n**Human decision.** None.\n";
+const validMultiSliceImplementation = `${validImplementation}\n## Dependencies\n\n- Wave 1: Slice 1.1.\n- Wave 2: Slice 1.2.\n\n### Slice 1.2 — Export\n\n**Goal.** Export bounded account data.\n\n**Requirement IDs.** AC-1\n\n**Design IDs.** DES-1, CONTRACT-1\n\n**SEIT proof rows.** SEIT-1\n\n**Type.** /tdd\n\n**Design lenses.** CDD\n\n**Implementation role.** Backend Engineer\n\n**Agent model route.** Codex agent default\n\n**Agent reasoning level.** medium.\n\n**Ponytail mode.** full\n\n**Review path.** native review\n\n### 1.2 execution manifest\n\n**Write set.** \`src/export.ts\` only.\n\n**Command IDs.** CMD-UNIT\n\n**Stop condition.** Stop if focused validation fails.\n\n**Human decision.** None.\n`;
 
 async function writePlan(root: string, implementation = validImplementation, plan = validPlan, directory = "docs/plans/import"): Promise<string> {
   const target = join(root, directory);
@@ -116,7 +157,15 @@ async function disposableGitRepository(prefix: string): Promise<string> {
   return root;
 }
 
-function modelOperatedJourneyRunner(planDirectory: string): ProcessRunner & { readonly stages: string[] } {
+async function commitFixture(root: string, message: string): Promise<void> {
+  const git = (args: readonly string[]) => new Promise<void>((resolve, reject) => {
+    execFile("git", [...args], { cwd: root }, (error) => (error ? reject(error) : resolve()));
+  });
+  await git(["add", "-A"]);
+  await git(["-c", "user.name=Bearing Test", "-c", "user.email=bearing-test@example.invalid", "commit", "-q", "-m", message]);
+}
+
+function modelOperatedJourneyRunner(planDirectory: string, multiSlice = false): ProcessRunner & { readonly stages: string[] } {
   const stages: string[] = [];
   return {
     stages,
@@ -199,30 +248,46 @@ function modelOperatedJourneyRunner(planDirectory: string): ProcessRunner & { re
         };
       }
       if (stage === "draft-implementation") {
-        await writeFile(join(invocation.cwd, planDirectory, "implementation.md"), validImplementation);
+        await writeFile(join(invocation.cwd, planDirectory, "implementation.md"), multiSlice ? validMultiSliceImplementation : validImplementation);
         return {
           exitCode: 0,
           events: [{ type: "item.completed", data: { content: `BEARING_RESULT {"kind":"action","summary":"Implementation route drafted.","artifacts":["${planDirectory}/implementation.md"]}` } }],
           usage: { tokens: 1 },
         };
       }
+      // The coordinated-Expedition coordinator dispatch is read-only (issue 93): it must never
+      // reach the write block below. `--allow-subagents` marks it for grok-style routes; codex has
+      // no such flag and instead loses write authority through a `read-only` sandbox — spelled
+      // `"-s", "read-only"` for a fresh dispatch and `sandbox_mode="read-only"` for a resumed one
+      // (see `buildInvocation`'s codex branch). Detecting only the grok flag left this fixture
+      // simulating a codex coordinator that silently performed the real product write itself —
+      // exactly the defect Bearing's pre-dispatch write probe now rejects.
+      const readOnlyCoordinatorDispatch = invocation.args.includes("--allow-subagents") || invocation.args.some((arg) => arg.includes("read-only"));
+      if (stage === "execute-expedition" && readOnlyCoordinatorDispatch) {
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: 'BEARING_RESULT {"kind":"question","question":"Selected-slice handoff ready."}' } }],
+          usage: { tokens: 1 },
+        };
+      }
       const reviewPath = join(invocation.cwd, planDirectory, "review.html");
       const review = await readFile(reviewPath, "utf8");
       await mkdir(join(invocation.cwd, "src"), { recursive: true });
+      const selectedArtifact = invocation.stdin.includes('"remainingSlices":["1.2"]') ? "src/export.ts" : "src/import.ts";
       await Promise.all([
-        writeFile(join(invocation.cwd, "src/import.ts"), "export const imported = true;\n"),
+        writeFile(join(invocation.cwd, selectedArtifact), "export const completed = true;\n"),
         writeFile(
           reviewPath,
           review.replace(
             '<section id="bearing-final-qa" data-status="pending"><h2>Actual implementation and QA</h2><p>Pending implementation and validation.</p></section>',
-            '<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: src/import.ts changed exactly as planned.</p><p>Validation evidence: CMD-UNIT passed.</p></section>',
+            `<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: ${selectedArtifact} changed exactly as planned.</p><p>Validation evidence: CMD-UNIT passed.</p></section>`,
           ),
         ),
       ]);
       const content = `BEARING_RESULT ${JSON.stringify({
         kind: "action",
         summary: `${stage === "execute-explorer" ? "Explorer" : "Expedition"} execution complete.`,
-        artifacts: ["src/import.ts", `${planDirectory}/review.html`],
+        artifacts: [selectedArtifact, `${planDirectory}/review.html`],
         evidence: [{ commandId: "CMD-UNIT", status: "passed", summary: "focused tests passed" }],
       })}`;
       return { exitCode: 0, events: [{ type: "item.completed", data: { content } }], usage: { tokens: 1 } };
@@ -387,9 +452,17 @@ describe("headless journey commands", () => {
       }
     }
     expect(parseJourneyArgs(["journey", "progress", ...route, "--run", "journey_1", "--stage", "gather-supplies"])).toMatchObject({ ok: true, action: "progress", stage: "gather-supplies" });
+    expect(parseJourneyArgs([
+      "journey", "progress", ...route, "--run", "journey_1", "--stage", "repository-fit",
+      "--retry-warrant", "changed_environment", "--expected-revision", "7",
+    ])).toMatchObject({ ok: true, action: "progress", stage: "repository-fit", retryWarrant: "changed_environment", expectedRevision: 7 });
     for (const args of [
       ["journey", "create", ...route, "--run", "journey_1"],
       ["journey", "progress", ...route, "--run", "journey_1", "--stage", "not-a-stage"],
+      ["journey", "progress", ...route, "--run", "journey_1", "--stage", "repository-fit", "--retry-warrant", "changed_environment"],
+      ["journey", "progress", ...route, "--run", "journey_1", "--stage", "repository-fit", "--expected-revision", "7"],
+      ["journey", "progress", ...route, "--run", "journey_1", "--stage", "repository-fit", "--retry-warrant", "not-a-warrant", "--expected-revision", "7"],
+      ["journey", "progress", ...route, "--run", "journey_1", "--stage", "repository-fit", "--retry-warrant", "changed_environment", "--expected-revision", "07"],
       ["journey", "status", ...route, "--run", "journey_1", "--answer", "nope"],
       ["journey", "confirm-amendment", ...route, "--run", "journey_1", "--stage", "execute-explorer"],
       ["journey", "decide", ...route, "--run", "journey_1", "--answer", "  "],
@@ -397,6 +470,16 @@ describe("headless journey commands", () => {
       ["journey", "select-execution", ...route, "--run", "journey_1", "--mode", "explorer", "--review-cadence", "never"],
       ["journey", "select-execution", ...route, "--run", "journey_1", "--mode", "explorer", "--mode", "expedition", "--review-cadence", "slice"],
       ["journey", "unknown", ...route, "--run", "journey_1"],
+    ]) expect(parseJourneyArgs(args).ok).toBe(false);
+  });
+
+  it("transports one explicit Expedition slice and rejects invalid or Explorer selectors", () => {
+    expect(parseJourneyArgs([
+      "journey", "select-execution", ...route, "--run", "journey_1", "--mode", "expedition", "--review-cadence", "slice", "--slice", "1.2",
+    ])).toMatchObject({ ok: true, action: "select-execution", executionMode: "expedition", reviewCadence: "slice", currentSlice: "1.2" });
+    for (const args of [
+      ["journey", "select-execution", ...route, "--run", "journey_1", "--mode", "expedition", "--review-cadence", "slice", "--slice", "../1.2"],
+      ["journey", "select-execution", ...route, "--run", "journey_1", "--mode", "explorer", "--review-cadence", "slice", "--slice", "1.2"],
     ]) expect(parseJourneyArgs(args).ok).toBe(false);
   });
 
@@ -446,6 +529,44 @@ describe("headless journey commands", () => {
     expect(ctx.err).toEqual([]);
     expect(ctx.out).toHaveLength(1);
     expect(JSON.parse(ctx.out[0]!)).toEqual({ ok: false, code: "illegal_transition", runId: "journey_1", revision: 4 });
+  });
+
+  it("runs the guided MCP stdio loop and writes nothing else to stdout", async () => {
+    const ctx = newCtx();
+    let started = 0;
+    await run(["mcp"], { ...ctx.d, mcpServer: async () => { started += 1; } });
+    expect(started).toBe(1);
+    expect(ctx.out).toEqual([]);
+    expect(ctx.err).toEqual([]);
+    expect(ctx.getExitCode()).toBeUndefined();
+  });
+
+  it("rejects extra mcp arguments without starting the loop", async () => {
+    const ctx = newCtx();
+    let started = 0;
+    await run(["mcp", "--serve"], { ...ctx.d, mcpServer: async () => { started += 1; } });
+    expect(started).toBe(0);
+    expect(ctx.getExitCode()).toBe(2);
+    expect(ctx.out).toEqual([]);
+  });
+
+  it("dispatches resolve-cli and emits one JSON receipt reporting source/path/version/reason (e2e)", async () => {
+    // no PATH older in this baseline; expect bundled selected, path_unavailable or preferred not relevant here
+    const ctx = newCtx();
+    await run(["resolve-cli"], ctx.d);
+    expect(ctx.getExitCode()).toBeUndefined();
+    expect(ctx.err).toEqual([]);
+    expect(ctx.out).toHaveLength(1);
+    const receipt = JSON.parse(ctx.out[0]!);
+    expect(receipt).toMatchObject({
+      source: expect.stringMatching(/^(bundled|path)$/),
+      path: expect.any(String),
+      version: expect.any(String),
+      reason: expect.any(String),
+      bundled: { path: expect.any(String), version: expect.any(String) },
+    });
+    // in clean env, either path_unavailable (if no bearing on PATH) or path_preferred
+    expect(["path_unavailable", "path_preferred", "runtime_version_mismatch", "path_provenance_unverified"]).toContain(receipt.reason);
   });
 
   it("returns usage and exit code two without calling the transition layer for malformed input", async () => {
@@ -519,6 +640,24 @@ describe("headless journey commands", () => {
       },
     };
     const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "headless_decision_1" } as const;
+    const affirmationBase = { ...base, runId: "headless_natural_affirmation_1" } as const;
+    const affirmationCreated = await executeHeadlessJourney({ action: "create", ...affirmationBase, goal: "Accept an explicit natural repository-fit affirmation." }, { processRunner: runner });
+    const affirmationStore = new BearingStore(root);
+    const affirmationBefore = await affirmationStore.load(affirmationBase.runId);
+    const affirmationDecisionId = affirmationBefore.pendingDecision?.decisionId;
+    expect(affirmationCreated).toMatchObject({ ok: true, allowedActions: ["status", "resume", "decide"] });
+    expect(await executeHeadlessJourney({ action: "decide", ...affirmationBase, answer: "I confirm all of these" }, { processRunner: runner })).toMatchObject({
+      ok: true,
+      summary: "Repository fit confirmed for docs/plans/headless-decision.",
+      allowedActions: ["status", "resume", "progress"],
+    });
+    const affirmationAfter = await affirmationStore.load(affirmationBase.runId);
+    expect(affirmationAfter.pendingDecision).toBeNull();
+    expect(affirmationAfter.revision).toBe(affirmationBefore.revision + 2);
+    expect(affirmationAfter.events.filter((event) => event.type === "ownerAnswered")).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ decisionId: affirmationDecisionId, answer: "I confirm all of these" }) }),
+    ]);
+
     const created = await executeHeadlessJourney({ action: "create", ...base, goal: "Advance the accepted repository-fit decision." }, { processRunner: runner });
     expect(created).toMatchObject({
       ok: true,
@@ -536,19 +675,51 @@ describe("headless journey commands", () => {
     expect(decisionId).toBeTypeOf("string");
     expect(before.journeyCheckpoint).toMatchObject({ stage: "repository-fit", status: "waiting", question, questionDecisionId: decisionId });
 
+    const absent = await executeHeadlessJourney({ action: "decide", ...base, answer: "missing-plan" }, { processRunner: runner });
+    expect(absent).toMatchObject({
+      ok: true,
+      stage: "repository-fit",
+      status: "waiting",
+      validationError: "repository_fit_answer_invalid",
+      remedy: 'Answer "Confirm", enter an exact docs/plans/... path, or answer "Decline".',
+      correctionAction: "decide",
+      allowedActions: ["status", "resume", "decide"],
+      requiredOwnerAction: { type: "answer" },
+    });
+    const correctable = await store.load(base.runId);
+    expect(correctable.pendingDecision).not.toBeNull();
+    expect(correctable.pendingDecision?.decisionId).not.toBe(decisionId);
+    expect(await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner })).toMatchObject({
+      validationError: "repository_fit_answer_invalid",
+      correctionAction: "decide",
+      allowedActions: ["status", "resume", "decide"],
+    });
+
+    const replacementDecisionId = correctable.pendingDecision?.decisionId;
+    expect(replacementDecisionId).toBeTypeOf("string");
+    expect(await executeHeadlessJourney({ action: "decide", ...base, answer: "Use the repository I mentioned" }, { processRunner: runner })).toMatchObject({
+      validationError: "repository_fit_answer_invalid",
+      correctionAction: "decide",
+      allowedActions: ["status", "resume", "decide"],
+    });
+    const correctedAgain = await store.load(base.runId);
+    const acceptedDecisionId = correctedAgain.pendingDecision?.decisionId;
+    expect(acceptedDecisionId).toBeTypeOf("string");
+    expect(acceptedDecisionId).not.toBe(replacementDecisionId);
+
     const decided = await executeHeadlessJourney({ action: "decide", ...base, answer, stage: "review" }, { processRunner: runner });
     const after = await store.load(base.runId);
     expect(decided).toEqual({
       ok: true,
       runId: base.runId,
-      revision: before.revision + 2,
+      revision: before.revision + 6,
       stage: "repository-fit",
       status: "waiting",
       summary: "Repository fit confirmed for docs/plans/headless-decision.",
       outcome: { type: "waiting" },
       allowedActions: ["status", "resume", "progress"],
     });
-    expect(after.revision).toBe(before.revision + 2);
+    expect(after.revision).toBe(before.revision + 6);
     expect(after.pendingDecision).toBeNull();
     expect(after.journeyCheckpoint).toMatchObject({
       stage: "repository-fit",
@@ -557,9 +728,15 @@ describe("headless journey commands", () => {
       repositoryFitDecision: { outcome: "confirmed", planDirectory: "docs/plans/headless-decision", repository: root },
     });
     expect(after.journeyCheckpoint?.question).toBeUndefined();
-    expect(JSON.parse(after.journeyCheckpoint?.qaJson ?? "null")).toEqual([{ question, answer }]);
+    expect(JSON.parse(after.journeyCheckpoint?.qaJson ?? "null")).toEqual([
+      { question, answer: "missing-plan" },
+      { question: correctable.pendingDecision?.question, answer: "Use the repository I mentioned" },
+      { question: correctedAgain.pendingDecision?.question, answer },
+    ]);
     expect(after.events.slice(before.events.length).filter((event) => event.type === "ownerAnswered")).toEqual([
-      expect.objectContaining({ payload: expect.objectContaining({ decisionId, answer }) }),
+      expect.objectContaining({ payload: expect.objectContaining({ decisionId, answer: "missing-plan" }) }),
+      expect.objectContaining({ payload: expect.objectContaining({ decisionId: replacementDecisionId, answer: "Use the repository I mentioned" }) }),
+      expect.objectContaining({ payload: expect.objectContaining({ decisionId: acceptedDecisionId, answer }) }),
     ]);
   });
 
@@ -690,6 +867,175 @@ describe("headless journey commands", () => {
     expect(seeded.ok).toBe(true);
     expect(await executeHeadlessJourney({ action: "progress", ...base, stage: "gather-supplies" }, { processRunner: runner })).toMatchObject({ ok: true, stage: "gather-supplies" });
     expect(await executeHeadlessJourney({ action: "progress", ...base, stage: "set-bearings" }, { processRunner: runner })).toMatchObject({ ok: true, stage: "set-bearings" });
+  });
+
+  it("surfaces bounded stable design-checkpoint findings on the failed map-route receipt", async () => {
+    const root = await disposableGitRepository("bearing-headless-design-findings-");
+    const planDirectory = "docs/plans/design-findings";
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "design_findings_1" } as const;
+    // Mirrors the issue-78 reproduction: both documents carry frontmatter `status: validated`,
+    // design.md splits the required exact heading, seit.md renames the traceability matrix and
+    // omits Cross-cutting Checks. Distinctive markers prove no document body ever leaks.
+    const invalidDesign = "---\ntype: design\nstatus: validated\n---\n\n## Use Cases\n\nLEAK-MARKER-DESIGN-1 Split flow surface.\n\n## Communication Flows\n\nLEAK-MARKER-DESIGN-2 Separate flow surface.\n\n## Interface Option Check\n\ninterface_options: not needed - fixture\n\n## OOPDSA Implementation Design\n\n- **DES-1** — Use the existing import boundary.\n- **CONTRACT-1** — Reject invalid input without writes.\n";
+    const invalidSeit = "---\ntype: seit\nstatus: validated\n---\n\n## Required Commands\n\n- **CMD-UNIT** — `pnpm test`\n\n## Prospective SEIT Traceability Matrix\n\nLEAK-MARKER-SEIT-1 Renamed matrix body.\n";
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async (invocation) => {
+        if (invocation.stdin.includes("Return a short structured completion confirming readiness.")) {
+          return { exitCode: 0, events: [{ type: "completed", data: { content: "ready" } }], usage: { tokens: 1 } };
+        }
+        await writeFile(join(root, planDirectory, "design.md"), invalidDesign);
+        await writeFile(join(root, planDirectory, "seit.md"), invalidSeit);
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: `BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["${planDirectory}/design.md","${planDirectory}/seit.md"]}` } }],
+          usage: { tokens: 1 },
+        };
+      },
+    };
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Surface bounded design checkpoint findings." }, { processRunner: runner })).ok).toBe(true);
+    const store = new BearingStore(root), current = await store.load(base.runId);
+    const seeded = await store.apply({
+      schemaVersion: 1, commandId: "design-findings-gathered", correlationId: "design-findings-gathered", runId: base.runId, expectedRevision: current.revision,
+      session: { sessionId: "bearing", actor: "bearing" }, type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "gather-supplies", status: "waiting", artifacts: [], qaJson: "[]", planDirectory, resolvedPlanDirectory: planDirectory,
+        repositoryFitDecision: { outcome: "confirmed", planDirectory, repository: root, decidedAt: "2026-07-29T00:00:00.000Z" },
+        planningState: "REQUIREMENTS_READY", selectionProvider: "codex", selectionModel: "gpt-5.6-terra", selectionReasoning: "medium",
+      },
+    });
+    expect(seeded.ok, JSON.stringify(seeded)).toBe(true);
+    await mkdir(join(root, planDirectory), { recursive: true });
+    await writeFile(join(root, planDirectory, "plan-spec.md"), validPlan);
+
+    const receipt = await executeHeadlessJourney({ action: "progress", ...base, stage: "map-route" }, { processRunner: runner });
+    expect(receipt).toMatchObject({
+      ok: true,
+      stage: "map-route",
+      status: "failed",
+      outcome: { type: "failed", code: "artifact_invalid" },
+    });
+    // Stable codes and details, in deterministic emission order: per artifact, frontmatter first,
+    // then each required exact heading, design.md before seit.md.
+    expect(receipt.findings).toEqual([
+      { code: "artifact_frontmatter_invalid", severity: "amendment", artifact: "design.md", observed: "status: validated", required: "type: design and status: complete or amended", remedy: "repair the artifact frontmatter" },
+      { code: "design_section_missing", severity: "amendment", artifact: "design.md", observed: "Use Cases and Communication Flows", required: "non-empty Use Cases and Communication Flows section", remedy: "add the Use Cases and Communication Flows section" },
+      { code: "artifact_frontmatter_invalid", severity: "amendment", artifact: "seit.md", observed: "status: validated", required: "type: seit and status: complete or amended", remedy: "repair the artifact frontmatter" },
+      { code: "seit_section_missing", severity: "amendment", artifact: "seit.md", observed: "Traceability Matrix", required: "non-empty Traceability Matrix section", remedy: "add the Traceability Matrix section" },
+      { code: "seit_section_missing", severity: "amendment", artifact: "seit.md", observed: "Cross-cutting Checks", required: "non-empty Cross-cutting Checks section", remedy: "add the Cross-cutting Checks section" },
+    ]);
+    // The same findings survive the durable round trip: a later status receipt restores them
+    // from the persisted checkpoint, unchanged.
+    expect(await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner })).toMatchObject({ status: "failed", findings: receipt.findings });
+    // Bounded surface: the receipt carries no document body, no absolute repository path.
+    const serialized = JSON.stringify(receipt);
+    expect(serialized).not.toContain(root);
+    expect(serialized).not.toMatch(/LEAK-MARKER/);
+  });
+
+  it("keeps design-checkpoint findings on their own frontmatter line and reports the field the gate actually rejects", async () => {
+    const root = await disposableGitRepository("bearing-headless-findings-bounds-");
+    const planDirectory = "docs/plans/findings-bounds";
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "findings_bounds_1" } as const;
+    const designBody = "\n\n## Use Cases and Communication Flows\n\nComplete flow.\n\n## Interface Option Check\n\ninterface_options: not needed - fixture\n\n## OOPDSA Implementation Design\n\n- **DES-1** — Use the existing import boundary.\n- **CONTRACT-1** — Reject invalid input without writes.\n";
+    const seitBody = "\n\n## Required Commands\n\n- **CMD-UNIT** — `pnpm test`\n\n## Traceability Matrix\n\nComplete matrix.\n\n## Cross-cutting Checks\n\nComplete checks.\n";
+    // design.md: an empty `type:` field followed by a hostile line. A newline-crossing
+    // separator would capture that following line and echo it into the receipt verbatim.
+    const smuggledDesign = `---\ntype:\nSMUGGLE-MARKER-DESIGN ghp_examplenotarealtoken /etc/passwd\nstatus: complete\n---${designBody}`;
+    // seit.md: the gate accepts the type because a later line matches, and rejects the
+    // status. A first-match-then-return emitter would blame the type and hide the status.
+    const shadowedSeit = `---\ntype: bad\ntype: seit\nstatus: garbage\n---${seitBody}`;
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async (invocation) => {
+        if (invocation.stdin.includes("Return a short structured completion confirming readiness.")) {
+          return { exitCode: 0, events: [{ type: "completed", data: { content: "ready" } }], usage: { tokens: 1 } };
+        }
+        await writeFile(join(root, planDirectory, "design.md"), smuggledDesign);
+        await writeFile(join(root, planDirectory, "seit.md"), shadowedSeit);
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: `BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["${planDirectory}/design.md","${planDirectory}/seit.md"]}` } }],
+          usage: { tokens: 1 },
+        };
+      },
+    };
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Bound design checkpoint findings." }, { processRunner: runner })).ok).toBe(true);
+    const store = new BearingStore(root), current = await store.load(base.runId);
+    const seeded = await store.apply({
+      schemaVersion: 1, commandId: "findings-bounds-gathered", correlationId: "findings-bounds-gathered", runId: base.runId, expectedRevision: current.revision,
+      session: { sessionId: "bearing", actor: "bearing" }, type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "gather-supplies", status: "waiting", artifacts: [], qaJson: "[]", planDirectory, resolvedPlanDirectory: planDirectory,
+        repositoryFitDecision: { outcome: "confirmed", planDirectory, repository: root, decidedAt: "2026-07-29T00:00:00.000Z" },
+        planningState: "REQUIREMENTS_READY", selectionProvider: "codex", selectionModel: "gpt-5.6-terra", selectionReasoning: "medium",
+      },
+    });
+    expect(seeded.ok, JSON.stringify(seeded)).toBe(true);
+    await mkdir(join(root, planDirectory), { recursive: true });
+    await writeFile(join(root, planDirectory, "plan-spec.md"), validPlan);
+
+    const receipt = await executeHeadlessJourney({ action: "progress", ...base, stage: "map-route" }, { processRunner: runner });
+    expect(receipt).toMatchObject({ ok: true, stage: "map-route", status: "failed", outcome: { type: "failed", code: "artifact_invalid" } });
+    expect(receipt.findings).toEqual([
+      { code: "artifact_frontmatter_invalid", severity: "amendment", artifact: "design.md", observed: "type: missing value", required: "type: design and status: complete or amended", remedy: "repair the artifact frontmatter" },
+      { code: "artifact_frontmatter_invalid", severity: "amendment", artifact: "seit.md", observed: "status: garbage", required: "type: seit and status: complete or amended", remedy: "repair the artifact frontmatter" },
+    ]);
+    // The hostile line never reaches the receipt through any field.
+    const serialized = JSON.stringify(receipt);
+    expect(serialized).not.toContain(root);
+    expect(serialized).not.toMatch(/SMUGGLE-MARKER|ghp_|\/etc\/passwd/);
+  });
+
+  it("redacts a bare secret-shaped token in a design-checkpoint finding even without a key= prefix", async () => {
+    const root = await disposableGitRepository("bearing-headless-secret-shaped-");
+    const planDirectory = "docs/plans/secret-shaped";
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "secret_shaped_1" } as const;
+    const designBody = "\n\n## Use Cases and Communication Flows\n\nComplete flow.\n\n## Interface Option Check\n\ninterface_options: not needed - fixture\n\n## OOPDSA Implementation Design\n\n- **DES-1** — Use the existing import boundary.\n- **CONTRACT-1** — Reject invalid input without writes.\n";
+    const seitBody = "\n\n## Required Commands\n\n- **CMD-UNIT** — `pnpm test`\n\n## Traceability Matrix\n\nComplete matrix.\n\n## Cross-cutting Checks\n\nComplete checks.\n";
+    // A bare token with no key=/token:/Bearer/sk-/AKIA prefix, planted as the frontmatter
+    // status value itself (not a smuggled following line) - the exact shape that survives
+    // line-bounding and depends entirely on HEADLESS_SECRET recognizing the bare prefix.
+    const tokenDesign = `---\ntype: design\nstatus: ghp_examplenotarealtoken1234567890\n---${designBody}`;
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async (invocation) => {
+        if (invocation.stdin.includes("Return a short structured completion confirming readiness.")) {
+          return { exitCode: 0, events: [{ type: "completed", data: { content: "ready" } }], usage: { tokens: 1 } };
+        }
+        await writeFile(join(root, planDirectory, "design.md"), tokenDesign);
+        await writeFile(join(root, planDirectory, "seit.md"), `---\ntype: seit\nstatus: complete\n---${seitBody}`);
+        return {
+          exitCode: 0,
+          events: [{ type: "item.completed", data: { content: `BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["${planDirectory}/design.md","${planDirectory}/seit.md"]}` } }],
+          usage: { tokens: 1 },
+        };
+      },
+    };
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Redact a bare secret-shaped token." }, { processRunner: runner })).ok).toBe(true);
+    const store = new BearingStore(root), current = await store.load(base.runId);
+    const seeded = await store.apply({
+      schemaVersion: 1, commandId: "secret-shaped-gathered", correlationId: "secret-shaped-gathered", runId: base.runId, expectedRevision: current.revision,
+      session: { sessionId: "bearing", actor: "bearing" }, type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "gather-supplies", status: "waiting", artifacts: [], qaJson: "[]", planDirectory, resolvedPlanDirectory: planDirectory,
+        repositoryFitDecision: { outcome: "confirmed", planDirectory, repository: root, decidedAt: "2026-07-29T00:00:00.000Z" },
+        planningState: "REQUIREMENTS_READY", selectionProvider: "codex", selectionModel: "gpt-5.6-terra", selectionReasoning: "medium",
+      },
+    });
+    expect(seeded.ok, JSON.stringify(seeded)).toBe(true);
+    await mkdir(join(root, planDirectory), { recursive: true });
+    await writeFile(join(root, planDirectory, "plan-spec.md"), validPlan);
+
+    const receipt = await executeHeadlessJourney({ action: "progress", ...base, stage: "map-route" }, { processRunner: runner });
+    expect(receipt).toMatchObject({ ok: true, stage: "map-route", status: "failed", outcome: { type: "failed", code: "artifact_invalid" } });
+    // The whole finding is dropped rather than emitted with a redacted value - headlessText
+    // rejects the string outright, and headlessFindings drops any finding that fails it.
+    expect(receipt.findings ?? []).toEqual([]);
+    expect(JSON.stringify(receipt)).not.toMatch(/ghp_/);
   });
 
   it("rejects route approval before plan review without changing durable state", async () => {
@@ -840,6 +1186,1146 @@ describe("headless journey commands", () => {
       expect(progress).toMatchObject({ ok: true, runId: base.runId, stage: "repository-fit" });
     }
   });
+
+  it("recovers one Expedition adapter failure across guided MCP and headless boundaries and rejects missing, incompatible, wrong-stage, and replayed requests", async () => {
+    const root = await disposableGitRepository("bearing-headless-expedition-retry-");
+    const readinessResult = { exitCode: 0, events: [{ type: "completed" as const, data: { content: "ready" } }], usage: { tokens: 1 } };
+    const bootstrap: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async () => ({ exitCode: 0, events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }], usage: { tokens: 1 } }),
+    };
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "expedition_retry_1" } as const;
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Recover one bounded Expedition adapter failure." }, { processRunner: bootstrap })).ok).toBe(true);
+    const store = await seedPlanReviewBoundary(root, base.runId, "docs/plans/expedition-retry");
+    expect((await executeHeadlessJourney({ action: "approve-route", ...base }, { processRunner: bootstrap })).ok).toBe(true);
+
+    const planDirectory = "docs/plans/expedition-retry";
+    const selectionRunner = modelOperatedJourneyRunner(planDirectory);
+    expect(await executeHeadlessJourney({
+      action: "select-execution",
+      ...base,
+      executionMode: "expedition",
+      reviewCadence: "end",
+      currentSlice: "1.1",
+    }, { processRunner: selectionRunner })).toMatchObject({ ok: true, stage: "execute-expedition" });
+    await commitFixture(root, "establish retry fixture baseline");
+    const selected = await store.load(base.runId);
+    if (!selected.journeyCheckpoint) throw new Error("selected Expedition checkpoint missing");
+    const recordedFailure = await store.apply({
+      schemaVersion: 1,
+      commandId: "record-expedition-adapter-failure",
+      correlationId: "record-expedition-adapter-failure",
+      runId: base.runId,
+      expectedRevision: selected.revision,
+      session: { sessionId: "bearing", actor: "bearing" },
+      type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "execute-expedition",
+        status: "failed",
+        artifacts: selected.journeyCheckpoint.artifacts,
+        qaJson: selected.journeyCheckpoint.qaJson ?? "[]",
+        ...(selected.journeyCheckpoint.planDirectory ? { planDirectory: selected.journeyCheckpoint.planDirectory } : {}),
+        ...(selected.journeyCheckpoint.resolvedPlanDirectory ? { resolvedPlanDirectory: selected.journeyCheckpoint.resolvedPlanDirectory } : {}),
+        ...(selected.journeyCheckpoint.repositoryFitDecision ? { repositoryFitDecision: selected.journeyCheckpoint.repositoryFitDecision } : {}),
+        ...(selected.journeyCheckpoint.reviewBaselineRevision !== undefined ? { reviewBaselineRevision: selected.journeyCheckpoint.reviewBaselineRevision } : {}),
+        ...(selected.journeyCheckpoint.planningState ? { planningState: selected.journeyCheckpoint.planningState } : {}),
+        ...(selected.journeyCheckpoint.selectionProvider ? { selectionProvider: selected.journeyCheckpoint.selectionProvider } : {}),
+        ...(selected.journeyCheckpoint.selectionModel ? { selectionModel: selected.journeyCheckpoint.selectionModel } : {}),
+        ...(selected.journeyCheckpoint.selectionReasoning ? { selectionReasoning: selected.journeyCheckpoint.selectionReasoning } : {}),
+        ...(selected.journeyCheckpoint.runtimeStateJson ? { runtimeStateJson: selected.journeyCheckpoint.runtimeStateJson } : {}),
+        lastResultJson: JSON.stringify({ status: "failure", code: "adapter_failed", tokens: 0 }),
+      },
+    });
+    expect(recordedFailure.ok, JSON.stringify(recordedFailure)).toBe(true);
+    const seededFailure = await store.load(base.runId);
+    expect(seededFailure.revision).toBe(selected.revision + 1);
+    expect(seededFailure.journeyCheckpoint).toMatchObject({ stage: "execute-expedition", status: "failed" });
+
+    let recoveryStageCalls = 0;
+    const recoveryInvocations: ProcessInvocation[] = [];
+    const recovery: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async (invocation) => {
+        recoveryInvocations.push(invocation);
+        if (invocation.stdin.includes("confirming readiness")) return readinessResult;
+        recoveryStageCalls += 1;
+        return { exitCode: 0, events: [], usage: { tokens: 1 } };
+      },
+    };
+    const status = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: recovery });
+    expect(status).toMatchObject({
+      stage: "execute-expedition",
+      status: "failed",
+      allowedActions: ["status", "progress"],
+      recoveryAction: {
+        type: "progress",
+        stage: "execute-expedition",
+        retryWarrants: ["new_hypothesis", "new_evidence", "changed_strategy", "changed_environment"],
+      },
+    });
+    const failedRevision = status.revision;
+    const failedState = await store.load(base.runId);
+
+    const mcp = createDispatcher({
+      headlessJourney: (request) => executeHeadlessJourney(request, { processRunner: recovery }),
+    });
+    const missingMcp = await mcp({
+      jsonrpc: "2.0",
+      id: 139,
+      method: "tools/call",
+      params: {
+        name: "bearing_transition",
+        arguments: {
+          repository: root,
+          runId: base.runId,
+          action: "progress",
+          expectedRevision: failedRevision,
+          stage: "execute-expedition",
+        },
+      },
+    });
+    const missingMcpContent = (missingMcp?.result as { structuredContent?: unknown } | undefined)?.structuredContent;
+    expect(missingMcpContent).toMatchObject({
+      code: "illegal_transition",
+      revision: failedRevision,
+      allowedActions: ["status", "progress"],
+      recoveryAction: {
+        type: "progress",
+        stage: "execute-expedition",
+        retryWarrants: ["new_hypothesis", "new_evidence", "changed_strategy", "changed_environment"],
+      },
+    });
+    expect(recoveryStageCalls).toBe(0);
+    expect(await store.load(base.runId)).toEqual(failedState);
+
+    for (const request of [
+      { action: "progress" as const, ...base, stage: "execute-expedition" as const },
+      { action: "progress" as const, ...base, stage: "execute-expedition" as const, expectedRevision: failedRevision },
+      { action: "progress" as const, ...base, stage: "review" as const, retryWarrant: "changed_environment" as const, expectedRevision: failedRevision },
+      { action: "progress" as const, ...base, stage: "execute-expedition" as const, retryWarrant: "approved_amendment" as const, expectedRevision: failedRevision },
+    ]) {
+      expect(await executeHeadlessJourney(request, { processRunner: recovery })).toEqual({
+        ok: false,
+        code: "illegal_transition",
+        runId: base.runId,
+        revision: failedRevision,
+      });
+      expect(recoveryStageCalls).toBe(0);
+      expect(await store.load(base.runId)).toMatchObject({ revision: failedState.revision, events: failedState.events });
+    }
+
+    const retryMcp = await mcp({
+      jsonrpc: "2.0",
+      id: 140,
+      method: "tools/call",
+      params: {
+        name: "bearing_transition",
+        arguments: {
+          repository: root,
+          runId: base.runId,
+          action: "progress",
+          expectedRevision: failedRevision,
+          stage: "execute-expedition",
+          retryWarrant: "changed_strategy",
+          provider: "codex",
+          model: "gpt-5.6-sol",
+          reasoning: "max",
+        },
+      },
+    });
+    const retried = (retryMcp?.result as { structuredContent?: HeadlessJourneyReceipt } | undefined)?.structuredContent;
+    expect(retried, JSON.stringify(retried)).toMatchObject({ stage: "execute-expedition", status: "failed", outcome: { type: "failed", code: "result_missing" }, route: { provider: "codex", model: "gpt-5.6-sol", reasoning: "max" } });
+    expect(retried).not.toHaveProperty("code");
+    expect(recoveryStageCalls).toBe(1);
+    expect(retried?.revision).toBeGreaterThan(failedRevision);
+    expect(recoveryInvocations.filter((invocation) => !invocation.stdin.includes("confirming readiness")))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ routeId: "codex", executable: "codex" })]));
+    const after = await store.load(base.runId);
+    expect(after.journeyCheckpoint).toMatchObject({ selectionProvider: "codex", selectionModel: "gpt-5.6-sol", selectionReasoning: "max" });
+    expect(JSON.parse(after.journeyCheckpoint?.runtimeStateJson ?? "{}").retry).toEqual(expect.arrayContaining([
+      expect.objectContaining({ warrant: "changed_strategy", outcome: "admitted" }),
+    ]));
+
+    expect(await executeHeadlessJourney({
+      action: "progress",
+      ...base,
+      stage: "execute-expedition",
+      retryWarrant: "changed_environment",
+      expectedRevision: failedRevision,
+    }, { processRunner: recovery })).toEqual({ ok: false, code: "illegal_transition", runId: base.runId, revision: after.revision });
+    expect(recoveryStageCalls).toBe(1);
+    expect((await store.load(base.runId)).revision).toBe(after.revision);
+  });
+
+  it("returns a coherent ordinary status when the ledger advances during its snapshot", async () => {
+    const root = await disposableGitRepository("bearing-headless-status-race-");
+    const runId = "status_race_ordinary";
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId } as const;
+    const calls: Parameters<ProcessRunner["run"]>[0][] = [];
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async (invocation) => {
+        calls.push(invocation);
+        return {
+          exitCode: 0,
+          events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }],
+          usage: { tokens: 1 },
+        };
+      },
+    };
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Keep an ordinary status read available." }, { processRunner: runner })).ok).toBe(true);
+    const store = new BearingStore(root);
+    const before = await store.load(runId);
+    const callsBeforeStatus = calls.length;
+    let concurrentState: Awaited<ReturnType<BearingStore["load"]>> | undefined;
+
+    const status = await executeHeadlessJourney(
+      { action: "status", ...base },
+      {
+        processRunner: runner,
+        beforeHeadlessRecoveryDispatch: async ({ action, expectedRevision }) => {
+          expect(action).toBe("status");
+          const concurrent = await store.apply({
+            schemaVersion: 1,
+            commandId: `${runId}-concurrent-owner-question`,
+            correlationId: `${runId}-concurrent-owner-question`,
+            runId,
+            expectedRevision,
+            session: { sessionId: "other-owner", actor: "owner" },
+            type: "requireDecision",
+            payload: { decisionId: `${runId}-concurrent-owner-question`, question: "Confirm the unrelated next step.", consequential: true },
+          });
+          expect(concurrent.ok).toBe(true);
+          concurrentState = await store.load(runId);
+        },
+      },
+    );
+
+    expect(status).toMatchObject({ ok: true, runId, revision: concurrentState?.revision });
+    expect(concurrentState?.revision).toBe(before.revision + 1);
+    expect(calls).toHaveLength(callsBeforeStatus + 1);
+    expect(calls.at(-1)?.stdin).toContain("Return a short structured completion confirming readiness.");
+    expect(await store.load(runId)).toEqual(concurrentState);
+  });
+
+  it("fails closed when an ordinary status becomes an issue 85 failure during its snapshot", async () => {
+    const root = await disposableGitRepository("bearing-headless-status-recovery-race-");
+    const runId = "status_race_recovery";
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId } as const;
+    const calls: Parameters<ProcessRunner["run"]>[0][] = [];
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async (invocation) => {
+        calls.push(invocation);
+        return {
+          exitCode: 0,
+          events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }],
+          usage: { tokens: 1 },
+        };
+      },
+    };
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Fail closed if this ordinary status becomes recoverable." }, { processRunner: runner })).ok).toBe(true);
+    const store = new BearingStore(root);
+    const before = await store.load(runId);
+    const callsBeforeStatus = calls.length;
+    let concurrentState: Awaited<ReturnType<BearingStore["load"]>> | undefined;
+
+    const status = await executeHeadlessJourney(
+      { action: "status", ...base },
+      {
+        processRunner: runner,
+        beforeHeadlessRecoveryDispatch: async ({ action, expectedRevision }) => {
+          expect(action).toBe("status");
+          const concurrent = await store.apply({
+            schemaVersion: 1,
+            commandId: `${runId}-concurrent-recovery-checkpoint`,
+            correlationId: `${runId}-concurrent-recovery-checkpoint`,
+            runId,
+            expectedRevision,
+            session: { sessionId: "other-bearing", actor: "bearing" },
+            type: "recordJourneyCheckpoint",
+            payload: {
+              stage: "map-route",
+              status: "failed",
+              artifacts: [],
+              lastResultJson: JSON.stringify({ status: "failure", code: "artifact_invalid", tokens: 1 }),
+              qaJson: "[]",
+              selectionProvider: "codex",
+              selectionModel: "gpt-5.6-terra",
+              selectionReasoning: "medium",
+            },
+          });
+          expect(concurrent.ok).toBe(true);
+          concurrentState = await store.load(runId);
+        },
+      },
+    );
+
+    expect(status).toMatchObject({ ok: false, code: "illegal_transition", runId, revision: concurrentState?.revision });
+    expect(concurrentState?.revision).toBe(before.revision + 1);
+    expect(calls).toHaveLength(callsBeforeStatus + 1);
+    expect(calls.at(-1)?.stdin).toContain("Return a short structured completion confirming readiness.");
+    expect(await store.load(runId)).toEqual(concurrentState);
+  });
+
+  it("fails closed when ordinary progress is superseded before its execution checkpoint", async () => {
+    const root = await disposableGitRepository("bearing-headless-progress-revision-race-");
+    const directory = "docs/plans/progress-revision-race";
+    await mkdir(join(root, directory), { recursive: true });
+    const runId = "progress_revision_race";
+    const question = "Use this repository and plan directory?";
+    const stageCalls: string[] = [];
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async (invocation) => {
+        if (invocation.stdin.includes("Return a short structured completion confirming readiness.")) {
+          return { exitCode: 0, events: [{ type: "completed", data: { content: "ready" } }], usage: { tokens: 1 } };
+        }
+        const stage = ["repository-fit", "set-bearings"].find((candidate) => invocation.stdin.includes(`Stage: ${candidate}`));
+        if (!stage) throw new Error("progress revision race stage missing");
+        stageCalls.push(stage);
+        if (stage === "repository-fit") {
+          return {
+            exitCode: 0,
+            events: [{ type: "completed", data: { content: `BEARING_RESULT ${JSON.stringify({
+              kind: "fit",
+              ok: true,
+              assumption: {
+                repository: root,
+                planDirectory: directory,
+                rationale: "The disposable repository is the selected bounded workspace.",
+                evidence: [{ kind: "manifest", path: "package.json", detail: "The manifest identifies this workspace." }],
+              },
+              question,
+            })}` } }],
+            usage: { tokens: 1 },
+          };
+        }
+        return {
+          exitCode: 0,
+          events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Workspace ready.","artifacts":[]}' } }],
+          usage: { tokens: 1 },
+        };
+      },
+    };
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId } as const;
+    expect(await executeHeadlessJourney({ action: "create", ...base, goal: "Bind ordinary progress to its classified revision." }, { processRunner: runner })).toMatchObject({
+      ok: true,
+      requiredOwnerAction: { type: "answer", question },
+    });
+    expect(await executeHeadlessJourney({ action: "decide", ...base, answer: "Confirm" }, { processRunner: runner })).toMatchObject({ ok: true, stage: "repository-fit" });
+
+    const store = new BearingStore(root);
+    const before = await store.load(runId);
+    const stageCallsBeforeProgress = stageCalls.length;
+    let concurrentState: Awaited<ReturnType<BearingStore["load"]>> | undefined;
+    const progressed = await executeHeadlessJourney(
+      { action: "progress", ...base, stage: "set-bearings" },
+      {
+        processRunner: runner,
+        beforeJourneyExecutionCheckpoint: async ({ expectedRevision }) => {
+          const concurrent = await store.apply({
+            schemaVersion: 1,
+            commandId: `${runId}-concurrent-issue85-checkpoint`,
+            correlationId: `${runId}-concurrent-issue85-checkpoint`,
+            runId,
+            expectedRevision,
+            session: { sessionId: "other-bearing", actor: "bearing" },
+            type: "recordJourneyCheckpoint",
+            payload: {
+              stage: "map-route",
+              status: "failed",
+              artifacts: [],
+              lastResultJson: JSON.stringify({ status: "failure", code: "artifact_invalid", tokens: 1 }),
+              qaJson: "[]",
+              planDirectory: directory,
+              resolvedPlanDirectory: directory,
+              repositoryFitDecision: before.journeyCheckpoint?.repositoryFitDecision,
+              selectionProvider: "codex",
+              selectionModel: "gpt-5.6-terra",
+              selectionReasoning: "medium",
+            },
+          });
+          expect(concurrent.ok).toBe(true);
+          concurrentState = await store.load(runId);
+        },
+      },
+    );
+
+    expect(progressed).toEqual({ ok: false, code: "illegal_transition", runId, revision: concurrentState?.revision });
+    expect(concurrentState?.revision).toBe(before.revision + 1);
+    expect(stageCalls).toHaveLength(stageCallsBeforeProgress);
+    expect(await store.load(runId)).toEqual(concurrentState);
+  });
+
+  it("fails closed when retry refusal is superseded before its checkpoint", async () => {
+    const root = await disposableGitRepository("bearing-headless-retry-refusal-race-");
+    const directory = "docs/plans/retry-refusal-race";
+    await mkdir(join(root, directory), { recursive: true });
+    const runId = "retry_refusal_revision_race";
+    const question = "Use this repository and plan directory?";
+    const stageCalls: string[] = [];
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async (invocation) => {
+        if (invocation.stdin.includes("Return a short structured completion confirming readiness.")) {
+          return { exitCode: 0, events: [{ type: "completed", data: { content: "ready" } }], usage: { tokens: 1 } };
+        }
+        const stage = ["repository-fit", "set-bearings"].find((candidate) => invocation.stdin.includes(`Stage: ${candidate}`));
+        if (!stage) throw new Error("retry refusal race stage missing");
+        stageCalls.push(stage);
+        if (stage === "repository-fit") {
+          return {
+            exitCode: 0,
+            events: [{ type: "completed", data: { content: `BEARING_RESULT ${JSON.stringify({
+              kind: "fit",
+              ok: true,
+              assumption: {
+                repository: root,
+                planDirectory: directory,
+                rationale: "The disposable repository is the selected bounded workspace.",
+                evidence: [{ kind: "manifest", path: "package.json", detail: "The manifest identifies this workspace." }],
+              },
+              question,
+            })}` } }],
+            usage: { tokens: 1 },
+          };
+        }
+        return {
+          exitCode: 0,
+          events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Workspace ready.","artifacts":[]}' } }],
+          usage: { tokens: 1 },
+        };
+      },
+    };
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId } as const;
+    expect(await executeHeadlessJourney({ action: "create", ...base, goal: "Bind retry refusal to its classified revision." }, { processRunner: runner })).toMatchObject({
+      ok: true,
+      requiredOwnerAction: { type: "answer", question },
+    });
+    expect(await executeHeadlessJourney({ action: "decide", ...base, answer: "Confirm" }, { processRunner: runner })).toMatchObject({ ok: true, stage: "repository-fit" });
+
+    const store = new BearingStore(root);
+    let current = await store.load(runId);
+    const fit = current.journeyCheckpoint?.repositoryFitDecision;
+    const failed = await store.apply({
+      schemaVersion: 1,
+      commandId: `${runId}-prior-set-bearings-failure`,
+      correlationId: `${runId}-prior-set-bearings-failure`,
+      runId,
+      expectedRevision: current.revision,
+      session: { sessionId: "bearing", actor: "bearing" },
+      type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "set-bearings",
+        status: "failed",
+        artifacts: [],
+        lastResultJson: JSON.stringify({ status: "failure", code: "artifact_invalid", tokens: 1 }),
+        qaJson: "[]",
+        planDirectory: directory,
+        resolvedPlanDirectory: directory,
+        repositoryFitDecision: fit,
+        selectionProvider: "codex",
+        selectionModel: "gpt-5.6-terra",
+        selectionReasoning: "medium",
+      },
+    });
+    expect(failed.ok).toBe(true);
+    current = await store.load(runId);
+    const ordinary = await store.apply({
+      schemaVersion: 1,
+      commandId: `${runId}-ordinary-repository-fit`,
+      correlationId: `${runId}-ordinary-repository-fit`,
+      runId,
+      expectedRevision: current.revision,
+      session: { sessionId: "bearing", actor: "bearing" },
+      type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "repository-fit",
+        status: "waiting",
+        artifacts: [],
+        lastResultJson: JSON.stringify({ status: "action", summary: "Repository fit confirmed.", artifacts: [], tokens: 1 }),
+        qaJson: "[]",
+        planDirectory: directory,
+        resolvedPlanDirectory: directory,
+        repositoryFitDecision: fit,
+        selectionProvider: "codex",
+        selectionModel: "gpt-5.6-terra",
+        selectionReasoning: "medium",
+      },
+    });
+    expect(ordinary.ok).toBe(true);
+
+    const before = await store.load(runId);
+    const stageCallsBeforeProgress = stageCalls.length;
+    let concurrentState: Awaited<ReturnType<BearingStore["load"]>> | undefined;
+    let concurrentLedger: string | undefined;
+    const progressed = await executeHeadlessJourney(
+      { action: "progress", ...base, stage: "set-bearings" },
+      {
+        processRunner: runner,
+        beforeJourneyExecutionCheckpoint: async ({ expectedRevision }) => {
+          const concurrent = await store.apply({
+            schemaVersion: 1,
+            commandId: `${runId}-concurrent-issue85-checkpoint`,
+            correlationId: `${runId}-concurrent-issue85-checkpoint`,
+            runId,
+            expectedRevision,
+            session: { sessionId: "other-bearing", actor: "bearing" },
+            type: "recordJourneyCheckpoint",
+            payload: {
+              stage: "map-route",
+              status: "failed",
+              artifacts: [],
+              lastResultJson: JSON.stringify({ status: "failure", code: "artifact_invalid", tokens: 2 }),
+              qaJson: "[]",
+              planDirectory: directory,
+              resolvedPlanDirectory: directory,
+              repositoryFitDecision: fit,
+              selectionProvider: "codex",
+              selectionModel: "gpt-5.6-terra",
+              selectionReasoning: "medium",
+            },
+          });
+          expect(concurrent.ok).toBe(true);
+          concurrentState = await store.load(runId);
+          concurrentLedger = await readFile(join(root, ".bearing", "runs", runId, "events.jsonl"), "utf8");
+        },
+      },
+    );
+
+    expect(concurrentState).toBeDefined();
+    expect(progressed).toEqual({ ok: false, code: "illegal_transition", runId, revision: concurrentState?.revision });
+    expect(concurrentState?.revision).toBe(before.revision + 1);
+    expect(stageCalls).toHaveLength(stageCallsBeforeProgress);
+    expect(await readFile(join(root, ".bearing", "runs", runId, "events.jsonl"), "utf8")).toBe(concurrentLedger);
+    expect(await store.load(runId)).toEqual(concurrentState);
+  });
+
+  it("recovers failed headless journeys through active resume", async () => {
+    const cases = [
+      { stage: "map-route", status: "failed", code: "artifact_invalid", recoveryType: "progress", recoveryStage: "gather-supplies", executionMode: undefined, reviewCadence: undefined },
+      { stage: "execute-explorer", status: "running", code: "interrupted", recoveryType: "resume", recoveryStage: "execute-explorer", executionMode: "explorer", reviewCadence: "phase" },
+      { stage: "execute-expedition", status: "running", code: "interrupted", recoveryType: "resume", recoveryStage: "execute-expedition", executionMode: "expedition", reviewCadence: "end" },
+    ] as const;
+
+    for (const scenario of cases) {
+      const root = await disposableGitRepository(`bearing-headless-recovery-${scenario.stage}-`);
+      const directory = `docs/plans/recovery-${scenario.stage}`;
+      const runId = `recovery_${scenario.stage.replaceAll("-", "_")}`;
+      const goal = `Recover the preserved ${scenario.stage} checkpoint.`;
+      const providerSessionId = scenario.stage === "map-route"
+        ? "019f8d4e-a637-7e71-8c76-af9d7ec91ad1"
+        : scenario.stage === "execute-explorer"
+          ? "019f8d4e-a637-7e71-8c76-af9d7ec91ad2"
+          : "019f8d4e-a637-7e71-8c76-af9d7ec91ad3";
+      const scripted = modelOperatedJourneyRunner(directory);
+      const invocations: Parameters<ProcessRunner["run"]>[0][] = [];
+      const runner: ProcessRunner = {
+        executableAvailable: scripted.executableAvailable,
+        verify: scripted.verify,
+        run: async (invocation) => {
+          invocations.push(invocation);
+          return scripted.run(invocation);
+        },
+      };
+      const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId } as const;
+      const bootstrap: ProcessRunner = {
+        executableAvailable: () => true,
+        verify: async () => true,
+        run: async () => ({ exitCode: 0, events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }], usage: { tokens: 1 } }),
+      };
+      expect((await executeHeadlessJourney({ action: "create", ...base, goal }, { processRunner: bootstrap })).ok).toBe(true);
+      const store = new BearingStore(root);
+      await seedPlanReviewBoundary(root, runId, directory);
+      const sources = await Promise.all(["plan-spec.md", "design.md", "seit.md", "implementation.md"].map((name) => readFile(join(root, directory, name), "utf8")));
+      await writeFile(join(root, directory, "review.html"), renderPlanningReview(["plan-spec.md", "design.md", "seit.md", "implementation.md"].map((name, index) => [name, sources[index]!] as [string, string])));
+      const approval = await executeHeadlessJourney({ action: "approve-route", ...base }, { processRunner: runner });
+      expect(approval).toMatchObject({ ok: true });
+
+      const approved = await store.load(runId);
+      const approvedCheckpoint = approved.journeyCheckpoint!;
+      const qa = [
+        { question: "Owner recovery constraint", answer: "Preserve the bounded plan and containment." },
+        ...(scenario.executionMode
+          ? [
+              { question: "Execution mode", answer: scenario.executionMode },
+              { question: "Review cadence", answer: scenario.reviewCadence },
+              { question: "Cleanup merged worktrees", answer: "off" },
+            ]
+          : []),
+      ];
+      const retry = [{ fingerprint: scenario.code === "artifact_invalid" ? "a".repeat(64) : "b".repeat(64), warrant: "new_evidence", reasoningTier: "medium", outcome: "admitted" }] as const;
+      const recoverablePayload = {
+        stage: scenario.stage,
+        status: scenario.status,
+        artifacts: [`${directory}/plan-spec.md`, `${directory}/design.md`, `${directory}/seit.md`, `${directory}/implementation.md`, `${directory}/review.html`],
+        qaJson: JSON.stringify(qa),
+        planDirectory: directory,
+        resolvedPlanDirectory: directory,
+        repositoryFitDecision: approvedCheckpoint.repositoryFitDecision,
+        reviewBaselineRevision: approvedCheckpoint.reviewBaselineRevision,
+        ...(scenario.status === "failed" ? { lastResultJson: JSON.stringify({ status: "failure", code: scenario.code, tokens: 7 }) } : {}),
+        selectionProvider: "codex",
+        selectionModel: "gpt-5.6-terra",
+        selectionReasoning: "medium",
+        providerSessionId,
+        runtimeStateJson: JSON.stringify({ version: 1, trace: [{ sequence: 1, recordedAt: "2026-08-02T12:00:00.000Z", kind: "stage.started", status: "running" }], retry, sessionContinuity: "intact" }),
+        planningState: "PLANNING_VALIDATED",
+      } as const;
+      type RecoveryCheckpointOverrides = Omit<Partial<typeof recoverablePayload>, "selectionProvider" | "selectionModel" | "selectionReasoning"> & {
+        readonly selectionProvider?: string;
+        readonly selectionModel?: string;
+        readonly selectionReasoning?: string;
+      };
+      const recordRecoveryCheckpoint = async (suffix: string, overrides: RecoveryCheckpointOverrides = {}) => {
+        const current = await store.load(runId);
+        const result = await store.apply({
+          schemaVersion: 1, commandId: `${runId}-${suffix}`, correlationId: `${runId}-${suffix}`, runId, expectedRevision: current.revision,
+          session: { sessionId: "bearing", actor: "bearing" }, type: "recordJourneyCheckpoint",
+          payload: { ...recoverablePayload, ...overrides },
+        });
+        expect(result.ok).toBe(true);
+      };
+      const checkpoint = await store.apply({
+        schemaVersion: 1, commandId: `${runId}-recoverable`, correlationId: `${runId}-recoverable`, runId, expectedRevision: approved.revision,
+        session: { sessionId: "bearing", actor: "bearing" }, type: "recordJourneyCheckpoint",
+        payload: recoverablePayload,
+      });
+      expect(checkpoint.ok).toBe(true);
+
+      const expectNoMutatingRecovery = async (label: string) => {
+        const ledgerBefore = await store.load(runId);
+        const callsBefore = scripted.stages.length;
+        const receipt = await executeHeadlessJourney(
+          scenario.recoveryType === "resume"
+            ? { action: "resume", ...base }
+            : { action: "progress", ...base, stage: scenario.recoveryStage },
+          { processRunner: runner },
+        );
+        if (scenario.recoveryType === "resume") {
+          expect.soft(receipt, label).toMatchObject({ ok: true, readiness: "blocked", allowedActions: ["status"] });
+        } else {
+          expect.soft(receipt, label).toEqual({ ok: false, code: "illegal_transition", runId, revision: ledgerBefore.revision });
+        }
+        expect.soft(scripted.stages, `${label} runner calls`).toHaveLength(callsBefore);
+        expect.soft(await store.load(runId), `${label} ledger`).toEqual(ledgerBefore);
+      };
+
+      const beforeStatus = await store.load(runId);
+      const status = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner });
+      expect(status).toMatchObject({
+        ok: true,
+        runId,
+        stage: scenario.stage,
+        status: "failed",
+        outcome: { type: "failed", code: scenario.code },
+        allowedActions: scenario.recoveryType === "resume" ? ["status", "resume"] : ["status", "progress"],
+        recoveryAction: { type: scenario.recoveryType, stage: scenario.recoveryStage },
+      });
+      expect(await store.load(runId)).toEqual(beforeStatus);
+
+      const stageCallsBeforeStatusRace = scripted.stages.length;
+      let newerStatusState: Awaited<ReturnType<BearingStore["load"]>> | undefined;
+      const racedStatus = await executeHeadlessJourney(
+        { action: "status", ...base },
+        {
+          processRunner: runner,
+          beforeHeadlessRecoveryDispatch: async ({ action, expectedRevision }) => {
+            expect(action).toBe("status");
+            const concurrent = await store.apply({
+              schemaVersion: 1,
+              commandId: `${runId}-concurrent-status-checkpoint`,
+              correlationId: `${runId}-concurrent-status-checkpoint`,
+              runId,
+              expectedRevision,
+              session: { sessionId: "other-bearing", actor: "bearing" },
+              type: "recordJourneyCheckpoint",
+              payload: recoverablePayload,
+            });
+            expect(concurrent.ok).toBe(true);
+            newerStatusState = await store.load(runId);
+          },
+        },
+      );
+      expect(racedStatus).toMatchObject({ ok: false, code: "illegal_transition", runId, revision: newerStatusState?.revision });
+      expect(scripted.stages).toHaveLength(stageCallsBeforeStatusRace);
+      expect(await store.load(runId)).toEqual(newerStatusState);
+
+      const callsBeforeUnavailableRead = invocations.length;
+      const beforeUnavailableRead = await store.load(runId);
+      let unavailableRunCalls = 0;
+      const unavailableRunner: ProcessRunner = {
+        executableAvailable: () => false,
+        verify: async () => false,
+        run: async () => {
+          unavailableRunCalls += 1;
+          throw new Error("unavailable recovery route must not run");
+        },
+      };
+      const unavailableStatus = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: unavailableRunner });
+      expect(unavailableStatus).toMatchObject({
+        ok: true,
+        status: "failed",
+        allowedActions: ["status"],
+        readiness: "unavailable",
+      });
+      expect(unavailableStatus).not.toHaveProperty("recoveryAction");
+      const unavailableResume = await executeHeadlessJourney({ action: "resume", ...base }, { processRunner: unavailableRunner });
+      expect(unavailableResume).toEqual({
+        ok: false,
+        code: "route_unavailable",
+        runId,
+        revision: beforeUnavailableRead.revision,
+        readiness: "unavailable",
+      });
+      expect(unavailableRunCalls).toBe(0);
+      expect(invocations).toHaveLength(callsBeforeUnavailableRead);
+      expect(await store.load(runId)).toEqual(beforeUnavailableRead);
+
+      await recordRecoveryCheckpoint("ineligible-fit", {
+        repositoryFitDecision: { outcome: "confirmed", planDirectory: directory, repository: `${root}-other`, decidedAt: "2026-07-29T00:00:00.000Z" },
+      });
+      if (scenario.stage === "map-route") {
+        const beforeDecision = await store.load(runId);
+        const required = await store.apply({
+          schemaVersion: 1, commandId: `${runId}-owner-decision`, correlationId: `${runId}-owner-decision`, runId, expectedRevision: beforeDecision.revision,
+          session: { sessionId: "owner", actor: "owner" }, type: "requireDecision",
+          payload: { decisionId: `${runId}-owner-decision`, question: "Choose the recovery owner.", consequential: true },
+        });
+        expect(required.ok).toBe(true);
+        expect(await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner })).toMatchObject({
+          status: "failed",
+          allowedActions: ["status", "resume", "decide"],
+          question: "Choose the recovery owner.",
+          requiredOwnerAction: { type: "answer", question: "Choose the recovery owner." },
+        });
+        const stageCallsBeforePendingStatusRace = scripted.stages.length;
+        let newerPendingStatusState: Awaited<ReturnType<BearingStore["load"]>> | undefined;
+        const racedPendingStatus = await executeHeadlessJourney(
+          { action: "status", ...base },
+          {
+            processRunner: runner,
+            beforeHeadlessRecoveryDispatch: async ({ action, expectedRevision }) => {
+              expect(action).toBe("status");
+              const answered = await store.apply({
+                schemaVersion: 1,
+                commandId: `${runId}-concurrent-pending-status-answer`,
+                correlationId: `${runId}-concurrent-pending-status-answer`,
+                runId,
+                expectedRevision,
+                session: { sessionId: "other-owner", actor: "owner" },
+                type: "recordOwnerAnswer",
+                payload: { decisionId: `${runId}-owner-decision`, answer: "Concurrent owner checkpoint." },
+              });
+              expect(answered.ok).toBe(true);
+              const concurrent = await store.apply({
+                schemaVersion: 1,
+                commandId: `${runId}-concurrent-pending-status-require`,
+                correlationId: `${runId}-concurrent-pending-status-require`,
+                runId,
+                expectedRevision: expectedRevision + 1,
+                session: { sessionId: "other-owner", actor: "owner" },
+                type: "requireDecision",
+                payload: { decisionId: `${runId}-owner-decision`, question: "Choose the recovery owner.", consequential: true },
+              });
+              expect(concurrent.ok).toBe(true);
+              newerPendingStatusState = await store.load(runId);
+            },
+          },
+        );
+        expect(racedPendingStatus).toMatchObject({ ok: false, code: "illegal_transition", runId, revision: newerPendingStatusState?.revision });
+        expect(scripted.stages).toHaveLength(stageCallsBeforePendingStatusRace);
+        expect(await store.load(runId)).toEqual(newerPendingStatusState);
+        const pending = await store.load(runId);
+        const stageCallsBeforeDecision = scripted.stages.length;
+        let newerDecisionState: Awaited<ReturnType<BearingStore["load"]>> | undefined;
+        const racedDecision = await executeHeadlessJourney(
+          { action: "decide", ...base, answer: "Alice owns recovery." },
+          {
+            processRunner: runner,
+            beforeHeadlessRecoveryDispatch: async ({ action, expectedRevision }) => {
+              expect(action).toBe("decide");
+              const displaced = await store.apply({
+                schemaVersion: 1,
+                commandId: `${runId}-concurrent-decision-answer`,
+                correlationId: `${runId}-concurrent-decision-answer`,
+                runId,
+                expectedRevision,
+                session: { sessionId: "other-owner", actor: "owner" },
+                type: "recordOwnerAnswer",
+                payload: { decisionId: `${runId}-owner-decision`, answer: "Superseded by a newer owner question." },
+              });
+              expect(displaced.ok).toBe(true);
+              const replacement = await store.apply({
+                schemaVersion: 1,
+                commandId: `${runId}-concurrent-decision-replacement`,
+                correlationId: `${runId}-concurrent-decision-replacement`,
+                runId,
+                expectedRevision: expectedRevision + 1,
+                session: { sessionId: "other-owner", actor: "owner" },
+                type: "requireDecision",
+                payload: { decisionId: `${runId}-replacement-decision`, question: "Choose the replacement recovery owner.", consequential: true },
+              });
+              expect(replacement.ok).toBe(true);
+              newerDecisionState = await store.load(runId);
+            },
+          },
+        );
+        expect(racedDecision).toEqual({
+          ok: false,
+          code: "illegal_transition",
+          runId,
+          revision: newerDecisionState?.revision,
+        });
+        expect(scripted.stages).toHaveLength(stageCallsBeforeDecision);
+        expect(await store.load(runId)).toEqual(newerDecisionState);
+        expect(newerDecisionState?.pendingDecision).toMatchObject({
+          decisionId: `${runId}-replacement-decision`,
+          question: "Choose the replacement recovery owner.",
+        });
+
+        expect(await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner })).toMatchObject({
+          status: "failed",
+          allowedActions: ["status", "resume", "decide"],
+          question: "Choose the replacement recovery owner.",
+          requiredOwnerAction: { type: "answer", question: "Choose the replacement recovery owner." },
+        });
+        const answered = await executeHeadlessJourney({ action: "decide", ...base, answer: "Alice owns recovery." }, { processRunner: runner });
+        expect(answered).toMatchObject({
+          ok: true,
+          status: "failed",
+          outcome: { type: "failed", code: "artifact_invalid" },
+          allowedActions: ["status"],
+        });
+        expect(scripted.stages).toHaveLength(stageCallsBeforeDecision);
+        const afterAnswer = await store.load(runId);
+        expect(afterAnswer.pendingDecision).toBeNull();
+        expect(afterAnswer.journeyCheckpoint).toEqual(pending.journeyCheckpoint);
+        expect(afterAnswer.revision).toBe(newerDecisionState!.revision + 1);
+        const beforeMissingDecision = await store.load(runId);
+        expect(await executeHeadlessJourney({ action: "decide", ...base, answer: "Nobody else." }, { processRunner: runner })).toEqual({
+          ok: false,
+          code: "illegal_transition",
+          runId,
+          revision: beforeMissingDecision.revision,
+        });
+        expect(scripted.stages).toHaveLength(stageCallsBeforeDecision);
+        expect(await store.load(runId)).toEqual(beforeMissingDecision);
+
+        const unsafeDecision = await store.apply({
+          schemaVersion: 1,
+          commandId: `${runId}-unsafe-decision`,
+          correlationId: `${runId}-unsafe-decision`,
+          runId,
+          expectedRevision: beforeMissingDecision.revision,
+          session: { sessionId: "owner", actor: "owner" },
+          type: "requireDecision",
+          payload: { decisionId: `${runId}-unsafe-decision`, question: "Recovery token=private-value", consequential: true },
+        });
+        expect(unsafeDecision.ok).toBe(true);
+        const unsafeState = await store.load(runId);
+        const unsafeStatus = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner });
+        expect(unsafeStatus).toMatchObject({ status: "failed", allowedActions: ["status"] });
+        expect(unsafeStatus).not.toHaveProperty("question");
+        expect(unsafeStatus).not.toHaveProperty("requiredOwnerAction");
+        expect(await executeHeadlessJourney({ action: "decide", ...base, answer: "Do not disclose it." }, { processRunner: runner })).toEqual({
+          ok: false,
+          code: "illegal_transition",
+          runId,
+          revision: unsafeState.revision,
+        });
+        expect(scripted.stages).toHaveLength(stageCallsBeforeDecision);
+        expect(await store.load(runId)).toEqual(unsafeState);
+        const clearUnsafe = await store.apply({
+          schemaVersion: 1,
+          commandId: `${runId}-unsafe-decision-answer`,
+          correlationId: `${runId}-unsafe-decision-answer`,
+          runId,
+          expectedRevision: unsafeState.revision,
+          session: { sessionId: "owner", actor: "owner" },
+          type: "recordOwnerAnswer",
+          payload: { decisionId: `${runId}-unsafe-decision`, answer: "Resolved outside the headless adapter." },
+        });
+        expect(clearUnsafe.ok).toBe(true);
+      } else {
+        const invalidFit = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner });
+        expect.soft(invalidFit, `${scenario.stage} invalid fit`).toMatchObject({ status: "failed", allowedActions: ["status"], readiness: "blocked" });
+        expect.soft(invalidFit, `${scenario.stage} invalid fit`).not.toHaveProperty("recoveryAction");
+        await expectNoMutatingRecovery(`${scenario.stage} invalid fit`);
+        await recordRecoveryCheckpoint("eligible-fit-after-mismatch");
+        const implementationPath = join(root, directory, "implementation.md");
+        const implementation = await readFile(implementationPath, "utf8");
+        await writeFile(implementationPath, `${implementation}\nCurrent-hash mismatch.\n`);
+        const ineligible = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner });
+        expect(ineligible).toMatchObject({ status: "failed", allowedActions: ["status"], readiness: "blocked" });
+        expect(ineligible).not.toHaveProperty("recoveryAction");
+        await expectNoMutatingRecovery(`${scenario.stage} stale plan`);
+        await writeFile(implementationPath, implementation);
+      }
+      if (scenario.stage === "map-route") {
+        const ineligible = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner });
+        expect(ineligible).toMatchObject({ status: "failed", allowedActions: ["status"], readiness: "blocked" });
+        expect(ineligible).not.toHaveProperty("recoveryAction");
+        await expectNoMutatingRecovery(`${scenario.stage} invalid fit`);
+      }
+
+      for (const [field, mismatch] of [
+        ["provider", { selectionProvider: "claude" }],
+        ["model", { selectionModel: "gpt-5.6-sol" }],
+        ["reasoning", { selectionReasoning: "high" }],
+      ] as const) {
+        await recordRecoveryCheckpoint(`mismatched-${field}`, mismatch);
+        const mismatched = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner });
+        expect(mismatched).toMatchObject({ status: "failed", allowedActions: ["status"], readiness: "blocked" });
+        expect(mismatched).not.toHaveProperty("recoveryAction");
+        await expectNoMutatingRecovery(`${scenario.stage} mismatched ${field}`);
+      }
+      await recordRecoveryCheckpoint("eligible-reset");
+      const beforeRecovery = await store.load(runId);
+
+      if (scenario.stage === "map-route" || scenario.stage === "execute-expedition") {
+        const stageCallsBeforeSnapshotRace = scripted.stages.length;
+        let newerState: Awaited<ReturnType<BearingStore["load"]>> | undefined;
+        const raced = await executeHeadlessJourney(
+          scenario.recoveryType === "resume"
+            ? { action: "resume", ...base }
+            : { action: "progress", ...base, stage: scenario.recoveryStage },
+          {
+            processRunner: runner,
+            beforeHeadlessRecoveryDispatch: async ({ expectedRevision }: { readonly expectedRevision: number }) => {
+              const concurrent = await store.apply({
+                schemaVersion: 1,
+                commandId: `${runId}-concurrent-snapshot`,
+                correlationId: `${runId}-concurrent-snapshot`,
+                runId,
+                expectedRevision,
+                session: { sessionId: "other-bearing", actor: "bearing" },
+                type: "recordJourneyCheckpoint",
+                payload: recoverablePayload,
+              });
+              expect(concurrent.ok).toBe(true);
+              newerState = await store.load(runId);
+            },
+          },
+        );
+        expect(raced).toEqual({
+          ok: false,
+          code: "illegal_transition",
+          runId,
+          revision: newerState?.revision,
+          ...(scenario.recoveryType === "resume" ? { readiness: "ready" } : {}),
+        });
+        expect(scripted.stages).toHaveLength(stageCallsBeforeSnapshotRace);
+        expect(await store.load(runId)).toEqual(newerState);
+      }
+
+      if (scenario.stage === "execute-explorer") {
+        const stageCallsBeforeRace = scripted.stages.length;
+        let newerState: Awaited<ReturnType<BearingStore["load"]>> | undefined;
+        const raced = await executeHeadlessJourney(
+          { action: "resume", ...base },
+          {
+            processRunner: runner,
+            beforeJourneyExecutionCheckpoint: async ({ expectedRevision }: { readonly expectedRevision: number }) => {
+              const concurrent = await store.apply({
+                schemaVersion: 1,
+                commandId: `${runId}-concurrent-checkpoint`,
+                correlationId: `${runId}-concurrent-checkpoint`,
+                runId,
+                expectedRevision,
+                session: { sessionId: "other-bearing", actor: "bearing" },
+                type: "recordJourneyCheckpoint",
+                payload: recoverablePayload,
+              });
+              expect(concurrent.ok).toBe(true);
+              newerState = await store.load(runId);
+            },
+          },
+        );
+        expect(raced).toEqual({
+          ok: false,
+          code: "illegal_transition",
+          runId,
+          revision: newerState?.revision,
+          readiness: "ready",
+        });
+        expect(scripted.stages).toHaveLength(stageCallsBeforeRace);
+        expect(await store.load(runId)).toEqual(newerState);
+      }
+
+      const recovered = await executeHeadlessJourney(
+        scenario.recoveryType === "resume"
+          ? { action: "resume", ...base }
+          : { action: "progress", ...base, stage: scenario.recoveryStage },
+        { processRunner: runner },
+      );
+      expect(recovered).toMatchObject({ ok: true, runId, stage: scenario.recoveryStage, status: "waiting" });
+
+      const stageInvocations = invocations.filter((invocation) => invocation.stdin.includes(`Stage: ${scenario.recoveryStage}`));
+      expect(stageInvocations.length).toBeGreaterThan(0);
+      for (const invocation of stageInvocations) {
+        expect(invocation).toMatchObject({ routeId: "codex", executable: "codex", cwd: root });
+        if (scenario.stage !== "execute-expedition" || invocation.args.includes("read-only")) expect(invocation.providerSessionId).toBe(providerSessionId);
+        if (scenario.stage === "execute-expedition" && invocation.args.includes("workspace-write")) expect(invocation.stdin).toContain("Navigator coordination handoff (read-only; advisory to the product author)");
+        expect(invocation.runId).toMatch(new RegExp(`^${runId}-[0-9a-f-]{36}$`, "i"));
+        expect(invocation.runId).not.toBe(runId);
+        expect(invocation.args).toEqual(expect.arrayContaining(["-m", "gpt-5.6-terra"]));
+        expect(invocation.args).toContain('model_reasoning_effort="medium"');
+        expect(invocation.stdin).toContain(goal);
+        if (scenario.executionMode) {
+          expect(invocation.stdin).toContain(scenario.executionMode);
+          expect(invocation.stdin).toContain(scenario.reviewCadence);
+          expect(invocation.stdin).toContain("BEARING_FOCUS");
+        }
+      }
+
+      const afterRecovery = await store.load(runId);
+      expect(afterRecovery.journeyCheckpoint).toMatchObject({
+        stage: scenario.recoveryStage,
+        planDirectory: directory,
+        resolvedPlanDirectory: directory,
+        repositoryFitDecision: approvedCheckpoint.repositoryFitDecision,
+        selectionProvider: "codex",
+        selectionModel: "gpt-5.6-terra",
+        selectionReasoning: "medium",
+        providerSessionId,
+      });
+      expect(JSON.parse(afterRecovery.journeyCheckpoint?.qaJson ?? "null")).toEqual(qa);
+      expect(afterRecovery.journeyCheckpoint?.artifacts).toEqual(expect.arrayContaining([...beforeStatus.journeyCheckpoint!.artifacts]));
+      expect(parseRuntimeState(afterRecovery.journeyCheckpoint?.runtimeStateJson ?? "")).toMatchObject({ ok: true, value: { retry } });
+      expect(afterRecovery.events.filter((event) => event.type === "ownerAnswered")).toEqual(beforeRecovery.events.filter((event) => event.type === "ownerAnswered"));
+    }
+  }, 10_000);
+
+  it("rejects mixed recovery CAS payloads", async () => {
+    // Deterministic direct-handler regression exercising the authenticated /api/v1/journey path.
+    // Pre-repair: isJourneyBody accepts recoveryExpectedRevision mixed with mutables/expectedRevision;
+    // mixed reaches dispatch or mutates owner QA (appends reviewCadence etc). Post-repair: 400 before dispatch, state preserved.
+    // Enumerates every disallowed companion. Valid pure recovery (runId+stage+recoveryExpectedRevision) accepted.
+    const root = await disposableGitRepository("bearing-mixed-recovery-cas-");
+    const directory = "docs/plans/mixed-cas";
+    const runId = "mixed_recovery_cas";
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId } as const;
+
+    const bootstrap: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async () => ({ exitCode: 0, events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }], usage: { tokens: 1 } }),
+    };
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Reject every mixed recovery CAS input at the authenticated handler." }, { processRunner: bootstrap })).ok).toBe(true);
+
+    const store = new BearingStore(root);
+    await seedPlanReviewBoundary(root, runId, directory);
+    const sources = await Promise.all(["plan-spec.md", "design.md", "seit.md", "implementation.md"].map((name) => readFile(join(root, directory, name), "utf8")));
+    await writeFile(join(root, directory, "review.html"), renderPlanningReview(["plan-spec.md", "design.md", "seit.md", "implementation.md"].map((name, index) => [name, sources[index]!] as [string, string])));
+    const approval = await executeHeadlessJourney({ action: "approve-route", ...base }, { processRunner: bootstrap });
+    expect(approval).toMatchObject({ ok: true });
+
+    const fit = { outcome: "confirmed" as const, planDirectory: directory, repository: root, decidedAt: "2026-07-29T00:00:00.000Z" };
+    const currentBeforeFail = await store.load(runId);
+    const failApply = await store.apply({
+      schemaVersion: 1, commandId: `${runId}-map-fail`, correlationId: `${runId}-map-fail`, runId, expectedRevision: currentBeforeFail.revision,
+      session: { sessionId: "bearing", actor: "bearing" }, type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "map-route",
+        status: "failed",
+        artifacts: [`${directory}/plan-spec.md`, `${directory}/design.md`, `${directory}/seit.md`, `${directory}/implementation.md`, `${directory}/review.html`],
+        lastResultJson: JSON.stringify({ status: "failure", code: "artifact_invalid", tokens: 3 }),
+        qaJson: "[]",
+        planDirectory: directory,
+        resolvedPlanDirectory: directory,
+        repositoryFitDecision: fit,
+        planningState: "PLANNING_VALIDATED",
+        selectionProvider: "codex",
+        selectionModel: "gpt-5.6-terra",
+        selectionReasoning: "medium",
+      },
+    });
+    expect(failApply.ok).toBe(true);
+    const recoveryRevision = (await store.load(runId)).revision;
+
+    // Runner that must never be reached for mixed payloads (proves rejection before provider dispatch).
+    let dispatchCount = 0;
+    const directRunner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async () => {
+        dispatchCount += 1;
+        return {
+          exitCode: 0,
+          events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Recovered.","artifacts":[]}' } }],
+          usage: { tokens: 0 },
+        };
+      },
+    };
+
+    const service = new LocalSessionService("127.0.0.1:0");
+    const handler = createRequestHandler(service, undefined, { processRunner: directRunner });
+    const baseHeaders = { host: "127.0.0.1:0", origin: "http://127.0.0.1:0", "content-type": "application/json" };
+
+    // Establish authenticated session + repo + readiness (to satisfy handler guards before body validation) + status (to hydrate in-memory journey state from durable).
+    const sess = await invokeDirect(handler, "POST", "/api/v1/session", baseHeaders, { capability: service.capability });
+    expect(sess.status).toBe(200);
+    const setC = sess.headers["set-cookie"];
+    const cookieHeader = (Array.isArray(setC) ? setC[0] : setC) as string;
+    const authHeaders = { ...baseHeaders, cookie: cookieHeader.split(";", 1)[0]! };
+
+    const repoRes = await invokeDirect(handler, "POST", "/api/v1/repository", authHeaders, { path: root });
+    expect(repoRes.status).toBe(200);
+
+    const readyRes = await invokeDirect(handler, "POST", "/api/v1/readiness", authHeaders, { provider: "codex", model: "gpt-5.6-terra", reasoning: "medium" });
+    expect(readyRes.status).toBe(200);
+
+    const statusRes = await invokeDirect(handler, "GET", `/api/v1/journey/${encodeURIComponent(runId)}/status`, { host: "127.0.0.1:0", cookie: authHeaders.cookie });
+    expect(statusRes.status).toBe(200);
+    dispatchCount = 0;
+
+    const beforeMixedState = await store.load(runId);
+    const beforeMixedRev = beforeMixedState.revision;
+    expect(beforeMixedRev).toBe(recoveryRevision);
+
+    // Enumerate every disallowed companion field exactly as required.
+    const disallowed = [
+      { expectedRevision: recoveryRevision },
+      { workGoal: "sneaky goal" },
+      { answer: "sneaky answer" },
+      { endQuestions: true },
+      { reviewChange: "sneaky review" },
+      { executionMode: "expedition" as const },
+      { reviewCadence: "slice" as const },
+      { cleanupMergedWorktrees: true },
+      { focusAmendmentConfirmed: true },
+      { focusAmendmentDecisionId: "dec-1" },
+      { focusAmendmentExpectedRevision: recoveryRevision },
+    ];
+
+    for (const companion of disallowed) {
+      const mixed = { runId, stage: "gather-supplies" as const, recoveryExpectedRevision: recoveryRevision, ...companion };
+      const mixedRes = await invokeDirect(handler, "POST", "/api/v1/journey", authHeaders, mixed);
+      // Pre-repair this would often be 200/409 from later gates (or succeed and mutate); post-repair must be 400 from !isJourneyBody.
+      expect(mixedRes.status, `mixed with ${Object.keys(companion)[0]} must be rejected at body validation`).toBe(400);
+      const afterMixed = await store.load(runId);
+      expect(afterMixed.revision, `revision must be unchanged for mixed ${Object.keys(companion)[0]}`).toBe(beforeMixedRev);
+      expect(afterMixed).toEqual(beforeMixedState);
+      expect(dispatchCount, `mixed ${Object.keys(companion)[0]} must not dispatch`).toBe(0);
+    }
+
+    // Valid pure recovery payload (only runId, stage, recoveryExpectedRevision) must remain acceptable (not 400 from validator).
+    const pure = { runId, stage: "gather-supplies" as const, recoveryExpectedRevision: recoveryRevision };
+    const pureRes = await invokeDirect(handler, "POST", "/api/v1/journey", authHeaders, pure);
+    expect(pureRes.status).toBe(200);
+    expect(dispatchCount).toBeGreaterThan(0);
+
+    // Final durable must reflect only the valid pure path (or if 409 no change beyond what pure did), but mixed never mutated.
+    // We already asserted per-mixed exact equality to before.
+  }, 10_000);
 
   it("requires explicit owner confirmation to retry a Focus amendment and persists the admitted warrant", async () => {
     const root = await disposableGitRepository("bearing-headless-focus-amendment-");
@@ -1111,9 +2597,10 @@ describe("headless journey commands", () => {
   ] as const)("completes one stable %s journey and reconstructs it across replacement adapters", async (executionMode, reviewCadence, executionStage) => {
     const root = await disposableGitRepository(`bearing-headless-e2e-${executionMode}-`);
     const planDirectory = `docs/plans/${executionMode}-journey`;
-    const firstRunner = modelOperatedJourneyRunner(planDirectory);
-    const replacementRunner = modelOperatedJourneyRunner(planDirectory);
-    const finalRunner = modelOperatedJourneyRunner(planDirectory);
+    const multiSlice = executionMode === "expedition";
+    const firstRunner = modelOperatedJourneyRunner(planDirectory, multiSlice);
+    const replacementRunner = modelOperatedJourneyRunner(planDirectory, multiSlice);
+    const finalRunner = modelOperatedJourneyRunner(planDirectory, multiSlice);
     const base = {
       repository: root,
       provider: "codex",
@@ -1195,7 +2682,7 @@ describe("headless journey commands", () => {
     });
     const beforeApproval = await store.load(base.runId);
     expect(await executeHeadlessJourney(
-      { action: "select-execution", ...base, executionMode, reviewCadence },
+      { action: "select-execution", ...base, executionMode, reviewCadence, ...(multiSlice ? { currentSlice: "1.2" } : {}) },
       { processRunner: replacementRunner },
     )).toEqual({
       ok: false,
@@ -1213,8 +2700,12 @@ describe("headless journey commands", () => {
         reviewCadences: ["slice", "phase", "end"],
       },
     });
+    // Characterisation, not endorsement: the multi-slice fixture declares 1.1 before 1.2, yet this
+    // selects 1.2 first and still reaches terminal review success. Issue #129 tracks both halves —
+    // the picker offering a dependency-blocked slice, and review accepting a plan whose other slices
+    // were never implemented. Update this assertion to the corrected contract when #129 lands.
     const executed = await executeHeadlessJourney(
-      { action: "select-execution", ...base, executionMode, reviewCadence },
+      { action: "select-execution", ...base, executionMode, reviewCadence, ...(multiSlice ? { currentSlice: "1.2" } : {}) },
       { processRunner: replacementRunner },
     );
     expect(executed).toMatchObject({
@@ -1224,6 +2715,7 @@ describe("headless journey commands", () => {
       status: "waiting",
       summary: `${executionMode === "explorer" ? "Explorer" : "Expedition"} execution complete.`,
       allowedActions: ["status", "resume", "progress"],
+      ...(multiSlice ? { selectedScope: { currentSlice: "1.2", remainingSlices: ["1.2"], allowedPaths: [`${planDirectory}/review.html`, "src/export.ts"], seitCommandIds: ["CMD-UNIT"] } } : {}),
     });
 
     const afterExecution = await store.load(base.runId);
@@ -1249,7 +2741,7 @@ describe("headless journey commands", () => {
       stage: "review",
       status: "complete",
       summary: "Review passed with final evidence.",
-      artifacts: expect.arrayContaining(["src/import.ts", `${planDirectory}/review.html`]),
+      artifacts: expect.arrayContaining([multiSlice ? "src/export.ts" : "src/import.ts", `${planDirectory}/review.html`]),
       outcome: { type: "complete" },
       allowedActions: ["status"],
     });
@@ -1274,8 +2766,34 @@ describe("headless journey commands", () => {
       "recon",
       "draft-implementation",
       executionStage,
+      ...(multiSlice ? [executionStage] : []),
       "review",
     ]);
+  });
+
+  it("projects the typed nested-repository rejection through the headless journey create receipt", async () => {
+    const root = await disposableGitRepository("bearing-nested-");
+    const nested = join(root, "nested");
+    await mkdir(nested);
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async () => ({
+        exitCode: 0,
+        events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }],
+        usage: { tokens: 1 },
+      }),
+    };
+    const receipt = await executeHeadlessJourney(
+      { action: "create", repository: nested, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "headless_nested_1", goal: "Prove the typed nested-repository rejection." },
+      { processRunner: runner },
+    );
+    const projected = JSON.parse(JSON.stringify(receipt)) as Record<string, unknown>;
+    expect(projected.ok).toBe(false);
+    expect(projected.code).toBe("repository_nested_in_git");
+    expect(projected.containingRepositoryPath).toBe(root);
+    expect(projected.remedy).toBe(`This directory is inside Git repository ${root}. Choose ${root} instead.`);
+    expect(projected.revision).toBe(0);
   });
 });
 
@@ -1290,51 +2808,59 @@ describe("improve commands", () => {
     trialMinDistinctRuns: 3,
     trialMaxAgeDays: 90,
   });
-  const metric = Object.freeze({
+  const metricFps = Object.freeze({
     id: "first-pass-success" as const,
     value: 0.8,
     numerator: 16,
     denominator: 20,
     sufficient: true,
   });
+  const guardEsc = Object.freeze({ id: "escaped-defects" as const, value: 0.1, numerator: 2, denominator: 20, sufficient: true });
+  const guardFps = Object.freeze({ id: "first-pass-success" as const, value: 0.8, numerator: 16, denominator: 20, sufficient: true });
+  const guardCost = Object.freeze({ id: "cost-per-accepted-criterion" as const, value: 100, numerator: 100, denominator: 1, sufficient: true });
+  const fullGuards = Object.freeze([guardEsc, guardFps, guardCost]);
+  const baseRec = Object.freeze({
+    patternId: "grader-disagreement" as const,
+    surface: "review-cadence" as const,
+    target: Object.freeze({ role: "surveyor" as const }),
+    from: "per-phase" as const,
+    to: "per-slice" as const,
+    evidence: Object.freeze({
+      recordRefs: Object.freeze(["a".repeat(64)]),
+      occurrences: 5,
+      distinctRuns: 3,
+    }),
+    baseline: metricFps,
+    guards: fullGuards,
+    trial: Object.freeze({
+      minOccurrences: 5,
+      minDistinctRuns: 3,
+      maxAgeDays: 90,
+      openedAtRef: "b".repeat(64),
+    }),
+    revert: Object.freeze({
+      surface: "review-cadence" as const,
+      target: Object.freeze({ role: "surveyor" as const }),
+      value: "per-phase" as const,
+    }),
+  });
+  const builtProposal = buildProposal(baseRec);
+  if (!builtProposal.ok) throw new Error("fixture must construct valid proposal with three guards");
   const report = Object.freeze({
     settledRuns: 20,
     unreadableRuns: 1,
     thresholds,
-    metrics: Object.freeze([metric]),
+    metrics: Object.freeze([metricFps]),
     recommendation: Object.freeze({
       status: "ready" as const,
       thresholds,
-      recommendations: Object.freeze([Object.freeze({
-        patternId: "grader-disagreement" as const,
-        surface: "review-cadence" as const,
-        target: Object.freeze({ role: "surveyor" as const }),
-        from: "per-phase" as const,
-        to: "per-slice" as const,
-        evidence: Object.freeze({
-          recordRefs: Object.freeze(["a".repeat(64)]),
-          occurrences: 5,
-          distinctRuns: 3,
-        }),
-        baseline: metric,
-        guards: Object.freeze([metric]),
-        trial: Object.freeze({
-          minOccurrences: 5,
-          minDistinctRuns: 3,
-          maxAgeDays: 90,
-          openedAtRef: "b".repeat(64),
-        }),
-        revert: Object.freeze({
-          surface: "review-cadence" as const,
-          target: Object.freeze({ role: "surveyor" as const }),
-          value: "per-phase" as const,
-        }),
-      })]),
+      recommendations: Object.freeze([baseRec]),
     }),
     trialVerdicts: Object.freeze([Object.freeze({
       status: "retain" as const,
       prescribedAction: "retain" as const,
       reason: "target_improved" as const,
+      proposalHash: builtProposal.value.proposalHash,
       occurrences: 5,
       distinctRuns: 3,
       requiredOccurrences: 5,
@@ -1619,6 +3145,46 @@ describe("improve commands", () => {
       workflowNotes: [],
     });
 
+    // CLI export matches by proposalHash even when two verdicts are in the opposite order.
+    const secondRec = {
+      ...baseRec,
+      target: Object.freeze({ role: "validator" as const }),
+      revert: Object.freeze({
+        surface: "review-cadence" as const,
+        target: Object.freeze({ role: "validator" as const }),
+        value: "per-phase" as const,
+      }),
+    };
+    const secondBuilt = buildProposal(secondRec);
+    if (!secondBuilt.ok) throw new Error("second fixture proposal must be valid");
+    const secondVerdict = Object.freeze({
+      ...report.trialVerdicts[0]!,
+      status: "revert" as const,
+      prescribedAction: "revert" as const,
+      reason: "target_not_improved" as const,
+      proposalHash: secondBuilt.value.proposalHash,
+    });
+    const crossedReport: ImprovementCliReport = {
+      ...report,
+      recommendation: {
+        ...report.recommendation,
+        recommendations: Object.freeze([baseRec, secondRec]),
+      },
+      trialVerdicts: Object.freeze([secondVerdict, report.trialVerdicts[0]!]),
+    };
+    const crossedCtx = newCtx();
+    await run(["improve", "export", "--out", "contrib/crossed-order.json"], {
+      cwd: root,
+      stdout: crossedCtx.d.stdout,
+      stderr: crossedCtx.d.stderr,
+      exit: crossedCtx.d.exit,
+      improvement: { report: async () => ({ ok: true, value: crossedReport }) },
+    });
+    expect(crossedCtx.getExitCode()).toBeUndefined();
+    const crossedParsed = JSON.parse(await readFile(join(root, "contrib/crossed-order.json"), "utf8"));
+    expect(crossedParsed.policyValues.length).toBe(1);
+    expect(crossedParsed.policyValues[0].to).toBe("per-slice");
+
     for (const [name, leaked] of [
       ["digest", "a".repeat(64)],
       ["run id", "run-private-1"],
@@ -1628,12 +3194,17 @@ describe("improve commands", () => {
       ["repository path", "private/repository"],
     ] as const) {
       const destination = `contrib/refused-${name.replaceAll(" ", "-")}.json`;
+      const leakedRec = { ...report.recommendation.recommendations[0]!, to: leaked };
+      const leakedBuilt = buildProposal(leakedRec);
+      if (!leakedBuilt.ok) throw new Error("leaked fixture proposal must be valid");
+      const unsafeVerdict = { ...report.trialVerdicts[0]!, proposalHash: leakedBuilt.value.proposalHash };
       const unsafe = {
         ...report,
         recommendation: {
           ...report.recommendation,
-          recommendations: [{ ...report.recommendation.recommendations[0]!, to: leaked }],
+          recommendations: [leakedRec],
         },
+        trialVerdicts: Object.freeze([unsafeVerdict]),
       } as unknown as ImprovementCliReport;
       const refused = newCtx();
       await run(["improve", "export", "--out", destination], {

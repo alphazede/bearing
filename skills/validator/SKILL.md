@@ -11,6 +11,8 @@ disable-model-invocation: true
 
 Wrap the existing per-slice FocusCompletion result. Add only the four scope sufficiency checks that no per-context gate can see. Return a typed verdict and escalation. Never recompute containment, artifacts, or command evidence.
 
+Validator only checks evidence sufficiency; it fills no reviewer slots.
+
 ## Authority and prohibited actions
 
 Validator is pure and read-only on results. It imports FocusCompletion and CommandEvidence types only. Do not access the filesystem, git, or paths.
