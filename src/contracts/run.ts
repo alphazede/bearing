@@ -21,6 +21,7 @@ import {
 } from "../execution/selection-score.js";
 import { EXECUTION_MODES, EXECUTION_ORCHESTRATIONS } from "../execution/execution-mode.js";
 import type { FitDecision } from "../journey/repository-fit.js";
+import { hasExactKeys, isObject } from "./guards.js";
 
 export const COMMAND_SCHEMA_VERSION = 1 as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
@@ -57,26 +58,26 @@ const PLANNING_FAILURE_VALUES = [
 ] as const;
 
 /** Local browser session reference. `actor` is the authority role. */
-export interface SessionRef {
+interface SessionRef {
   readonly sessionId: string;
   readonly actor: string;
 }
 
 // --- Command payload shapes -------------------------------------------------
 
-export interface CreateWorkRequestPayload {
+interface CreateWorkRequestPayload {
   readonly title: string;
   readonly goal: string;
 }
 
 /** `consequential` is fixed true: only consequential decisions gate the run. */
-export interface RequireDecisionPayload {
+interface RequireDecisionPayload {
   readonly decisionId: string;
   readonly question: string;
   readonly consequential: true;
 }
 
-export interface RecordOwnerAnswerPayload {
+interface RecordOwnerAnswerPayload {
   readonly decisionId: string;
   readonly answer: string;
   readonly ownerApprovedContentHash?: string;
@@ -87,20 +88,20 @@ export interface RecordOwnerAnswerPayload {
  * recommendation. `selection` is optional and its presence selects selection
  * algorithm version 2; its absence keeps the frozen version-1 derivation.
  */
-export interface RecommendExecutionModePayload {
+interface RecommendExecutionModePayload {
   readonly workItems: number;
   readonly maxCrewmatesPerExplorer: number;
   readonly perAgentTokenEstimate: number;
   readonly selection?: SelectionSignals;
 }
 
-export const JOURNEY_TOKEN_BUDGET_STATES = ["within_budget", "exhausted"] as const;
-export const JOURNEY_RECOVERY_OUTCOMES = ["repaired", "stopped"] as const;
+const JOURNEY_TOKEN_BUDGET_STATES = ["within_budget", "exhausted"] as const;
+const JOURNEY_RECOVERY_OUTCOMES = ["repaired", "stopped"] as const;
 export const MAX_JOURNEY_TOKEN_TOTAL = Number.MAX_SAFE_INTEGER;
-export const MAX_JOURNEY_RECOVERY_ATTEMPTS = 16;
+const MAX_JOURNEY_RECOVERY_ATTEMPTS = 16;
 
 export type JourneyTokenBudgetState = (typeof JOURNEY_TOKEN_BUDGET_STATES)[number];
-export type JourneyRecoveryStatus = (typeof JOURNEY_RECOVERY_OUTCOMES)[number];
+type JourneyRecoveryStatus = (typeof JOURNEY_RECOVERY_OUTCOMES)[number];
 
 export interface JourneyTokenUsage {
   readonly total: number;
@@ -113,11 +114,11 @@ export interface JourneyRecoveryOutcome {
   readonly attempts: number;
 }
 
-export interface ApproveExecutionModePayload {
+interface ApproveExecutionModePayload {
   readonly recommendationEventId: string;
 }
 
-export interface OverrideExecutionModePayload {
+interface OverrideExecutionModePayload {
   readonly recommendationEventId: string;
   readonly selectedMode: "explorer" | "expedition";
 }
@@ -173,42 +174,42 @@ interface CommandEnvelopeBase {
   readonly correlationId: string;
 }
 
-export interface CreateWorkRequestCommand extends CommandEnvelopeBase {
+interface CreateWorkRequestCommand extends CommandEnvelopeBase {
   readonly type: "createWorkRequest";
   readonly payload: CreateWorkRequestPayload;
 }
 
-export interface RequireDecisionCommand extends CommandEnvelopeBase {
+interface RequireDecisionCommand extends CommandEnvelopeBase {
   readonly type: "requireDecision";
   readonly payload: RequireDecisionPayload;
 }
 
-export interface RecordOwnerAnswerCommand extends CommandEnvelopeBase {
+interface RecordOwnerAnswerCommand extends CommandEnvelopeBase {
   readonly type: "recordOwnerAnswer";
   readonly payload: RecordOwnerAnswerPayload;
 }
 
-export interface RecommendExecutionModeCommand extends CommandEnvelopeBase {
+interface RecommendExecutionModeCommand extends CommandEnvelopeBase {
   readonly type: "recommendExecutionMode";
   readonly payload: RecommendExecutionModePayload;
 }
 
-export interface ApproveExecutionModeCommand extends CommandEnvelopeBase {
+interface ApproveExecutionModeCommand extends CommandEnvelopeBase {
   readonly type: "approveExecutionMode";
   readonly payload: ApproveExecutionModePayload;
 }
 
-export interface OverrideExecutionModeCommand extends CommandEnvelopeBase {
+interface OverrideExecutionModeCommand extends CommandEnvelopeBase {
   readonly type: "overrideExecutionMode";
   readonly payload: OverrideExecutionModePayload;
 }
 
-export interface RecordJourneyCheckpointCommand extends CommandEnvelopeBase {
+interface RecordJourneyCheckpointCommand extends CommandEnvelopeBase {
   readonly type: "recordJourneyCheckpoint";
   readonly payload: RecordJourneyCheckpointPayload;
 }
 
-export interface RecordOwnerImprovementApplicationCommand extends CommandEnvelopeBase {
+interface RecordOwnerImprovementApplicationCommand extends CommandEnvelopeBase {
   readonly type: "recordOwnerImprovementApplication";
   readonly payload: {
     readonly improvementProposalRef: string;
@@ -226,7 +227,7 @@ export interface RecordOwnerImprovementApplicationCommand extends CommandEnvelop
  * can never move journey progress. The route set itself is validated by the workflow
  * aggregate against `roleRoutesShape`; this boundary only proves envelope shape.
  */
-export interface ApproveLegacyRoleRoutesCommand extends CommandEnvelopeBase {
+interface ApproveLegacyRoleRoutesCommand extends CommandEnvelopeBase {
   readonly type: "approveLegacyRoleRoutes";
   readonly payload: {
     readonly roleRoutes: readonly LegacyRoleRouteBinding[];
@@ -235,13 +236,13 @@ export interface ApproveLegacyRoleRoutesCommand extends CommandEnvelopeBase {
 }
 
 /** Structural mirror of `RoleRoute`; the aggregate holds the authoritative role/route rules. */
-export interface LegacyRoleRouteBinding {
+interface LegacyRoleRouteBinding {
   readonly role: string;
   readonly primary: string;
   readonly fallbacks: readonly string[];
 }
 
-export interface ApproveLegacyExecutionContractCommand extends CommandEnvelopeBase {
+interface ApproveLegacyExecutionContractCommand extends CommandEnvelopeBase {
   readonly type: "approveLegacyExecutionContract";
   readonly payload: {
     readonly contract: Readonly<Record<string, unknown>>;
@@ -260,8 +261,6 @@ export type CommandEnvelopeV1 =
   | RecordOwnerImprovementApplicationCommand
   | ApproveLegacyRoleRoutesCommand
   | ApproveLegacyExecutionContractCommand;
-
-export type CommandType = CommandEnvelopeV1["type"];
 
 // --- Event envelope ---------------------------------------------------------
 
@@ -289,9 +288,24 @@ export interface EventEnvelopeV1 {
   readonly hash: string;
 }
 
+// --- Focus guard runtime provenance -----------------------------------------
+
+/**
+ * Runtime identity of the Focus guard that opened a run: a sha256 over the
+ * bytes of the loaded Focus validation modules (guard controller, context and
+ * completion validation, review gate). Any change to guard validation
+ * semantics changes it, so a receipt bound to one build can never be certified
+ * by another. Never carries the run's capability or any token material.
+ */
+const FOCUS_RUNTIME_IDENTITY = /^[a-f0-9]{64}$/;
+
+export function isFocusRuntimeIdentity(value: unknown): value is string {
+  return typeof value === "string" && FOCUS_RUNTIME_IDENTITY.test(value);
+}
+
 // --- Boundary validation ----------------------------------------------------
 
-export type ParseFailure = "malformed" | "future_schema";
+type ParseFailure = "malformed" | "future_schema";
 
 export type ParseResult<T> = { ok: true; value: T } | { ok: false; reason: ParseFailure };
 
@@ -329,14 +343,14 @@ const VERIFICATION_VERDICTS = {
 export type VerificationLayer = keyof typeof VERIFICATION_VERDICTS;
 export type VerificationVerdict = (typeof VERIFICATION_VERDICTS)[VerificationLayer][number];
 
-export type VerificationFindingPriority = "P0" | "P1" | "P2" | "P3";
+type VerificationFindingPriority = "P0" | "P1" | "P2" | "P3";
 
 export interface CompletedSliceEvidence {
   readonly sliceId: string;
   readonly requirementIds: readonly string[];
 }
 
-export interface ConfirmedFindingEvidence {
+interface ConfirmedFindingEvidence {
   readonly findingRef: string;
   readonly priority: VerificationFindingPriority;
   readonly sliceIds: readonly string[];
@@ -350,6 +364,40 @@ export interface VerificationCheckpointPayload {
   readonly completedSlices?: readonly CompletedSliceEvidence[];
   readonly reviewedSliceIds?: readonly string[];
   readonly confirmedFindings?: readonly ConfirmedFindingEvidence[];
+  /**
+   * Park Ranger review-repair convergence projection: the run's history of
+   * classified P1/P2 findings plus, once the chain of related cycles reaches
+   * the threshold, the typed non_convergence condition. A surfaced signal —
+   * it never blocks, retries, or changes transitions.
+   */
+  readonly convergence?: VerificationConvergenceProjection;
+}
+
+/** One classified finding as persisted in the convergence projection. */
+interface VerificationConvergenceClassifiedFinding {
+  readonly fingerprint: string;
+  readonly priority: VerificationFindingPriority;
+  readonly severityClass: "repair-relevant" | "other";
+  readonly subsystem: string;
+  readonly relation: "repeated" | "related" | "new";
+}
+
+/** The typed convergence condition, present once the related-cycle chain reaches the threshold. */
+interface VerificationConvergenceCondition {
+  readonly type: "non_convergence";
+  readonly cycleCount: number;
+  readonly fingerprints: readonly string[];
+  readonly subsystem: string;
+  readonly findings: readonly VerificationConvergenceClassifiedFinding[];
+  readonly action: "consolidate" | "stop";
+}
+
+export interface VerificationConvergenceProjection {
+  readonly history: {
+    readonly tracked: readonly VerificationConvergenceClassifiedFinding[];
+    readonly chain: number;
+  };
+  readonly condition?: VerificationConvergenceCondition;
 }
 
 const VERIFICATION_CHECKPOINT_KEYS = [
@@ -360,6 +408,7 @@ const VERIFICATION_CHECKPOINT_KEYS = [
   "completedSlices",
   "reviewedSliceIds",
   "confirmedFindings",
+  "convergence",
 ] as const;
 /**
  * A rubric version is a short identifier (today `"1"`). `layer` and `verdict` are already bounded by
@@ -368,6 +417,14 @@ const VERIFICATION_CHECKPOINT_KEYS = [
  */
 const MAX_RUBRIC_VERSION = 64;
 const MAX_VERIFICATION_ITEMS = 128;
+// Convergence projection bounds mirror the guard's own caps in park-ranger.ts:
+// 16 cycles, 64 findings per cycle, 1024 tracked findings. Fingerprints and
+// subsystems are derived from report fields that are each bounded to 16_384
+// characters, so a projected string is at most a few of those joined.
+const MAX_CONVERGENCE_CHAIN = 16;
+const MAX_CONVERGENCE_CYCLE_FINDINGS = 64;
+const MAX_CONVERGENCE_TRACKED = 1024;
+const MAX_CONVERGENCE_TEXT = 65_536;
 const EXECUTION_SLICE_ID = /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/;
 const FINDING_REF = /^[a-f0-9]{64}$/;
 
@@ -391,8 +448,9 @@ export function isVerificationCheckpointPayload(v: unknown): v is VerificationCh
     || (v.findingCount !== undefined && !Object.hasOwn(v, "findingCount"))
     || (v.completedSlices !== undefined && !Object.hasOwn(v, "completedSlices"))
     || (v.reviewedSliceIds !== undefined && !Object.hasOwn(v, "reviewedSliceIds"))
-    || (v.confirmedFindings !== undefined && !Object.hasOwn(v, "confirmedFindings"))) return false;
-  const { layer, verdict, rubricVersion, findingCount, completedSlices, reviewedSliceIds, confirmedFindings } = v;
+    || (v.confirmedFindings !== undefined && !Object.hasOwn(v, "confirmedFindings"))
+    || (v.convergence !== undefined && !Object.hasOwn(v, "convergence"))) return false;
+  const { layer, verdict, rubricVersion, findingCount, completedSlices, reviewedSliceIds, confirmedFindings, convergence } = v;
   if (!isVerificationLayer(layer)
     || !isVerificationVerdict(layer, verdict)
     || (rubricVersion !== undefined && !isNonEmptyString(rubricVersion, MAX_RUBRIC_VERSION))
@@ -406,11 +464,8 @@ export function isVerificationCheckpointPayload(v: unknown): v is VerificationCh
       || layer !== "park-ranger"
       || typeof findingCount !== "number"
       || findingCount !== confirmedFindings.length)) return false;
+  if (convergence !== undefined && (!isVerificationConvergenceProjection(convergence) || layer !== "park-ranger")) return false;
   return true;
-}
-
-function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 function isNonEmptyString(v: unknown, max = MAX_STRING): v is string {
@@ -524,6 +579,85 @@ function isCanonicalConfirmedFinding(v: unknown): v is ConfirmedFindingEvidence 
     && isCanonicalStringArray(v.sliceIds, isExecutionSliceId);
 }
 
+function isConvergenceClassifiedFinding(v: unknown): v is VerificationConvergenceClassifiedFinding {
+  if (!isObject(v)
+    || Object.keys(v).length !== 5
+    || !Object.hasOwn(v, "fingerprint")
+    || !Object.hasOwn(v, "priority")
+    || !Object.hasOwn(v, "severityClass")
+    || !Object.hasOwn(v, "subsystem")
+    || !Object.hasOwn(v, "relation")) return false;
+  return isNonEmptyString(v.fingerprint, MAX_CONVERGENCE_TEXT)
+    && isPriority(v.priority)
+    && (v.severityClass === "repair-relevant" || v.severityClass === "other")
+    // A subsystem is a path directory and may legitimately be empty for a
+    // degenerate path spelling, so it is only length-bounded.
+    && typeof v.subsystem === "string"
+    && v.subsystem.length <= MAX_CONVERGENCE_TEXT
+    && (v.relation === "repeated" || v.relation === "related" || v.relation === "new");
+}
+
+function isConvergenceCondition(v: unknown): v is VerificationConvergenceCondition {
+  if (!isObject(v)
+    || Object.keys(v).length !== 6
+    || !Object.hasOwn(v, "type")
+    || !Object.hasOwn(v, "cycleCount")
+    || !Object.hasOwn(v, "fingerprints")
+    || !Object.hasOwn(v, "subsystem")
+    || !Object.hasOwn(v, "findings")
+    || !Object.hasOwn(v, "action")) return false;
+  if (v.type !== "non_convergence"
+    || !(typeof v.cycleCount === "number" && Number.isSafeInteger(v.cycleCount) && v.cycleCount >= 1 && v.cycleCount <= MAX_CONVERGENCE_CHAIN)
+    || typeof v.subsystem !== "string"
+    || v.subsystem.length > MAX_CONVERGENCE_TEXT
+    || (v.action !== "consolidate" && v.action !== "stop")) return false;
+  return isSortedStringArray(v.fingerprints, MAX_CONVERGENCE_CYCLE_FINDINGS)
+    && isSortedFindings(v.findings);
+}
+
+function isSortedStringArray(v: unknown, max: number): v is readonly string[] {
+  if (!isNativeDenseArray(v) || v.length > max) return false;
+  const entries = v as readonly string[];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!Object.hasOwn(entries, index)
+      || !isNonEmptyString(entry, MAX_CONVERGENCE_TEXT)
+      || (index > 0 && entries[index - 1] >= entry)) return false;
+  }
+  return true;
+}
+
+function isSortedFindings(v: unknown): v is readonly VerificationConvergenceClassifiedFinding[] {
+  if (!isNativeDenseArray(v)
+    || v.length > MAX_CONVERGENCE_CYCLE_FINDINGS
+    || !v.every(isConvergenceClassifiedFinding)) return false;
+  const findings = v as readonly VerificationConvergenceClassifiedFinding[];
+  for (let index = 1; index < findings.length; index += 1) {
+    if (findings[index - 1].fingerprint >= findings[index].fingerprint) return false;
+  }
+  return true;
+}
+
+function isVerificationConvergenceProjection(v: unknown): v is VerificationConvergenceProjection {
+  if (!isObject(v)
+    || (Object.keys(v).length !== 1 && Object.keys(v).length !== 2)
+    || !Object.hasOwn(v, "history")
+    || (v.condition !== undefined && !Object.hasOwn(v, "condition"))) return false;
+  if (v.condition !== undefined && !isConvergenceCondition(v.condition)) return false;
+  const history = v.history;
+  if (!isObject(history)
+    || Object.keys(history).length !== 2
+    || !Object.hasOwn(history, "tracked")
+    || !Object.hasOwn(history, "chain")) return false;
+  return isNativeDenseArray(history.tracked)
+    && history.tracked.length <= MAX_CONVERGENCE_TRACKED
+    && history.tracked.every(isConvergenceClassifiedFinding)
+    && typeof history.chain === "number"
+    && Number.isSafeInteger(history.chain)
+    && history.chain >= 0
+    && history.chain <= MAX_CONVERGENCE_CHAIN;
+}
+
 function isCanonicalConfirmedFindings(v: unknown): v is readonly ConfirmedFindingEvidence[] {
   if (!isNativeDenseArray(v) || !v.every(isCanonicalConfirmedFinding)) return false;
   for (let index = 1; index < v.length; index += 1) {
@@ -536,7 +670,7 @@ const MAX_REQUIREMENT_REFS = 128;
 const MAX_REQUIREMENT_REF = 128;
 const REQUIREMENT_REF = /^(?:AC|RISK)-[A-Z0-9][A-Z0-9.-]*$/;
 
-export function isRequirementRefs(v: unknown): v is readonly string[] {
+function isRequirementRefs(v: unknown): v is readonly string[] {
   if (!Array.isArray(v) || v.length === 0 || v.length > MAX_REQUIREMENT_REFS) return false;
   for (let index = 0; index < v.length; index += 1) {
     const entry = v[index];
@@ -880,12 +1014,6 @@ function isCanonicalJson(v: unknown): v is string {
   } catch {
     return false;
   }
-}
-
-function hasExactKeys(v: unknown, keys: readonly string[]): v is Record<string, unknown> {
-  return isObject(v)
-    && Object.keys(v).length === keys.length
-    && keys.every((key) => Object.hasOwn(v, key));
 }
 
 function isRepositoryFitDecision(v: unknown): v is FitDecision {

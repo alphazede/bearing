@@ -5,6 +5,7 @@ import {
   type GraderDimensionId,
   type GraderLevel,
 } from "./grader-rubric.js";
+import { boundedText, hasExactKeys, isObject } from "../contracts/guards.js";
 
 const MAX_ITEMS = 128;
 const MAX_TEXT = 4096;
@@ -60,16 +61,6 @@ export type GraderReportParseResult =
   | { readonly ok: true; readonly value: GraderReport }
   | { readonly ok: false; readonly reason: GraderReportFailure };
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(value: unknown, required: readonly string[]): value is Record<string, unknown> {
-  return isObject(value)
-    && Object.keys(value).length === required.length
-    && required.every((key) => Object.hasOwn(value, key));
-}
-
 function hasUnexpectedKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).some((key) => !allowed.includes(key));
 }
@@ -112,11 +103,6 @@ function isLevel(value: unknown): value is GraderLevel {
 
 function isDimensionId(value: unknown): value is GraderDimensionId {
   return typeof value === "string" && DIMENSION_IDS.has(value);
-}
-
-function boundedText(value: unknown, max = MAX_TEXT): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= max && value === value.trim()
-    && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
 }
 
 function scoreShape(value: unknown): value is GraderReport["scores"][number] {

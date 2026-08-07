@@ -14,6 +14,7 @@
  * and no floating-point value anywhere, so a score is bit-identical across
  * platforms and Node versions.
  */
+import { hasExactKeys } from "../contracts/guards.js";
 export const RISK_RATINGS = ["low", "medium", "high", "critical"];
 /** Trigger flags, in the order `HARD_TRIGGERS_V2` evaluates them. */
 const HARD_TRIGGER_FLAGS = ["multiRepository", "securityCriticalIntegration", "dataMigration", "irreversibleOperations"];
@@ -35,11 +36,11 @@ export const SELECTION_WEIGHTS_V2 = {
 const BANDS = SELECTION_WEIGHTS_V2.bands;
 const RISK_POINTS = SELECTION_WEIGHTS_V2.risk;
 const BANDED_SIGNALS = Object.keys(BANDS);
-export const SELECTION_ALGORITHM_VERSION_2 = 2;
+const SELECTION_ALGORITHM_VERSION_2 = 2;
 /** Guide §5.3 example value; recorded per event so a later default cannot move a recorded run. */
 export const DEFAULT_SELECTION_THRESHOLD = 8;
 export const MIN_PHASE_EXPLORERS = 3;
-export const HARD_TRIGGERS_V2 = [
+const HARD_TRIGGERS_V2 = [
     { id: "multi_repository", fires: (signals) => signals.multiRepository },
     { id: "security_critical_integration", fires: (signals) => signals.securityCriticalIntegration },
     { id: "data_migration", fires: (signals) => signals.dataMigration },
@@ -52,10 +53,6 @@ export const HARD_TRIGGER_IDS = HARD_TRIGGERS_V2.map((trigger) => trigger.id);
 export const MAX_COMPLEXITY_SCORE = BANDED_SIGNALS.reduce((total, signal) => total + BANDS[signal][BANDS[signal].length - 1][1], Math.max(...Object.values(RISK_POINTS)));
 function isCount(value) {
     return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-function hasExactKeys(value, keys) {
-    return typeof value === "object" && value !== null && !Array.isArray(value)
-        && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 /** Structural guard shared with the ledger contract, which adds its own upper bounds. */
 export function isSelectionSignals(value) {

@@ -4,9 +4,10 @@ import type {
 } from "../contracts/execution-contract.js";
 import { parallelSafetyAdvisories } from "../contracts/execution-contract.js";
 import { provenIndependent, type SliceFacts } from "./concurrency-control.js";
+import { deepFreeze } from "../contracts/guards.js";
 import { MAX_ORCHESTRATION_DEPTH } from "./execution-scheduler.js";
 
-export interface PhaseGraphPhase {
+interface PhaseGraphPhase {
   readonly phaseId: string;
   readonly sliceIds: readonly string[];
   readonly dependsOnPhases: readonly string[];
@@ -14,7 +15,7 @@ export interface PhaseGraphPhase {
   readonly integrationCheckpointCount: number;
 }
 
-export interface PhaseGraphSlice {
+interface PhaseGraphSlice {
   readonly sliceId: string;
   readonly phaseId: string;
   readonly writeSet: readonly string[];
@@ -22,14 +23,14 @@ export interface PhaseGraphSlice {
   readonly integrationBoundary?: string;
 }
 
-export interface SliceParallelSafety {
+interface SliceParallelSafety {
   readonly sliceId: string;
   readonly parallelSafe: boolean;
   readonly conflictsWith: readonly string[];
   readonly sharedPaths: readonly string[];
 }
 
-export interface PhaseGraphSignals {
+interface PhaseGraphSignals {
   readonly phaseCount: number;
   readonly sliceCount: number;
   readonly dependencyEdgeCount: number;
@@ -46,13 +47,13 @@ export interface PhaseGraph {
   readonly signals: PhaseGraphSignals;
 }
 
-export type SubExplorerRefusalReason =
+type SubExplorerRefusalReason =
   | "single_component"
   | "below_span_threshold"
   | "coupling_not_reduced"
   | "depth_cap";
 
-export interface PhaseSubExplorerAdvice {
+interface PhaseSubExplorerAdvice {
   readonly phaseId: string;
   readonly advised: boolean;
   readonly count: number;
@@ -73,12 +74,6 @@ export interface SubExplorerThresholds {
   readonly minComponentSlices?: number;
   readonly maxSlicesPerExplorer?: number;
   readonly currentDepth?: number;
-}
-
-function deepFreeze<T>(value: T): T {
-  if (typeof value !== "object" || value === null) return value;
-  for (const nested of Object.values(value)) deepFreeze(nested);
-  return Object.freeze(value);
 }
 
 function pairKey(left: number, right: number): string {

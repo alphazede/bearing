@@ -7,7 +7,7 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/focus-reminder.cjs\" UserPromptSubmit",
             "timeout": 5,
-            "statusMessage": "Reinforcing Bearing Focus mode..."
+            "statusMessage": "Applying Bearing workflow context..."
           }
         ]
       }
@@ -19,7 +19,7 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/focus-reminder.cjs\" SubagentStart",
             "timeout": 5,
-            "statusMessage": "Reinforcing Bearing Focus mode..."
+            "statusMessage": "Applying Bearing workflow context..."
           }
         ]
       }

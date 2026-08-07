@@ -39,9 +39,11 @@ describe("provider-neutral adapters", () => {
   });
 
   it("has the exact static routes and inspects without process initialization", () => {
-    expect(BUILTIN_ROUTES.map(({ id, provider, model, executable }) => [id, provider, model, executable])).toEqual([["codex", "codex", "*", "codex"], ["claude", "claude", "*", "claude"], ["agy", "agy", "*", "agy"], ["opencode", "opencode", "*", "opencode"], ["pi", "pi", "*", "pi"]]);
+    expect(BUILTIN_ROUTES.map(({ id, provider, model, executable }) => [id, provider, model, executable])).toEqual([["codex", "codex", "*", "codex"], ["claude", "claude", "*", "claude"], ["deepseek-codex", "codex", "deepseek-v4-flash", "codex-deepseek"], ["deepseek-claude", "claude", "deepseek-v4-flash", "claude-deepseek"], ["agy", "agy", "*", "agy"], ["grok-build", "grok", "grok-build", "grok-safe"], ["opencode", "opencode", "*", "opencode"], ["pi", "pi", "*", "pi"]]);
     const runner = new SyntheticRunner(); expect(adapter(runner).inspect().available).toBe(true); expect(runner.calls).toEqual([]);
     expect(createAgentAdapter({ provider: "codex", model: "gpt-5.6-sol", reasoning: "medium" }, runner)).toBeDefined();
+    expect(createAgentAdapter({ provider: "codex", model: "deepseek-v4-flash", reasoning: "max" }, runner)?.inspect().route.id).toBe("deepseek-codex");
+    expect(createAgentAdapter({ provider: "claude", model: "deepseek-v4-flash", reasoning: "max" }, runner)?.inspect().route.id).toBe("deepseek-claude");
     expect(createAgentAdapter({ provider: "unknown", model: "nope", reasoning: "medium" }, runner)).toBeUndefined();
   });
 
@@ -129,6 +131,43 @@ describe("provider-neutral adapters", () => {
     expect(runner.calls[0]?.environment).toEqual({ BEARING_FOCUS: "1" });
     await adapter(runner).execute({ runId: "ordinary", repositoryPath, role: role(), task: { prompt: "do work" } });
     expect(runner.calls[1]?.environment).toBeUndefined();
+  });
+
+  it("uses bounded single-result output for DeepSeek Claude max turns", async () => {
+    const selection = { provider: "claude", model: "deepseek-v4-flash", reasoning: "max" };
+    const runner = new SyntheticRunner();
+    const deepseek = createAgentAdapter(selection, runner);
+    if (!deepseek) throw new Error("missing DeepSeek Claude adapter");
+
+    await deepseek.execute({
+      runId: "deepseek-claude-output",
+      repositoryPath,
+      role: role({ selection }),
+      task: { prompt: "coordinate" },
+      focusMode: true,
+    });
+
+    expect(runner.calls[0]?.routeId).toBe("deepseek-claude");
+    expect(runner.calls[0]?.args).toEqual(expect.arrayContaining(["--output-format", "json", "--model", "deepseek-v4-flash", "--effort", "max"]));
+    expect(runner.calls[0]?.args).not.toContain("stream-json");
+    expect(runner.calls[0]?.args).not.toContain("--verbose");
+  });
+
+  it("allows Grok subagents only through an explicit execution request", async () => {
+    const selection = { provider: "grok", model: "grok-build", reasoning: "medium" };
+    const runner = new SyntheticRunner();
+    const grok = createAgentAdapter(selection, runner);
+    if (!grok) throw new Error("missing grok adapter");
+    await grok.execute({ runId: "grok-expedition", repositoryPath, role: role({ selection }), task: { prompt: "coordinate" }, allowSubagents: true });
+    expect(runner.calls[0].args.slice(0, 2)).toEqual(["--allow-subagents", "--"]);
+    expect(runner.calls[0].args).not.toContain("--no-subagents");
+
+    const boundedRunner = new SyntheticRunner();
+    const bounded = createAgentAdapter(selection, boundedRunner);
+    if (!bounded) throw new Error("missing grok adapter");
+    await bounded.execute({ runId: "grok-bounded", repositoryPath, role: role({ selection }), task: { prompt: "work" } });
+    expect(boundedRunner.calls[0].args[0]).toBe("--");
+    expect(boundedRunner.calls[0].args).toContain("--no-subagents");
   });
 
   it("pins non-interactive Codex approval policy through current config argv", async () => {

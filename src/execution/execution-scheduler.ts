@@ -3,15 +3,20 @@ import {
   AuthorityPolicy,
   type AuthorityDenialCode,
 } from "../authority/authority-policy.js";
-import { EXECUTION_MODES, type ExecutionMode, type ModeRecommendationInput, type ModeRecommendation } from "./execution-mode.js";
+import { EXECUTION_MODES, type ExecutionMode } from "./execution-mode.js";
 import type { DurableOwnerEvidence } from "../workflow/aggregate.js";
-export { EXECUTION_MODES, recommendExecutionMode, type ExecutionMode, type ModeRecommendationInput, type ModeRecommendation } from "./execution-mode.js";
+export { recommendExecutionMode, type ExecutionMode } from "./execution-mode.js";
 
 export const WORK_GRAPH_SCHEMA_VERSION = 1 as const;
 export const MAX_ORCHESTRATION_DEPTH = 5;
 export type ExecutorRole = "navigator" | "explorer" | "trail-boss" | "sub-explorer" | "crewmate";
 type ExistingExecutorRole = "navigator" | "explorer" | "crewmate";
 type NewExecutorRole = "trail-boss" | "sub-explorer";
+
+interface GlobalRuntimePrerequisite {
+  readonly id: string;
+  readonly resumeAction: string;
+}
 
 export interface WorkNode {
   readonly id: string;
@@ -23,6 +28,8 @@ export interface WorkNode {
   readonly allowedTools: readonly string[];
   readonly profileId: string;
   readonly profileConcurrency: number;
+  /** Lane launches Focus-guarded work; it waits for every declared global runtime prerequisite. */
+  readonly focusGated?: boolean;
 }
 
 export interface WorkGraph {
@@ -30,9 +37,11 @@ export interface WorkGraph {
   readonly executionMode: ExecutionMode;
   readonly limits: { readonly maxNodes: number; readonly maxCrewmatesPerExplorer: number };
   readonly nodes: readonly WorkNode[];
+  /** Cross-cutting prerequisites that must be merged AND runtime-active before every Focus-backed lane launches. */
+  readonly globalRuntimePrerequisites?: readonly GlobalRuntimePrerequisite[];
 }
 
-export type GraphErrorCode =
+type GraphErrorCode =
   | "graph_invalid"
   | "graph_too_large"
   | "duplicate_node_id"
@@ -42,6 +51,7 @@ export type GraphErrorCode =
   | "illegal_role_topology"
   | "orchestration_depth_exceeded"
   | "trail_boss_requires_expedition"
+  | "trail_boss_orchestration_only"
   | "sub_explorer_requires_explorer_parent"
   | "dependency_cycle"
   | "surveyor_not_executor";
@@ -73,23 +83,31 @@ export interface StartScheduleInput {
   readonly evidence?: DurableOwnerEvidence;
   readonly limits: ScheduleLimits;
   readonly nowMs: number;
+  readonly runtimeCheck?: RuntimePrerequisiteCheck;
 }
 
-export type NodeStatus = "pending" | "running" | "completed" | "failed" | "timed_out" | "blocked";
+type NodeStatus = "pending" | "running" | "completed" | "failed" | "timed_out" | "blocked";
 
-export interface ScheduledNode {
+interface ScheduledNode {
   readonly id: string;
   readonly role: ExecutorRole;
   readonly status: NodeStatus;
   readonly executionAncestry: readonly string[];
   readonly launchedAtMs?: number;
-  readonly reason?: "failed_prerequisite";
+  readonly reason?: "failed_prerequisite" | "runtime_prerequisite";
+  /** Present when reason is "runtime_prerequisite": which prerequisite blocks, and the one concrete action to resume. */
+  readonly blocker?: { readonly prerequisiteId: string; readonly resumeAction: string };
 }
 
-export interface LaunchBatch {
+interface LaunchBatch {
   readonly nodeIds: readonly string[];
   readonly atMs: number;
   readonly remainingTokenBudget: number;
+}
+
+interface RuntimePrerequisiteCheck {
+  /** Answers "is the named global runtime prerequisite merged AND runtime-active in the current runtime". Evaluated at call time, so a restarted runtime or a fresh merge is observed on the next advance. */
+  readonly isMet: (prerequisiteId: string) => boolean;
 }
 
 export interface ScheduleProjection {
@@ -99,16 +117,18 @@ export interface ScheduleProjection {
   readonly limits?: ScheduleLimits;
   readonly nodes: readonly ScheduledNode[];
   readonly batches: readonly LaunchBatch[];
-  readonly transitions: readonly { readonly nodeId: string; readonly from: NodeStatus; readonly to: NodeStatus; readonly reason?: "failed_prerequisite" }[];
+  readonly transitions: readonly { readonly nodeId: string; readonly from: NodeStatus; readonly to: NodeStatus; readonly reason?: "failed_prerequisite" | "runtime_prerequisite" }[];
+  readonly runtimeCheck?: RuntimePrerequisiteCheck;
 }
 
-export interface NodeFact {
+interface NodeFact {
   readonly nodeId: string;
   readonly outcome: "completed" | "failed" | "timed_out";
 }
 
 const MAX_NODES = 64;
 const MAX_CREWMATES = 16;
+const MAX_PREQUISITES = 16;
 const MAX_TEXT = 128;
 const roles = new Set<string>(["navigator", "explorer", "trail-boss", "sub-explorer", "crewmate"]);
 
@@ -118,6 +138,11 @@ function object(value: unknown): value is Record<string, unknown> {
 
 function exact(value: Record<string, unknown>, keys: readonly string[]): boolean {
   return Object.keys(value).length === keys.length && keys.every((key) => key in value);
+}
+
+/** Required keys all present; every key is required or optional; unknown keys fail closed. */
+function within(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+  return required.every((key) => key in value) && Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
 }
 
 function text(value: unknown): value is string {
@@ -133,17 +158,28 @@ function textList(value: unknown): value is readonly string[] {
 }
 
 export function validateWorkGraph(input: unknown): GraphValidation {
-  if (!object(input) || !exact(input, ["schemaVersion", "executionMode", "limits", "nodes"])) return error("graph_invalid");
+  if (!object(input) || !within(input, ["schemaVersion", "executionMode", "limits", "nodes"], ["globalRuntimePrerequisites"])) return error("graph_invalid");
   if (input.schemaVersion !== WORK_GRAPH_SCHEMA_VERSION || !EXECUTION_MODES.includes(input.executionMode as ExecutionMode)) return error("graph_invalid");
   if (!object(input.limits) || !exact(input.limits, ["maxNodes", "maxCrewmatesPerExplorer"]) || !integer(input.limits.maxNodes, 1) || !integer(input.limits.maxCrewmatesPerExplorer, 1)) return error("graph_invalid");
   if (input.limits.maxNodes > MAX_NODES || input.limits.maxCrewmatesPerExplorer > MAX_CREWMATES) return error("graph_too_large");
   if (!Array.isArray(input.nodes) || input.nodes.length === 0 || input.nodes.length > input.limits.maxNodes) return error(input.nodes instanceof Array && input.nodes.length > input.limits.maxNodes ? "graph_too_large" : "graph_invalid");
 
+  let globalRuntimePrerequisites: readonly GlobalRuntimePrerequisite[] | undefined;
+  if (input.globalRuntimePrerequisites !== undefined) {
+    if (!Array.isArray(input.globalRuntimePrerequisites) || input.globalRuntimePrerequisites.length === 0 || input.globalRuntimePrerequisites.length > MAX_PREQUISITES) return error("graph_invalid");
+    const seen = new Set<string>();
+    for (const raw of input.globalRuntimePrerequisites) {
+      if (!object(raw) || !exact(raw, ["id", "resumeAction"]) || !text(raw.id) || !text(raw.resumeAction) || seen.has(raw.id)) return error("graph_invalid");
+      seen.add(raw.id);
+    }
+    globalRuntimePrerequisites = input.globalRuntimePrerequisites.map((prerequisite) => ({ id: prerequisite.id as string, resumeAction: prerequisite.resumeAction as string }));
+  }
+
   const nodes: WorkNode[] = [];
   for (const raw of input.nodes) {
-    if (!object(raw) || !exact(raw, ["id", "role", "parentId", "dependencies", "sessionId", "tool", "allowedTools", "profileId", "profileConcurrency"])) return error("graph_invalid");
+    if (!object(raw) || !within(raw, ["id", "role", "parentId", "dependencies", "sessionId", "tool", "allowedTools", "profileId", "profileConcurrency"], ["focusGated"])) return error("graph_invalid");
     if (raw.role === "surveyor") return error("surveyor_not_executor", text(raw.id) ? raw.id : undefined);
-    if (!text(raw.id) || !roles.has(String(raw.role)) || (raw.parentId !== null && !text(raw.parentId)) || !textList(raw.dependencies) || !text(raw.sessionId) || !text(raw.tool) || !textList(raw.allowedTools) || !text(raw.profileId) || !integer(raw.profileConcurrency)) return error("graph_invalid", text(raw.id) ? raw.id : undefined);
+    if (!text(raw.id) || !roles.has(String(raw.role)) || (raw.parentId !== null && !text(raw.parentId)) || !textList(raw.dependencies) || !text(raw.sessionId) || !text(raw.tool) || !textList(raw.allowedTools) || !text(raw.profileId) || !integer(raw.profileConcurrency) || (raw.focusGated !== undefined && typeof raw.focusGated !== "boolean")) return error("graph_invalid", text(raw.id) ? raw.id : undefined);
     nodes.push({
       id: raw.id,
       role: raw.role as ExecutorRole,
@@ -154,6 +190,7 @@ export function validateWorkGraph(input: unknown): GraphValidation {
       allowedTools: [...raw.allowedTools],
       profileId: raw.profileId,
       profileConcurrency: raw.profileConcurrency,
+      ...(raw.focusGated === true ? { focusGated: true } : {}),
     });
   }
 
@@ -176,6 +213,7 @@ export function validateWorkGraph(input: unknown): GraphValidation {
       maxCrewmatesPerExplorer: input.limits.maxCrewmatesPerExplorer as number,
     },
     nodes,
+    ...(globalRuntimePrerequisites ? { globalRuntimePrerequisites } : {}),
   };
   const ancestry = ancestryFor(graph);
   const tooDeep = nodes.find((node) => (ancestry.get(node.id)?.length ?? 0) + 1 > MAX_ORCHESTRATION_DEPTH);
@@ -183,6 +221,14 @@ export function validateWorkGraph(input: unknown): GraphValidation {
   if (input.executionMode !== "expedition" && nodes.some((node) => node.role === "trail-boss")) {
     return error("trail_boss_requires_expedition");
   }
+  // Issue 120: Trail Boss is orchestration-only; a work node for it must never declare
+  // implementation tools, either as the executed tool or anywhere in its allowlist (the same
+  // /write|edit|shell|bash/i pattern that defines the read-only verification projections).
+  const implementationTool = /write|edit|shell|bash/i;
+  const draftingBoss = nodes.find((node) =>
+    node.role === "trail-boss"
+    && (implementationTool.test(node.tool) || node.allowedTools.some((tool) => implementationTool.test(tool))));
+  if (draftingBoss) return error("trail_boss_orchestration_only", draftingBoss.id);
   const invalidSubExplorer = nodes.find((node) =>
     node.role === "sub-explorer" && byId.get(node.parentId ?? "")?.role !== "explorer");
   if (invalidSubExplorer) return error("sub_explorer_requires_explorer_parent", invalidSubExplorer.id);
@@ -257,7 +303,17 @@ export function startSchedule(input: StartScheduleInput): ScheduleProjection {
     if (!decision.allowed) return blocked(decision.code, graph, input.limits);
   }
   const nodes = graph.nodes.map((node) => ({ id: node.id, role: node.role, status: "pending" as const, executionAncestry: ancestry.get(node.id) ?? [] }));
-  return launchReady({ state: "active", graph, limits: input.limits, nodes, batches: [], transitions: [] }, input.nowMs);
+  const projection = {
+    state: "active" as const,
+    graph,
+    limits: input.limits,
+    nodes,
+    batches: [],
+    transitions: [],
+    ...(input.runtimeCheck ? { runtimeCheck: input.runtimeCheck } : {}),
+  };
+  const settled = settleBlockers(projection);
+  return launchReady({ ...projection, nodes: settled.nodes, transitions: settled.transitions }, input.nowMs);
 }
 
 export function advanceSchedule(projection: ScheduleProjection, facts: unknown, nowMs: number): ScheduleProjection {
@@ -274,19 +330,68 @@ export function advanceSchedule(projection: ScheduleProjection, facts: unknown, 
     transitions.push({ nodeId: node.id, from: "running", to: next });
     return { ...node, status: next };
   });
-  const graphById = new Map(projection.graph.nodes.map((node) => [node.id, node]));
+  const settled = settleBlockers({ ...projection, nodes, transitions });
+  return launchReady({ ...projection, nodes: settled.nodes, transitions: settled.transitions }, nowMs);
+}
+
+/**
+ * Fixed-point over blocking states. Dependents of failed or blocked
+ * prerequisites are blocked, and are released again if the dependency set
+ * clears (a gated lane unblocking after its runtime prerequisite becomes
+ * active). Focus-backed lanes declared under a global runtime prerequisite
+ * stay blocked with a typed blocker naming the unmet prerequisite and its one
+ * concrete resume action until the injected check reports it merged AND
+ * runtime-active; a declared prerequisite with no check fails closed.
+ */
+function settleBlockers(projection: ScheduleProjection): { readonly nodes: readonly ScheduledNode[]; readonly transitions: ScheduleProjection["transitions"] } {
+  const graph = projection.graph!;
+  const graphById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const prerequisites = graph.globalRuntimePrerequisites ?? [];
+  const isMet = (id: string) => projection.runtimeCheck?.isMet(id) === true;
+  let nodes = projection.nodes;
+  const transitions = [...projection.transitions];
   let changed = true;
   while (changed) {
     changed = false;
-    const status = new Map(nodes.map((node) => [node.id, node.status]));
+    // Release dependents that were blocked only because a dependency was blocked.
+    const statusA = new Map(nodes.map((node) => [node.id, node.status]));
     nodes = nodes.map((node) => {
-      if (node.status !== "pending" || !graphById.get(node.id)?.dependencies.some((id) => ["failed", "timed_out", "blocked"].includes(status.get(id) ?? ""))) return node;
+      if (node.status !== "blocked" || node.reason !== "failed_prerequisite") return node;
+      if (graphById.get(node.id)?.dependencies.some((id) => ["failed", "timed_out", "blocked"].includes(statusA.get(id) ?? ""))) return node;
+      changed = true;
+      transitions.push({ nodeId: node.id, from: "blocked", to: "pending", reason: "failed_prerequisite" });
+      return { ...node, status: "pending", reason: undefined };
+    });
+    // Block pending dependents of failed or blocked prerequisites.
+    const statusB = new Map(nodes.map((node) => [node.id, node.status]));
+    nodes = nodes.map((node) => {
+      if (node.status !== "pending" || !graphById.get(node.id)?.dependencies.some((id) => ["failed", "timed_out", "blocked"].includes(statusB.get(id) ?? ""))) return node;
       changed = true;
       transitions.push({ nodeId: node.id, from: "pending", to: "blocked", reason: "failed_prerequisite" });
       return { ...node, status: "blocked", reason: "failed_prerequisite" as const };
     });
+    if (prerequisites.length === 0) continue;
+    // Gate Focus-backed lanes on every declared global runtime prerequisite.
+    const statusC = new Map(nodes.map((node) => [node.id, node.status]));
+    nodes = nodes.map((node) => {
+      if (graphById.get(node.id)?.focusGated !== true) return node;
+      if (node.status === "pending") {
+        const unmet = prerequisites.find((prerequisite) => !isMet(prerequisite.id));
+        if (!unmet) return node;
+        changed = true;
+        transitions.push({ nodeId: node.id, from: "pending", to: "blocked", reason: "runtime_prerequisite" });
+        return { ...node, status: "blocked", reason: "runtime_prerequisite" as const, blocker: { prerequisiteId: unmet.id, resumeAction: unmet.resumeAction } };
+      }
+      if (node.status === "blocked" && node.reason === "runtime_prerequisite") {
+        if (prerequisites.some((prerequisite) => !isMet(prerequisite.id))) return node;
+        changed = true;
+        transitions.push({ nodeId: node.id, from: "blocked", to: "pending", reason: "runtime_prerequisite" });
+        return { ...node, status: "pending", reason: undefined, blocker: undefined };
+      }
+      return node;
+    });
   }
-  return launchReady({ ...projection, nodes, transitions }, nowMs);
+  return { nodes, transitions };
 }
 
 function validNodeFacts(value: unknown, graphNodes: readonly WorkNode[]): readonly NodeFact[] | null {
@@ -339,7 +444,15 @@ function launchReady(projection: ScheduleProjection, nowMs: number): SchedulePro
     return { ...node, status: "running" as const, launchedAtMs: nowMs };
   });
   const batches = launched.size === 0 ? projection.batches : [...projection.batches, { nodeIds: [...launched], atMs: nowMs, remainingTokenBudget: remaining }];
-  if (nodes.every((node) => ["completed", "failed", "timed_out", "blocked"].includes(node.status))) return { ...projection, state: "finished", nodes, batches, transitions };
+  // runtime_prerequisite blocks are transient: they clear when the injected
+  // check flips, so a projection whose only remaining nodes are such lanes must
+  // stay releasable by a later advanceSchedule — never "finished". A node
+  // blocked on a failed/timed_out prerequisite is terminal; a
+  // failed_prerequisite-blocked dependent of a runtime-blocked lane always has
+  // that runtime-blocked ancestor in the graph, so it keeps the projection
+  // active too.
+  const terminal = (node: ScheduledNode) => ["completed", "failed", "timed_out"].includes(node.status) || (node.status === "blocked" && node.reason !== "runtime_prerequisite");
+  if (nodes.every(terminal)) return { ...projection, state: "finished", nodes, batches, transitions };
   if (nodes.some((node) => node.status === "pending") && !nodes.some((node) => node.status === "running") && remaining < limits.perAgentTokenEstimate) return { ...projection, state: "blocked", code: "budget_exhausted", nodes, batches, transitions };
   return { ...projection, state: "active", nodes, batches, transitions };
 }

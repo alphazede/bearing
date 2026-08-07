@@ -1,5 +1,6 @@
 /** Pure, fail-closed profile and run-policy resolution. */
 import { DEFAULT_REASONING_TIERS, REASONING_PROVIDER_MAP, REASONING_TIERS, resolveReasoning, } from "./reasoning-policy.js";
+import { enumValue } from "../contracts/guards.js";
 export const PROFILE_SCHEMA_VERSION = 2;
 export const ROLES = ["navigator", "explorer", "crewmate", "surveyor"];
 const MAX_STRING = 256;
@@ -20,7 +21,6 @@ function text(v) { return typeof v === "string" && v.length > 0 && v.length <= M
 function list(v) { return Array.isArray(v) && v.length <= MAX_ARRAY && v.every(text) && new Set(v).size === v.length; }
 function positive(v) { return typeof v === "number" && Number.isSafeInteger(v) && v > 0; }
 function nonNegative(v) { return typeof v === "number" && Number.isSafeInteger(v) && v >= 0; }
-function enumValue(v, values) { return typeof v === "string" && values.includes(v); }
 export function parseAgentProfile(input) {
     const migrated = migrateAgentProfile(input);
     return migrated.ok ? { ok: true, value: migrated.value } : migrated;

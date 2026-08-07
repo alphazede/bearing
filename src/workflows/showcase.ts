@@ -4,10 +4,10 @@ import { EvidenceLedger } from "../evidence/evidence-ledger.js";
 import { ReportRenderer } from "../report/report-renderer.js";
 import { fictionalB2bWorkflows, type WorkflowDefinition } from "./catalog.js";
 
-export const MAX_WORKFLOW_ID = 64;
+const MAX_WORKFLOW_ID = 64;
 export const MAX_SHOWCASE_JSON = 640 * 1024;
 export const MAX_SHOWCASE_REPORT = 128 * 1024;
-export const WORKFLOW_ID = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/;
+const WORKFLOW_ID = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/;
 
 export interface WorkflowShowcase {
   readonly schemaVersion: 1;

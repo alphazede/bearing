@@ -38,7 +38,7 @@ export function durableOwnerEvidence(state) {
         : undefined;
 }
 const OWNER_ACTOR = "owner";
-export class ReplayError extends Error {
+class ReplayError extends Error {
     constructor(message) {
         super(message);
         this.name = "ReplayError";

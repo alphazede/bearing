@@ -1,4 +1,9 @@
+node_modules
 node_modules/
 coverage/
 .bearing/
 .playwright-cli/
+
+# Dev-private documentation and planning content (Bearing writes plans here).
+# Never commit — AGENTS.md data boundary; the public export tracks no docs.
+docs/

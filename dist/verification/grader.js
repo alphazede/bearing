@@ -1,4 +1,5 @@
 import { GRADER_RUBRIC, GRADER_RUBRIC_VERSION, } from "./grader-rubric.js";
+import { boundedText, hasExactKeys, isObject } from "../contracts/guards.js";
 const MAX_ITEMS = 128;
 const MAX_TEXT = 4096;
 const REPORT_KEYS = [
@@ -15,14 +16,6 @@ const SCOPE_KEYS = ["kind", "id"];
 const SCORE_KEYS = ["dimensionId", "level", "evidence", "confidence"];
 const DEFICIENCY_KEYS = ["dimensionId", "summary", "severity"];
 const DIMENSION_IDS = new Set(GRADER_RUBRIC.map(({ id }) => id));
-function isObject(value) {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function hasExactKeys(value, required) {
-    return isObject(value)
-        && Object.keys(value).length === required.length
-        && required.every((key) => Object.hasOwn(value, key));
-}
 function hasUnexpectedKeys(value, allowed) {
     return Object.keys(value).some((key) => !allowed.includes(key));
 }
@@ -66,10 +59,6 @@ function isLevel(value) {
 }
 function isDimensionId(value) {
     return typeof value === "string" && DIMENSION_IDS.has(value);
-}
-function boundedText(value, max = MAX_TEXT) {
-    return typeof value === "string" && value.length > 0 && value.length <= max && value === value.trim()
-        && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
 }
 function scoreShape(value) {
     return hasExactKeys(value, SCORE_KEYS)

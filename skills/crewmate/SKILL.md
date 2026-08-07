@@ -32,8 +32,12 @@ architecture, or perform external acts. Bearing rejects out-of-set paths.
 ## Inputs and outputs schema
 
 Read one packet and its focus objective, acceptance, paths, evidence, commands,
-blocker, slices, and fingerprint. Return paths, results, risks, errors, or an
-amendment request.
+blocker, slices, and fingerprint. Return one typed `taskOutcome` per packet,
+separate from containment evidence: `status` (`complete`, `incomplete`, or
+`blocked`), the exact `changedPaths`, `attemptsUsed`, and — for `incomplete` or
+`blocked` — exactly one `resume` action carrying the guarded run identity. A
+resume continues the same packet and never opens a new one. `complete` carries
+no resume.
 
 ## State read and written
 
@@ -52,7 +56,12 @@ work and do not edit focus state.
 ## Entry and exit criteria
 
 Enter with a settled packet. Exit when acceptance is met inside the write set
-and commands pass, or stop at an authority or design blocker.
+and commands pass, or stop at an authority or design blocker. Continue from
+red to green within the same invocation when authority and the bounded attempt
+budget remain. A red test is not completion: never exit after only adding a
+failing regression. When the budget is exhausted or authority runs out, stop
+with a typed `incomplete` or `blocked` outcome naming the exact changed paths
+and one resume action.
 
 **A passing suite is not proof.** Existing tests encode the previous contract,
 so they stay green through a change that alters what a shared type means. The

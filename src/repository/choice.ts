@@ -11,9 +11,9 @@ const TERMINATION_GRACE_MS = 100;
 const FORCED_CLOSE_WAIT_MS = 500;
 
 export type PlatformClass = "win32" | "darwin" | "linux" | "other-unix";
-export type DiscoverySource = "git-root" | "cwd";
+type DiscoverySource = "git-root" | "cwd";
 export type PickerKind = "powershell" | "osascript" | "zenity" | "kdialog";
-export type PickerResultClass = "selected" | "cancelled" | "unavailable" | "timeout" | "invalid";
+type PickerResultClass = "selected" | "cancelled" | "unavailable" | "timeout" | "invalid";
 
 export interface RepositoryOptions {
   readonly platform: PlatformClass;

@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { parseRuntimeState } from "./runtime-state.js";
 import { HARD_TRIGGER_IDS, MAX_COMPLEXITY_SCORE, isSelectionSignals, } from "../execution/selection-score.js";
 import { EXECUTION_MODES, EXECUTION_ORCHESTRATIONS } from "../execution/execution-mode.js";
+import { hasExactKeys, isObject } from "./guards.js";
 export const COMMAND_SCHEMA_VERSION = 1;
 export const EVENT_SCHEMA_VERSION = 1;
 const MAX_QA_JSON_BYTES = 640 * 1024;
@@ -48,10 +49,10 @@ const PLANNING_FAILURE_VALUES = [
     "UNSAFE_PARALLELISM",
     "OWNER_DECISION_REQUIRED",
 ];
-export const JOURNEY_TOKEN_BUDGET_STATES = ["within_budget", "exhausted"];
-export const JOURNEY_RECOVERY_OUTCOMES = ["repaired", "stopped"];
+const JOURNEY_TOKEN_BUDGET_STATES = ["within_budget", "exhausted"];
+const JOURNEY_RECOVERY_OUTCOMES = ["repaired", "stopped"];
 export const MAX_JOURNEY_TOKEN_TOTAL = Number.MAX_SAFE_INTEGER;
-export const MAX_JOURNEY_RECOVERY_ATTEMPTS = 16;
+const MAX_JOURNEY_RECOVERY_ATTEMPTS = 16;
 export const RECORD_JOURNEY_CHECKPOINT_STAGES = [
     "repository-fit",
     "set-bearings",
@@ -63,6 +64,18 @@ export const RECORD_JOURNEY_CHECKPOINT_STAGES = [
     "execute-expedition",
     "review",
 ];
+// --- Focus guard runtime provenance -----------------------------------------
+/**
+ * Runtime identity of the Focus guard that opened a run: a sha256 over the
+ * bytes of the loaded Focus validation modules (guard controller, context and
+ * completion validation, review gate). Any change to guard validation
+ * semantics changes it, so a receipt bound to one build can never be certified
+ * by another. Never carries the run's capability or any token material.
+ */
+const FOCUS_RUNTIME_IDENTITY = /^[a-f0-9]{64}$/;
+export function isFocusRuntimeIdentity(value) {
+    return typeof value === "string" && FOCUS_RUNTIME_IDENTITY.test(value);
+}
 const SCHEMA_VERSION_MAX = COMMAND_SCHEMA_VERSION;
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_STRING = 4096;
@@ -100,6 +113,7 @@ const VERIFICATION_CHECKPOINT_KEYS = [
     "completedSlices",
     "reviewedSliceIds",
     "confirmedFindings",
+    "convergence",
 ];
 /**
  * A rubric version is a short identifier (today `"1"`). `layer` and `verdict` are already bounded by
@@ -108,6 +122,14 @@ const VERIFICATION_CHECKPOINT_KEYS = [
  */
 const MAX_RUBRIC_VERSION = 64;
 const MAX_VERIFICATION_ITEMS = 128;
+// Convergence projection bounds mirror the guard's own caps in park-ranger.ts:
+// 16 cycles, 64 findings per cycle, 1024 tracked findings. Fingerprints and
+// subsystems are derived from report fields that are each bounded to 16_384
+// characters, so a projected string is at most a few of those joined.
+const MAX_CONVERGENCE_CHAIN = 16;
+const MAX_CONVERGENCE_CYCLE_FINDINGS = 64;
+const MAX_CONVERGENCE_TRACKED = 1024;
+const MAX_CONVERGENCE_TEXT = 65_536;
 const EXECUTION_SLICE_ID = /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/;
 const FINDING_REF = /^[a-f0-9]{64}$/;
 function isVerificationLayer(value) {
@@ -130,9 +152,10 @@ export function isVerificationCheckpointPayload(v) {
         || (v.findingCount !== undefined && !Object.hasOwn(v, "findingCount"))
         || (v.completedSlices !== undefined && !Object.hasOwn(v, "completedSlices"))
         || (v.reviewedSliceIds !== undefined && !Object.hasOwn(v, "reviewedSliceIds"))
-        || (v.confirmedFindings !== undefined && !Object.hasOwn(v, "confirmedFindings")))
+        || (v.confirmedFindings !== undefined && !Object.hasOwn(v, "confirmedFindings"))
+        || (v.convergence !== undefined && !Object.hasOwn(v, "convergence")))
         return false;
-    const { layer, verdict, rubricVersion, findingCount, completedSlices, reviewedSliceIds, confirmedFindings } = v;
+    const { layer, verdict, rubricVersion, findingCount, completedSlices, reviewedSliceIds, confirmedFindings, convergence } = v;
     if (!isVerificationLayer(layer)
         || !isVerificationVerdict(layer, verdict)
         || (rubricVersion !== undefined && !isNonEmptyString(rubricVersion, MAX_RUBRIC_VERSION))
@@ -150,10 +173,9 @@ export function isVerificationCheckpointPayload(v) {
             || typeof findingCount !== "number"
             || findingCount !== confirmedFindings.length))
         return false;
+    if (convergence !== undefined && (!isVerificationConvergenceProjection(convergence) || layer !== "park-ranger"))
+        return false;
     return true;
-}
-function isObject(v) {
-    return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 function isNonEmptyString(v, max = MAX_STRING) {
     return typeof v === "string" && v.length > 0 && v.length <= max;
@@ -262,6 +284,90 @@ function isCanonicalConfirmedFinding(v) {
         && isPriority(v.priority)
         && isCanonicalStringArray(v.sliceIds, isExecutionSliceId);
 }
+function isConvergenceClassifiedFinding(v) {
+    if (!isObject(v)
+        || Object.keys(v).length !== 5
+        || !Object.hasOwn(v, "fingerprint")
+        || !Object.hasOwn(v, "priority")
+        || !Object.hasOwn(v, "severityClass")
+        || !Object.hasOwn(v, "subsystem")
+        || !Object.hasOwn(v, "relation"))
+        return false;
+    return isNonEmptyString(v.fingerprint, MAX_CONVERGENCE_TEXT)
+        && isPriority(v.priority)
+        && (v.severityClass === "repair-relevant" || v.severityClass === "other")
+        // A subsystem is a path directory and may legitimately be empty for a
+        // degenerate path spelling, so it is only length-bounded.
+        && typeof v.subsystem === "string"
+        && v.subsystem.length <= MAX_CONVERGENCE_TEXT
+        && (v.relation === "repeated" || v.relation === "related" || v.relation === "new");
+}
+function isConvergenceCondition(v) {
+    if (!isObject(v)
+        || Object.keys(v).length !== 6
+        || !Object.hasOwn(v, "type")
+        || !Object.hasOwn(v, "cycleCount")
+        || !Object.hasOwn(v, "fingerprints")
+        || !Object.hasOwn(v, "subsystem")
+        || !Object.hasOwn(v, "findings")
+        || !Object.hasOwn(v, "action"))
+        return false;
+    if (v.type !== "non_convergence"
+        || !(typeof v.cycleCount === "number" && Number.isSafeInteger(v.cycleCount) && v.cycleCount >= 1 && v.cycleCount <= MAX_CONVERGENCE_CHAIN)
+        || typeof v.subsystem !== "string"
+        || v.subsystem.length > MAX_CONVERGENCE_TEXT
+        || (v.action !== "consolidate" && v.action !== "stop"))
+        return false;
+    return isSortedStringArray(v.fingerprints, MAX_CONVERGENCE_CYCLE_FINDINGS)
+        && isSortedFindings(v.findings);
+}
+function isSortedStringArray(v, max) {
+    if (!isNativeDenseArray(v) || v.length > max)
+        return false;
+    const entries = v;
+    for (let index = 0; index < entries.length; index += 1) {
+        const entry = entries[index];
+        if (!Object.hasOwn(entries, index)
+            || !isNonEmptyString(entry, MAX_CONVERGENCE_TEXT)
+            || (index > 0 && entries[index - 1] >= entry))
+            return false;
+    }
+    return true;
+}
+function isSortedFindings(v) {
+    if (!isNativeDenseArray(v)
+        || v.length > MAX_CONVERGENCE_CYCLE_FINDINGS
+        || !v.every(isConvergenceClassifiedFinding))
+        return false;
+    const findings = v;
+    for (let index = 1; index < findings.length; index += 1) {
+        if (findings[index - 1].fingerprint >= findings[index].fingerprint)
+            return false;
+    }
+    return true;
+}
+function isVerificationConvergenceProjection(v) {
+    if (!isObject(v)
+        || (Object.keys(v).length !== 1 && Object.keys(v).length !== 2)
+        || !Object.hasOwn(v, "history")
+        || (v.condition !== undefined && !Object.hasOwn(v, "condition")))
+        return false;
+    if (v.condition !== undefined && !isConvergenceCondition(v.condition))
+        return false;
+    const history = v.history;
+    if (!isObject(history)
+        || Object.keys(history).length !== 2
+        || !Object.hasOwn(history, "tracked")
+        || !Object.hasOwn(history, "chain"))
+        return false;
+    return isNativeDenseArray(history.tracked)
+        && history.tracked.length <= MAX_CONVERGENCE_TRACKED
+        && history.tracked.every(isConvergenceClassifiedFinding)
+        && typeof history.chain === "number"
+        && Number.isSafeInteger(history.chain)
+        && history.chain >= 0
+        && history.chain <= MAX_CONVERGENCE_CHAIN;
+}
 function isCanonicalConfirmedFindings(v) {
     if (!isNativeDenseArray(v) || !v.every(isCanonicalConfirmedFinding))
         return false;
@@ -274,7 +380,7 @@ function isCanonicalConfirmedFindings(v) {
 const MAX_REQUIREMENT_REFS = 128;
 const MAX_REQUIREMENT_REF = 128;
 const REQUIREMENT_REF = /^(?:AC|RISK)-[A-Z0-9][A-Z0-9.-]*$/;
-export function isRequirementRefs(v) {
+function isRequirementRefs(v) {
     if (!Array.isArray(v) || v.length === 0 || v.length > MAX_REQUIREMENT_REFS)
         return false;
     for (let index = 0; index < v.length; index += 1) {
@@ -599,11 +705,6 @@ function isCanonicalJson(v) {
     catch {
         return false;
     }
-}
-function hasExactKeys(v, keys) {
-    return isObject(v)
-        && Object.keys(v).length === keys.length
-        && keys.every((key) => Object.hasOwn(v, key));
 }
 function isRepositoryFitDecision(v) {
     if (hasExactKeys(v, ["outcome"]) && v.outcome === "declined")

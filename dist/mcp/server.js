@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isObject } from "../contracts/guards.js";
 import { assertWorkspaceRoot, isWorkspaceRootError, pinWorkspaceRoot, } from "../repository/workspace-root.js";
 import { NodeProcessRunner } from "../adapters/process-runner.js";
 import { ROLE_KINDS } from "../contracts/execution-contract.js";
@@ -230,7 +231,7 @@ const TOOLS = [
     },
     {
         name: "bearing_focus_begin",
-        description: "Open one bounded Focus run from a repository-relative request and return its immutable envelope.",
+        description: "Open one bounded Focus run from a repository-relative request and return its immutable envelope plus the runtimeIdentity the receipt must copy verbatim.",
         inputSchema: FOCUS_BEGIN_SCHEMA,
     },
     {
@@ -259,9 +260,6 @@ const TOOLS = [
         inputSchema: LEGACY_EXECUTION_CONTRACT_SCHEMA,
     },
 ];
-function isObject(value) {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 /** Validates exactly the constructs the advertised schemas use. Nothing wider. */
 function schemaViolation(rule, value, label = "arguments") {
     if (rule.type === "object") {
@@ -374,6 +372,8 @@ function continuationBody(read) {
         ...(projection.summary ? { summary: projection.summary } : {}),
         ...(projection.outcome ? { outcome: projection.outcome } : {}),
         ...(read.planDirectory ? { planDirectory: read.planDirectory } : {}),
+        ...(read.workspace ? { workspace: read.workspace } : {}),
+        ...(read.runPath ? { runPath: read.runPath } : {}),
         ...(read.checkpoint ? { checkpoint: read.checkpoint } : {}),
         ...(read.selection ? { route: read.selection } : {}),
         ...(read.roleRoutes ? { roleRoutes: read.roleRoutes } : {}),
@@ -580,6 +580,9 @@ async function focusBegin(repository, requestPath) {
             repository: repositoryIdentity(repositoryPath),
             focusRunId: begun.runId,
             envelope: begun.envelope,
+            // The immutable identity of the runtime that will validate this run; the
+            // receipt must be bound to it or validation refuses with runtime_mismatch.
+            runtimeIdentity: begun.runtimeIdentity,
         };
     }
     catch (error) {
@@ -808,8 +811,6 @@ export function createDispatcher(deps = {}) {
         }
     };
 }
-/** Preserved default dispatcher: the protocol seam with the real transition engine. */
-export const dispatch = createDispatcher();
 /**
  * Newline-delimited JSON-RPC over stdio. Responses stay in request order, oversized and
  * unparsable lines are typed rather than fatal, notifications produce nothing, and EOF ends

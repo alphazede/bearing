@@ -8,6 +8,7 @@ import {
   OUTCOME_SIGNALS,
   projectOutcomes,
 } from "../src/improvement/outcome-projection.js";
+import { SLICE_WORKLOAD_AIM_TOKENS } from "../src/journey/planning-validator.js";
 
 const HASH = "0".repeat(64);
 const RUN_ID = "private-run-1";
@@ -150,6 +151,7 @@ describe("outcome projection", () => {
         code: "exhausted",
         tokens: 12,
         budget: 10,
+        aim: SLICE_WORKLOAD_AIM_TOKENS,
       },
       {
         schemaVersion: 1,
@@ -183,6 +185,30 @@ describe("outcome projection", () => {
       recoveryOutcome: { outcome: "repaired", attempts: 2 },
     }) as Record<string, unknown>, { stage: "execute-explorer", status: "complete", artifacts: [] });
     expect(projectOutcomes({ runId: RUN_ID, digest: digestFor(), events: [event("journeyCheckpointRecorded", inherited)] })).toEqual([]);
+  });
+
+  // The run-time half of the per-slice workload aim: every measured token
+  // record carries the same plan-time aim so a retrospective can see which
+  // work ran hot against it. The aim is a constant the projection reports
+  // beside measured usage — it never gates, filters, or re-codes a record.
+  it("records the plan-time workload aim beside every measured token total", () => {
+    const records = projectOutcomes({
+      runId: RUN_ID,
+      digest: digestFor(),
+      events: [
+        checkpoint({ tokenUsage: { total: 200, budget: 10_000, state: "within_budget" } }, 1),
+        checkpoint({ tokenUsage: { total: 1_400, budget: 10_000, state: "within_budget" } }, 2),
+      ],
+    });
+
+    const tokenRecords = records.filter((record): record is Extract<typeof record, { readonly signal: "token_usage" }> => record.signal === "token_usage");
+    expect(tokenRecords.map(({ tokens, aim }) => ({ tokens, aim }))).toEqual([
+      { tokens: 200, aim: SLICE_WORKLOAD_AIM_TOKENS },
+      { tokens: 1_200, aim: SLICE_WORKLOAD_AIM_TOKENS },
+    ]);
+    // Over the aim is data, not a verdict: the code still reports only the
+    // run's own budget state, and no record is dropped or reclassified.
+    expect(tokenRecords.map(({ code }) => code)).toEqual(["within_budget", "within_budget"]);
   });
 
   it("emits each bounded cumulative token total once as a deterministic delta", () => {

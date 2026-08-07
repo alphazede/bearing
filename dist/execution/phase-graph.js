@@ -1,13 +1,7 @@
 import { parallelSafetyAdvisories } from "../contracts/execution-contract.js";
 import { provenIndependent } from "./concurrency-control.js";
+import { deepFreeze } from "../contracts/guards.js";
 import { MAX_ORCHESTRATION_DEPTH } from "./execution-scheduler.js";
-function deepFreeze(value) {
-    if (typeof value !== "object" || value === null)
-        return value;
-    for (const nested of Object.values(value))
-        deepFreeze(nested);
-    return Object.freeze(value);
-}
 function pairKey(left, right) {
     return `${left}:${right}`;
 }

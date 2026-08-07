@@ -679,3 +679,90 @@ describe("deriveFocusEnvelope", () => {
       .toEqual({ ok: false, reason: "slice_not_projectable" });
   });
 });
+
+// Issue 64: a containment wrapper receipt (audit_state: safe) was once read as
+// completion, so a Crewmate could exit 0 after only adding the red test. The
+// packet verdict must be a typed task outcome distinct from containment
+// evidence, with a bounded attempt budget, exact changed paths, and one
+// identity-preserving resume action for an early stop. The dynamic import
+// keeps this regression deterministic before the export exists.
+describe("Crewmate packet outcome", () => {
+  const identity = "a".repeat(64);
+  const complete = {
+    status: "complete",
+    changedPaths: ["src/contracts/first.ts"],
+    attemptsUsed: 1,
+  } as const;
+  const redOnly = {
+    status: "incomplete",
+    changedPaths: ["test/red.test.ts"],
+    attemptsUsed: 1,
+  } as const;
+
+  async function parseOutcome(value: unknown): Promise<unknown> {
+    const mod = await import("../src/contracts/execution-contract.js") as unknown as Record<string, unknown>;
+    const parse = mod.parseCrewmatePacketOutcome as (input: unknown) => unknown;
+    return parse(value);
+  }
+
+  it("exports a typed task outcome distinct from containment evidence with a bounded attempt budget", async () => {
+    const mod = await import("../src/contracts/execution-contract.js") as unknown as Record<string, unknown>;
+    expect(mod.CREWMATE_MAX_ATTEMPTS).toBe(3);
+    expect(mod.CREWMATE_TASK_OUTCOMES).toEqual(["complete", "incomplete", "blocked"]);
+  });
+
+  it("accepts a complete outcome with no resume action", async () => {
+    expect(await parseOutcome(complete)).toMatchObject({ ok: true });
+  });
+
+  it("rejects a stop after red that omits the typed resume action", async () => {
+    expect(await parseOutcome(redOnly)).toEqual({ ok: false, reason: "missing_resume" });
+  });
+
+  it("rejects an attempt count beyond the bounded budget", async () => {
+    const outcome = {
+      ...redOnly,
+      attemptsUsed: 4,
+      resume: { action: "Fix the failing regression and rerun the packet commands.", runtimeIdentity: identity },
+    };
+    expect(await parseOutcome(outcome)).toEqual({ ok: false, reason: "attempt_budget_exceeded" });
+  });
+
+  it("rejects a complete outcome that carries a resume action", async () => {
+    const outcome = {
+      ...complete,
+      resume: { action: "Rerun the packet commands.", runtimeIdentity: identity },
+    };
+    expect(await parseOutcome(outcome)).toEqual({ ok: false, reason: "resume_on_complete" });
+  });
+
+  it("accepts a blocked outcome with exactly one resume action preserving the guarded run identity", async () => {
+    const outcome = {
+      status: "blocked",
+      changedPaths: ["test/red.test.ts"],
+      attemptsUsed: 2,
+      resume: { action: "Ask the owner to amend the write set.", runtimeIdentity: identity },
+    };
+    const result = await parseOutcome(outcome);
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("accepts a write-nothing blocked outcome with an empty changed path list", async () => {
+    const outcome = {
+      status: "blocked",
+      changedPaths: [],
+      attemptsUsed: 1,
+      resume: { action: "Ask the owner to amend the write set.", runtimeIdentity: identity },
+    };
+    expect(await parseOutcome(outcome)).toMatchObject({ ok: true });
+  });
+
+  it("still refuses a write-nothing complete outcome", async () => {
+    const outcome = {
+      status: "complete",
+      changedPaths: [],
+      attemptsUsed: 1,
+    };
+    expect(await parseOutcome(outcome)).toEqual({ ok: false, reason: "empty_changed_paths" });
+  });
+});

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -94,7 +94,10 @@ async function fixture(
   await mkdir(join(root, PLAN_DIRECTORY), { recursive: true });
   await mkdir(join(root, "src"), { recursive: true });
   await writeFile(join(root, "src/import.ts"), "export const imported = true;\n");
-  await writeFile(join(root, ".gitignore"), ".bearing/\n");
+  // A provisioned repository ignores both the hidden ledger and the visible
+  // per-plan workspaces; committing the migrated audit trail would make every
+  // subsequent gate record a tracked-tree change and the candidate permanently dirty.
+  await writeFile(join(root, ".gitignore"), ".bearing/\nbearing-*/\n");
   await exec("git", ["init", "-q"], { cwd: root });
   await exec("git", ["config", "user.email", "bearing@example.invalid"], { cwd: root });
   await exec("git", ["config", "user.name", "Bearing Test"], { cwd: root });
@@ -207,7 +210,14 @@ async function durableFingerprint(root: string): Promise<string> {
     }
     return lines;
   };
-  return (await walk(join(root, ".bearing"), ".bearing")).join("\n");
+  // Slice-1 relocation: the migrated audit trail lives in the visible per-plan
+  // workspaces, so a mutation-free proof must cover them or it proves nothing.
+  const targets = [join(root, ".bearing")];
+  const visible = (await readdir(root, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory() && /^bearing-/.test(entry.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of visible) targets.push(join(root, entry.name));
+  return (await Promise.all(targets.map((target) => walk(target, basename(target))))).flat().join("\n");
 }
 
 async function storedReview(root: string, runId = RUN_ID): Promise<readonly ReviewRecord[] | undefined> {
@@ -333,7 +343,7 @@ describe("independent review gate", () => {
     expect(settled.ok).toBe(true);
     const sealed = await new BearingStore(fixed.root).compact(RUN_ID, { noDirtyOrUnmergedLane: true, runNotBusy: true });
     expect(sealed.events).toEqual([]);
-    const runDir = join(fixed.root, ".bearing", "runs", RUN_ID);
+    const runDir = join(fixed.root, (await fixed.store.runWorkspacePath(RUN_ID)) ?? join(".bearing", "runs", RUN_ID));
     expect(await readFile(join(runDir, "events.jsonl"), "utf8")).toBe("");
     expect(JSON.parse(await readFile(join(runDir, "snapshot.json"), "utf8")))
       .toMatchObject({ journeyCheckpoint: { review: [recorded.record] } });

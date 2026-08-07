@@ -141,6 +141,15 @@ function proposalBody(recommendation) {
 }
 function hashProposal(recommendation) {
     const canonicalBody = canonicalClone(proposalBody(recommendation));
+    // The hash identifies the proposed change, not the opaque evidence pointers:
+    // recordRefs (and the openedAtRef derived from the first of them) are digest
+    // output that changes with the workspace keying (issue #14), so identical
+    // evidence would otherwise hash differently after a keying upgrade and orphan
+    // owner applications recorded under the previous keying.
+    const evidence = canonicalBody.recommendation.evidence;
+    delete evidence.recordRefs;
+    const trial = canonicalBody.recommendation.trial;
+    delete trial.openedAtRef;
     return hashEvent(canonicalBody);
 }
 function recommendationRevertMatches(recommendation) {

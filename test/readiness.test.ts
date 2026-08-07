@@ -10,9 +10,9 @@ describe("readiness service", () => {
     let checks = 0;
     const service = new ReadinessService({ executableAvailable: () => { checks += 1; return true; } }, { verify: async () => { throw new Error("must not verify"); } });
     const routes = service.inspect();
-    expect(routes).toHaveLength(5);
+    expect(routes).toHaveLength(8);
     expect(routes.every((route) => route.detected)).toBe(true);
-    expect(checks).toBe(5);
+    expect(checks).toBe(8);
   });
 
   it("discovers models only for the selected route and reuses its repository cache", async () => {
@@ -27,7 +27,7 @@ describe("readiness service", () => {
     };
     const service = new ReadinessService(inspection);
     try {
-      expect(service.inspect(repository)).toHaveLength(5);
+      expect(service.inspect(repository)).toHaveLength(8);
       expect(repositories).toEqual([]);
       expect(service.discover("opencode", repository)).toMatchObject([{ model: "repo/model" }]);
       expect(repositories).toEqual([repository]);

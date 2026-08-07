@@ -4,6 +4,7 @@ import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 import { provenIndependent, type SliceFacts } from "../execution/concurrency-control.js";
 import type { FocusEnvelope, FocusRole } from "../journey/focus-mode.js";
 import { REASONING_TIERS, type ReasoningTier } from "../profile/reasoning-policy.js";
+import { boundedText, deepFreeze, hasExactKeys, isObject } from "./guards.js";
 
 export const EXECUTION_CONTRACT_SCHEMA_VERSION = 1 as const;
 
@@ -124,26 +125,11 @@ export type ExecutionContractParseResult =
     }
   | { readonly ok: false; readonly reason: ExecutionContractFailure };
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(value: unknown, required: readonly string[]): value is Record<string, unknown> {
-  return isObject(value)
-    && Object.keys(value).length === required.length
-    && required.every((key) => Object.hasOwn(value, key));
-}
-
 function hasAllowedKeys(value: unknown, required: readonly string[], optional: readonly string[]): value is Record<string, unknown> {
   if (!isObject(value)) return false;
   const allowed = new Set([...required, ...optional]);
   return Object.keys(value).every((key) => allowed.has(key))
     && required.every((key) => Object.hasOwn(value, key));
-}
-
-function boundedText(value: unknown, max = MAX_TEXT): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= max && value === value.trim()
-    && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
 }
 
 function denseArray<T>(
@@ -304,12 +290,6 @@ export function hashLegacyRoleRoutes(runId: string, roleRoutes: readonly RoleRou
 function bodyOf(contract: ApprovedExecutionContract): ExecutionContractBody {
   const { contentHash: _hash, ownerApproval: _approval, ...body } = contract;
   return body;
-}
-
-function deepFreeze<T>(value: T): T {
-  if (typeof value !== "object" || value === null) return value;
-  for (const nested of Object.values(value)) deepFreeze(nested);
-  return Object.freeze(value);
 }
 
 function immutableContractSnapshot(contract: ApprovedExecutionContract): ApprovedExecutionContract {
@@ -603,5 +583,116 @@ export function deriveFocusEnvelope(
     remainingSlices,
     gateFailureFingerprint: gate,
     prohibition: "Do not perform unrelated work.",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Crewmate packet outcome contract
+// ---------------------------------------------------------------------------
+
+/**
+ * Bounded attempts one Crewmate may spend on a single packet before it must
+ * stop with a typed `incomplete` or `blocked` outcome. The budget keeps
+ * red-to-green retrying finite inside one invocation.
+ */
+export const CREWMATE_MAX_ATTEMPTS = 3 as const;
+
+/**
+ * Typed verdict of one Crewmate packet, distinct from containment evidence.
+ * Containment records what changed and what ran under which guard identity;
+ * the outcome records whether the packet completed. Provider-neutral: no
+ * provider, model, or route name appears anywhere in the shape.
+ */
+export const CREWMATE_TASK_OUTCOMES = ["complete", "incomplete", "blocked"] as const;
+export type CrewmateTaskOutcome = (typeof CREWMATE_TASK_OUTCOMES)[number];
+
+export interface CrewmateResumeAction {
+  /** The one bounded next action for the same packet. */
+  readonly action: string;
+  /** The guarded run identity, copied verbatim from the receipt; a resume never opens a new packet. */
+  readonly runtimeIdentity: string;
+}
+
+export interface CrewmatePacketOutcome {
+  readonly status: CrewmateTaskOutcome;
+  /** Exact paths this attempt changed; each stays inside the packet's write set. */
+  readonly changedPaths: readonly string[];
+  /** Attempts this packet consumed, between 1 and CREWMATE_MAX_ATTEMPTS. */
+  readonly attemptsUsed: number;
+  /** Exactly one resume action, present exactly when status is `incomplete` or `blocked`. */
+  readonly resume?: CrewmateResumeAction;
+}
+
+export type CrewmatePacketOutcomeFailure =
+  | "malformed"
+  | "unknown_status"
+  | "empty_changed_paths"
+  | "invalid_changed_path"
+  | "attempt_budget_exceeded"
+  | "missing_resume"
+  | "resume_on_complete";
+
+export type CrewmatePacketOutcomeParseResult =
+  | { readonly ok: true; readonly value: CrewmatePacketOutcome }
+  | { readonly ok: false; readonly reason: CrewmatePacketOutcomeFailure };
+
+function resumeActionShape(value: unknown): value is CrewmateResumeAction {
+  return hasExactKeys(value, ["action", "runtimeIdentity"])
+    && boundedText(value.action)
+    && typeof value.runtimeIdentity === "string"
+    && HASH.test(value.runtimeIdentity);
+}
+
+/**
+ * Parse and validate one Crewmate packet outcome. The typed outcome is the
+ * packet's verdict and stays separate from containment evidence, so a wrapper
+ * receipt that only proves containment can never be read as completion.
+ */
+export function parseCrewmatePacketOutcome(value: unknown): CrewmatePacketOutcomeParseResult {
+  if (!hasAllowedKeys(value, ["status", "changedPaths", "attemptsUsed"], ["resume"])) {
+    return { ok: false, reason: "malformed" };
+  }
+  if (value.status !== "complete" && value.status !== "incomplete" && value.status !== "blocked") {
+    return { ok: false, reason: "unknown_status" };
+  }
+  if (typeof value.attemptsUsed !== "number" || !Number.isSafeInteger(value.attemptsUsed)) {
+    return { ok: false, reason: "malformed" };
+  }
+  const changedPaths = value.changedPaths;
+  if (!Array.isArray(changedPaths)
+    || changedPaths.length > MAX_ITEMS
+    || changedPaths.some((path) => typeof path !== "string" || !safePath(path))
+    || duplicate(changedPaths as readonly string[])) {
+    return { ok: false, reason: "invalid_changed_path" };
+  }
+  // A write-nothing stop is representable for incomplete/blocked (the resume
+  // action names what unblocks the packet); only "complete" must have changed
+  // paths, or an empty success would certify nothing was done.
+  if (value.status === "complete" && changedPaths.length === 0) {
+    return { ok: false, reason: "empty_changed_paths" };
+  }
+  if (value.attemptsUsed < 1 || value.attemptsUsed > CREWMATE_MAX_ATTEMPTS) {
+    return { ok: false, reason: "attempt_budget_exceeded" };
+  }
+  if (value.status === "complete") {
+    if (value.resume !== undefined) return { ok: false, reason: "resume_on_complete" };
+    return {
+      ok: true,
+      value: deepFreeze({
+        status: value.status,
+        changedPaths: [...changedPaths] as readonly string[],
+        attemptsUsed: value.attemptsUsed,
+      }),
+    };
+  }
+  if (!resumeActionShape(value.resume)) return { ok: false, reason: "missing_resume" };
+  return {
+    ok: true,
+    value: deepFreeze({
+      status: value.status,
+      changedPaths: [...changedPaths] as readonly string[],
+      attemptsUsed: value.attemptsUsed,
+      resume: value.resume,
+    }),
   };
 }

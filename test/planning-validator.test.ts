@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   foldVerdict,
@@ -603,5 +606,592 @@ Phase two is bounded but has no declared controls.
     expect(expected.findings).toContainEqual(expect.objectContaining({ code: "recon_recommended" }));
     expect(notReady.findings).toContainEqual(expect.objectContaining({ code: "recon_recommended" }));
     expect(affirmative.findings).not.toContainEqual(expect.objectContaining({ code: "recon_recommended" }));
+  });
+});
+
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const sharedContractFixture = "test/fixtures/focus-plan-corpus/shared-contract-omitted";
+
+async function sharedContractDocuments(): Promise<PlanDocuments> {
+  const [plan, design, seit, implementation] = await Promise.all(
+    ["plan-spec.md", "design.md", "seit.md", "implementation.md"].map((name) => readFile(join(repositoryRoot, sharedContractFixture, name), "utf8")),
+  );
+  return { plan, design, seit, implementation };
+}
+
+describe("shared contract producers", () => {
+  it("rejects a slice whose declared shared interface names a producer path no slice write set covers", async () => {
+    const result = validatePlan({ documents: await sharedContractDocuments(), planDirectory: sharedContractFixture });
+
+    expect(result.verdict).toBe("NEEDS_AMENDMENT");
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: "shared_contract_unproduced",
+      severity: "amendment",
+      artifact: "implementation.md",
+      sliceId: "S1",
+      observed: "src/verification/validator.ts",
+    }));
+  });
+
+  it("stays silent when the declaring slice's own write set covers the producer path", async () => {
+    const documents = await sharedContractDocuments();
+    const covered = {
+      ...documents,
+      implementation: documents.implementation.replace(
+        "Write only `src/import.ts`.",
+        "Write only `src/import.ts` and `src/verification/validator.ts`.",
+      ),
+    };
+
+    expect(validatePlan({ documents: covered, planDirectory: sharedContractFixture }).verdict).toBe("PASS");
+  });
+
+  it("stays silent when a peer slice's write set covers the producer path", async () => {
+    const documents = await sharedContractDocuments();
+    const withPeer = documents.implementation
+      .replace("Wave 1: **S1**", "Wave 1: **S1**\nWave 2: **S2**")
+      .concat(`
+### Slice S2 — Produce
+
+**Goal.** Produce the shared validator report contract.
+**Requirement IDs.** AC-1, RISK-1
+**Design IDs.** DES-1, CONTRACT-1
+**SEIT proof rows.** SEIT-1
+**Type.** New pure module and test
+**Design lenses.** CDD
+**Implementation role.** Backend Engineer
+**Agent model route.** Codex agent default
+**Agent reasoning level.** high
+**Ponytail mode.** full
+**Review path.** native review
+
+### S2 execution manifest
+
+**Write set.** Write only \`src/verification/validator.ts\`.
+**Command IDs.** CMD-UNIT
+**Stop condition.** Stop if the focused test fails.
+**Human decision.** None.
+`);
+    const result = validatePlan({ documents: { ...documents, implementation: withPeer }, planDirectory: sharedContractFixture });
+
+    expect(result.verdict).toBe("PASS");
+  });
+
+  // Reviewer P2: the field also carries documented non-path forms ("backticked
+  // identifiers, or the word `none`"). A bare interface tag or an anchor-only
+  // identifier names no producer module and must never demand one.
+  it("stays silent on a bare interface tag with no path separator", async () => {
+    const documents = await sharedContractDocuments();
+    const bareTag = {
+      ...documents,
+      implementation: documents.implementation.replace(
+        "**Shared interfaces.** `src/verification/validator.ts#ValidatorReport`.",
+        "**Shared interfaces.** `ValidatorReport`.",
+      ),
+    };
+
+    expect(validatePlan({ documents: bareTag, planDirectory: sharedContractFixture }).verdict).toBe("PASS");
+  });
+
+  it("stays silent on an anchor-only identifier", async () => {
+    const documents = await sharedContractDocuments();
+    const anchorOnly = {
+      ...documents,
+      implementation: documents.implementation.replace(
+        "**Shared interfaces.** `src/verification/validator.ts#ValidatorReport`.",
+        "**Shared interfaces.** `#ValidatorReport`.",
+      ),
+    };
+
+    expect(validatePlan({ documents: anchorOnly, planDirectory: sharedContractFixture }).verdict).toBe("PASS");
+  });
+
+  it("stays silent on a plan that declares no shared interfaces", async () => {
+    const documents = await sharedContractDocuments();
+    const undeclared = {
+      ...documents,
+      implementation: documents.implementation.replace("**Shared interfaces.** `src/verification/validator.ts#ValidatorReport`.\n", ""),
+    };
+
+    expect(validatePlan({ documents: undeclared, planDirectory: sharedContractFixture }).verdict).toBe("PASS");
+  });
+});
+
+const repositoryRootForSystemCatalog = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const systemCatalogFixture = "test/fixtures/focus-plan-corpus/system-catalog-incomplete";
+
+async function systemCatalogDocuments(): Promise<PlanDocuments> {
+  const [plan, design, seit, implementation] = await Promise.all(
+    ["plan-spec.md", "design.md", "seit.md", "implementation.md"].map((name) => readFile(join(repositoryRootForSystemCatalog, systemCatalogFixture, name), "utf8")),
+  );
+  return { plan, design, seit, implementation };
+}
+
+function systemFindings(findings: readonly Finding[]): readonly Finding[] {
+  return findings.filter((finding) => finding.code.startsWith("system_"));
+}
+
+const SYSTEM_SPEC_FIELDS = [
+  "Ownership",
+  "Inputs",
+  "Outputs",
+  "APIs",
+  "Data ownership",
+  "Invariants",
+  "Trust boundary",
+  "Failure modes",
+  "Observability",
+] as const;
+
+const SYS_2_SPEC = `### SYS-2 — Import boundary
+
+**Ownership.** Backend Engineering.
+**Inputs.** Bounded import requests.
+**Outputs.** Imported ledger rows.
+**APIs.** importLedger.
+**Data ownership.** Imported ledger rows.
+**Invariants.** Imports never widen the ledger schema.
+**Trust boundary.** None beyond the import boundary.
+**Failure modes.** Invalid imports fail closed.
+**Observability.** Import events.`;
+
+/** The incomplete fixture with a complete per-system specification added for SYS-2. */
+async function completeSystemDocuments(): Promise<PlanDocuments> {
+  const base = await systemCatalogDocuments();
+  return {
+    ...base,
+    design: base.design.replace("## Requirement Trace", `${SYS_2_SPEC}\n\n## Requirement Trace`),
+  };
+}
+
+describe("system catalog maturity", () => {
+  it("rejects a catalog-declaring plan whose catalog entry has no per-system specification", async () => {
+    const result = validatePlan({ documents: await systemCatalogDocuments(), planDirectory: systemCatalogFixture });
+
+    expect(result.verdict).toBe("NEEDS_AMENDMENT");
+    expect(systemFindings(result.findings)).toContainEqual(expect.objectContaining({
+      code: "system_spec_missing",
+      severity: "amendment",
+      artifact: "design.md",
+      observed: "SYS-2 has no per-system specification",
+    }));
+    expect(systemFindings(result.findings)).not.toContainEqual(expect.objectContaining({ observed: "SYS-1 has no per-system specification" }));
+  });
+
+  it("passes a catalog-declaring plan whose every catalog entry resolves to a complete specification", async () => {
+    const result = validatePlan({ documents: await completeSystemDocuments(), planDirectory: systemCatalogFixture });
+
+    expect(systemFindings(result.findings)).toEqual([]);
+    expect(result.verdict).toBe("PASS");
+  });
+
+  it("rejects a specification that names no catalog entry", async () => {
+    const documents = await completeSystemDocuments();
+    const phantom = {
+      ...documents,
+      design: documents.design.replace("## Requirement Trace", "### SYS-99 — Phantom system\n\n**Ownership.** Nobody.\n\n## Requirement Trace"),
+    };
+
+    expect(systemFindings(validatePlan({ documents: phantom, planDirectory: systemCatalogFixture }).findings)).toContainEqual(
+      expect.objectContaining({ code: "system_spec_missing", observed: "SYS-99: SYS-99 — Phantom system names no catalog entry" }),
+    );
+  });
+
+  it("rejects a specification missing a required field, naming the system and the field", async () => {
+    const documents = await completeSystemDocuments();
+    const incomplete = {
+      ...documents,
+      design: documents.design.replace("**Trust boundary.** None beyond the import boundary.\n", ""),
+    };
+
+    expect(systemFindings(validatePlan({ documents: incomplete, planDirectory: systemCatalogFixture }).findings)).toContainEqual(
+      expect.objectContaining({ code: "system_spec_missing", observed: "SYS-2: trust boundary" }),
+    );
+  });
+
+  it("rejects a SYS- reference in design.md that no catalog entry declares", async () => {
+    const documents = await completeSystemDocuments();
+    const dangling = {
+      ...documents,
+      design: documents.design.replace("## Requirement Trace", "**Depends on.** SYS-77.\n\n## Requirement Trace"),
+    };
+
+    expect(systemFindings(validatePlan({ documents: dangling, planDirectory: systemCatalogFixture }).findings)).toContainEqual(
+      expect.objectContaining({ code: "system_trace_broken", observed: "SYS-77", required: "every SYS- reference in design.md must name a catalog entry" }),
+    );
+  });
+
+  it("reports a SYS- reference inside a per-system specification that no catalog row declares", async () => {
+    const documents = await completeSystemDocuments();
+    const dangling = {
+      ...documents,
+      design: documents.design.replace(
+        "**Invariants.** Focus boundaries never widen.",
+        "**Invariants.** SYS-9 always stays closed.\n\n| SYS-9 | Foo | Bar |",
+      ),
+    };
+
+    expect(systemFindings(validatePlan({ documents: dangling, planDirectory: systemCatalogFixture }).findings)).toContainEqual(
+      expect.objectContaining({ code: "system_trace_broken", observed: "SYS-9", required: "every SYS- reference in design.md must name a catalog entry" }),
+    );
+  });
+
+  it("rejects a trace row whose requirement, contract, SEIT row, or slice does not resolve", async () => {
+    const documents = await completeSystemDocuments();
+    const danglingRow = {
+      ...documents,
+      design: documents.design.replace(
+        "| AC-1, RISK-1 | SYS-1, SYS-2 | CONTRACT-1 | SEIT-1 | S1 | `src/notifier.ts` |",
+        "| AC-9 | SYS-1 | CONTRACT-9 | SEIT-9 | S9 | `src/notifier.ts` |",
+      ),
+    };
+    const findings = systemFindings(validatePlan({ documents: danglingRow, planDirectory: systemCatalogFixture }).findings);
+
+    for (const observed of ["AC-9", "CONTRACT-9", "SEIT-9", "S9"]) {
+      expect(findings).toContainEqual(expect.objectContaining({ code: "system_trace_broken", observed }));
+    }
+  });
+
+  it("rejects a declared requirement that no Requirement Trace row reaches", async () => {
+    const documents = await completeSystemDocuments();
+    const untraced = {
+      ...documents,
+      plan: documents.plan.replace("- **AC-1** — Keep Focus bounded.", "- **AC-1** — Keep Focus bounded.\n- **AC-2** — Import bounded data."),
+    };
+
+    expect(systemFindings(validatePlan({ documents: untraced, planDirectory: systemCatalogFixture }).findings)).toContainEqual(
+      expect.objectContaining({ code: "system_trace_broken", observed: "AC-2", required: "every declared requirement must reach a Requirement Trace row" }),
+    );
+  });
+
+  it("passes an adopted catalog with complete specifications and no Requirement Trace table", async () => {
+    const documents = await completeSystemDocuments();
+    const noTrace = {
+      ...documents,
+      design: documents.design.replace(/^## Requirement Trace[\s\S]*$/m, ""),
+    };
+
+    const result = validatePlan({ documents: noTrace, planDirectory: systemCatalogFixture });
+    expect(systemFindings(result.findings)).toEqual([]);
+    expect(result.verdict).toBe("PASS");
+  });
+
+  it("rejects a traced path no slice write set covers", async () => {
+    const documents = await completeSystemDocuments();
+    const uncovered = {
+      ...documents,
+      design: documents.design.replace("`src/notifier.ts`", "`src/verification/validator.ts`"),
+    };
+
+    expect(systemFindings(validatePlan({ documents: uncovered, planDirectory: systemCatalogFixture }).findings)).toContainEqual(
+      expect.objectContaining({ code: "system_trace_broken", observed: "src/verification/validator.ts", required: "every traced path must be covered by a slice write set" }),
+    );
+  });
+
+  // A plan that never declares the System Catalog section never adopts the
+  // maturity convention, so every system_* check must stay silent -- otherwise
+  // the checks would reject every existing plan instead of proving anything.
+  it("does not fire on a plan that declares no system catalog", async () => {
+    for (const planDirectory of ["test/fixtures/focus-plan-corpus/valid-bounds", "test/fixtures/focus-plan-corpus/procedure-drift"]) {
+      const [plan, design, seit, implementation] = await Promise.all(
+        ["plan-spec.md", "design.md", "seit.md", "implementation.md"].map((name) => readFile(join(repositoryRootForSystemCatalog, planDirectory, name), "utf8")),
+      );
+      const result = validatePlan({ documents: { plan, design, seit, implementation }, planDirectory });
+      expect(systemFindings(result.findings)).toEqual([]);
+    }
+  });
+
+  it("does not fire on a catalog-free plan that mentions SYS- ids in prose", async () => {
+    const documents = await systemCatalogDocuments();
+    const catalogFree = {
+      ...documents,
+      design: documents.design
+        .replace("## System Catalog", "## Background")
+        .replace(/^\| SYS-\d \|.*\|.*\|$/gm, "")
+        .replace(/^### SYS-1 — Focus boundary$[\s\S]*?(?=^## )/m, "")
+        .replace("## Requirement Trace", "## Notes")
+        .replace(/^\| (?:AC|RISK|SYS|CONTRACT|SEIT|S\d) .*\|$/gm, "")
+        .replace("The owner dispatches one bounded slice.", "The SYS-1 Focus boundary and SYS-2 Import boundary systems stay ambient."),
+    };
+
+    const result = validatePlan({ documents: catalogFree, planDirectory: systemCatalogFixture });
+    expect(systemFindings(result.findings)).toEqual([]);
+    expect(result.verdict).toBe("PASS");
+  });
+});
+
+const repositoryRootForRiskProfile = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const riskProfileFixture = "test/fixtures/focus-plan-corpus/risk-profile-uncovered";
+
+async function riskProfileDocuments(): Promise<PlanDocuments> {
+  const [plan, design, seit, implementation] = await Promise.all(
+    ["plan-spec.md", "design.md", "seit.md", "implementation.md"].map((name) => readFile(join(repositoryRootForRiskProfile, riskProfileFixture, name), "utf8")),
+  );
+  return { plan, design, seit, implementation };
+}
+
+function riskFindings(findings: readonly Finding[]): readonly Finding[] {
+  return findings.filter((finding) => finding.code.startsWith("risk_"));
+}
+
+const MOVES_MONEY_COVERED = "design: Threat Model; seit: SEIT-1; slice: S1";
+
+describe("risk profile coverage", () => {
+  // The fixture declares a risk profile with moves_money: yes mapped to
+  // design coverage only; SEIT and slice coverage are missing, so the flag
+  // must not be satisfiable by design coverage alone.
+  it("rejects a yes flag whose profile maps design coverage but no SEIT row or slice", async () => {
+    const result = validatePlan({ documents: await riskProfileDocuments(), planDirectory: riskProfileFixture });
+
+    expect(result.verdict).toBe("NEEDS_AMENDMENT");
+    // The fixture is otherwise clean: the two coverage gaps are the plan's
+    // only findings, proving the profile itself introduces no noise.
+    expect(result.findings).toHaveLength(2);
+    expect(riskFindings(result.findings)).toContainEqual(expect.objectContaining({
+      code: "risk_coverage_missing",
+      severity: "amendment",
+      artifact: "plan-spec.md",
+      observed: "moves_money: SEIT coverage missing",
+    }));
+    expect(riskFindings(result.findings)).toContainEqual(expect.objectContaining({
+      code: "risk_coverage_missing",
+      observed: "moves_money: slice coverage missing",
+    }));
+  });
+
+  it("passes a profile-declaring plan whose every yes flag maps design, SEIT, and slice coverage", async () => {
+    const documents = await riskProfileDocuments();
+    const covered = { ...documents, plan: documents.plan.replace("design: Threat Model", MOVES_MONEY_COVERED) };
+    const result = validatePlan({ documents: covered, planDirectory: riskProfileFixture });
+
+    expect(result.verdict).toBe("PASS");
+    expect(riskFindings(result.findings)).toEqual([]);
+  });
+
+  it("passes a profile whose every flag is declared not applicable with an evidence-backed rationale", async () => {
+    const documents = await riskProfileDocuments();
+    const allNotApplicable = {
+      ...documents,
+      plan: documents.plan.replace(
+        "| moves_money | yes | design: Threat Model |",
+        "| moves_money | no | The plan never moves money; all state stays on the local machine. |",
+      ),
+    };
+    const result = validatePlan({ documents: allNotApplicable, planDirectory: riskProfileFixture });
+
+    expect(result.verdict).toBe("PASS");
+    expect(riskFindings(result.findings)).toEqual([]);
+  });
+
+  it("rejects a vacuous not-applicable rationale that would silently dispose of a triggered flag", async () => {
+    const documents = await riskProfileDocuments();
+    const vacuous = {
+      ...documents,
+      plan: documents.plan.replace(
+        "| moves_money | yes | design: Threat Model |",
+        "| moves_money | no | none |",
+      ),
+    };
+    const result = validatePlan({ documents: vacuous, planDirectory: riskProfileFixture });
+
+    expect(result.verdict).toBe("NEEDS_AMENDMENT");
+    expect(riskFindings(result.findings)).toContainEqual(expect.objectContaining({
+      code: "risk_coverage_missing",
+      observed: "moves_money: not-applicable rationale is not evidence-backed",
+    }));
+  });
+
+  // The rationale gate justifies an absence, not a presence: natural
+  // not-applicable rationales that assert why the flag does not apply
+  // (no data present, nothing scheduled, nothing owned) are evidence and
+  // must satisfy a triggered no flag.
+  it("accepts natural not-applicable rationales that assert an absence", async () => {
+    const documents = await riskProfileDocuments();
+    const naturalRationales = [
+      "No customer data is present in this plan.",
+      "No personal data is collected by this plan.",
+      "No external service is available to this plan.",
+      "No operator is assigned to run this plan.",
+      "No state is owned by the plan.",
+      "No review is performed by this plan.",
+      "Nothing is scheduled outside the bounded route.",
+    ];
+    for (const rationale of naturalRationales) {
+      const result = validatePlan({
+        documents: {
+          ...documents,
+          plan: documents.plan.replace(
+            "| moves_money | yes | design: Threat Model |",
+            `| moves_money | no | ${rationale} |`,
+          ),
+        },
+        planDirectory: riskProfileFixture,
+      });
+      expect(riskFindings(result.findings), rationale).toEqual([]);
+    }
+  });
+
+  // A bare negation padded to four words is still vacuous: "not applicable
+  // to this plan" disposes of the flag without stating why.
+  it("rejects a bare-negation rationale padded past the word minimum", async () => {
+    const documents = await riskProfileDocuments();
+    for (const rationale of ["not applicable to this plan", "The flag does not apply here."]) {
+      const result = validatePlan({
+        documents: {
+          ...documents,
+          plan: documents.plan.replace(
+            "| moves_money | yes | design: Threat Model |",
+            `| moves_money | no | ${rationale} |`,
+          ),
+        },
+        planDirectory: riskProfileFixture,
+      });
+
+      expect(result.verdict).toBe("NEEDS_AMENDMENT");
+      expect(riskFindings(result.findings)).toContainEqual(expect.objectContaining({
+        code: "risk_coverage_missing",
+        observed: "moves_money: not-applicable rationale is not evidence-backed",
+      }));
+    }
+  });
+
+  // Design coverage must name a section with a body: a heading title alone
+  // cannot satisfy a yes flag.
+  it("does not count a bodiless design heading as design coverage", async () => {
+    const documents = await riskProfileDocuments();
+    const bodiless = {
+      ...documents,
+      design: `${documents.design}\n## Vacuous\n`,
+      plan: documents.plan.replace(
+        "| moves_money | yes | design: Threat Model |",
+        "| moves_money | yes | design: Vacuous; seit: SEIT-1; slice: S1 |",
+      ),
+    };
+    const result = validatePlan({ documents: bodiless, planDirectory: riskProfileFixture });
+
+    expect(result.verdict).toBe("NEEDS_AMENDMENT");
+    expect(riskFindings(result.findings)).toContainEqual(expect.objectContaining({
+      code: "risk_coverage_missing",
+      observed: "moves_money: design section Vacuous is not a non-empty design section",
+    }));
+  });
+
+  it("rejects a profile that omits a known flag from the enumeration", async () => {
+    const documents = await riskProfileDocuments();
+    const omitted = {
+      ...documents,
+      plan: documents.plan.replace("| production_service | no | Nothing is deployed; the plan runs only in the development checkout. |\n", ""),
+    };
+    const result = validatePlan({ documents: omitted, planDirectory: riskProfileFixture });
+
+    expect(result.verdict).toBe("NEEDS_AMENDMENT");
+    expect(riskFindings(result.findings)).toContainEqual(expect.objectContaining({
+      code: "risk_profile_malformed",
+      observed: "Risk Profile is missing the production_service flag",
+    }));
+  });
+
+  it("rejects an unknown flag name and a malformed coverage clause", async () => {
+    const documents = await riskProfileDocuments();
+    const unknownFlag = {
+      ...documents,
+      plan: documents.plan.replace(
+        "| moves_money | yes | design: Threat Model |",
+        "| moves_funds | yes | design: Threat Model; seit: SEIT-1; slice: S1 |",
+      ),
+    };
+    const result = validatePlan({ documents: unknownFlag, planDirectory: riskProfileFixture });
+    expect(riskFindings(result.findings)).toContainEqual(expect.objectContaining({
+      code: "risk_profile_malformed",
+      observed: "unknown risk flag: moves_funds",
+    }));
+
+    const badClause = {
+      ...documents,
+      plan: documents.plan.replace(
+        "| moves_money | yes | design: Threat Model |",
+        "| moves_money | yes | threat: Threat Model |",
+      ),
+    };
+    const resultClause = validatePlan({ documents: badClause, planDirectory: riskProfileFixture });
+    expect(riskFindings(resultClause.findings)).toContainEqual(expect.objectContaining({
+      code: "risk_profile_malformed",
+      observed: "moves_money: coverage clause must name design, system, seit, or slice: threat: Threat Model",
+    }));
+  });
+
+  it("rejects coverage that names undeclared design sections, SEIT rows, or slices", async () => {
+    const documents = await riskProfileDocuments();
+    const dangling = {
+      ...documents,
+      plan: documents.plan.replace(
+        "| moves_money | yes | design: Threat Model |",
+        "| moves_money | yes | design: No Such Section; seit: SEIT-9; slice: S9 |",
+      ),
+    };
+    const result = validatePlan({ documents: dangling, planDirectory: riskProfileFixture });
+
+    expect(result.verdict).toBe("NEEDS_AMENDMENT");
+    expect(riskFindings(result.findings)).toContainEqual(expect.objectContaining({
+      code: "risk_coverage_missing",
+      observed: "moves_money: design section No Such Section is not a non-empty design section",
+    }));
+    expect(riskFindings(result.findings)).toContainEqual(expect.objectContaining({
+      code: "risk_coverage_missing",
+      observed: "moves_money: SEIT row SEIT-9 is not a declared traceability row",
+    }));
+    expect(riskFindings(result.findings)).toContainEqual(expect.objectContaining({
+      code: "risk_coverage_missing",
+      observed: "moves_money: slice S9 is not a declared slice",
+    }));
+  });
+
+  // Negative control: the risk profile is opt-in; plans that never declare
+  // the section must validate exactly as before, with zero risk findings.
+  it("does not fire on plans that declare no risk profile", async () => {
+    for (const planDirectory of [
+      "test/fixtures/focus-plan-corpus/valid-bounds",
+      "test/fixtures/focus-plan-corpus/procedure-drift",
+      "test/fixtures/map-the-route-contract",
+    ]) {
+      const [plan, design, seit, implementation] = await Promise.all(
+        ["plan-spec.md", "design.md", "seit.md", "implementation.md"].map((name) => readFile(join(repositoryRootForRiskProfile, planDirectory, name), "utf8")),
+      );
+      const result = validatePlan({ documents: { plan, design, seit, implementation }, planDirectory });
+      expect(riskFindings(result.findings)).toEqual([]);
+    }
+  });
+});
+
+describe("slice workload aim", () => {
+  const scopeFindings = (findings: readonly Finding[]) => findings.filter((item) => item.code === "slice_scope_advisory");
+  const oversized = implementation.replace(
+    "**Goal.** Import bounded data.",
+    `**Goal.** Import bounded data.\n**Notes.** ${"Import one bounded record from the upstream feed and record the result. ".repeat(30)}`,
+  );
+
+  it("leaves a slice inside the aim free of the advisory", () => {
+    expect(scopeFindings(validate().findings)).toEqual([]);
+  });
+
+  it("advises on a slice whose declared text exceeds the aim without changing the verdict", () => {
+    const result = validate({ implementation: oversized });
+    expect(scopeFindings(result.findings)).toEqual([expect.objectContaining({
+      code: "slice_scope_advisory",
+      severity: "advisory",
+      artifact: "implementation.md",
+      sliceId: "S1",
+    })]);
+    expect(result.verdict).toBe("PASS");
+  });
+
+  it("states the aim is ergonomic policy and never a workload prediction", () => {
+    const [advisory] = scopeFindings(validate({ implementation: oversized }).findings);
+    expect(advisory.required).toContain("not a prediction");
+    expect(advisory.remedy).toContain("split");
+  });
+
+  it("folds an advisory-only plan to PASS", () => {
+    expect(foldVerdict(scopeFindings(validate({ implementation: oversized }).findings))).toBe("PASS");
   });
 });

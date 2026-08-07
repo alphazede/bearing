@@ -45,7 +45,7 @@ const QUESTION = "Has either unblock condition changed for the pending infrastru
 const DECISION_ID = "decision-legacy-135";
 
 const LEGACY_ROUTES: readonly RoleRoute[] = [
-  { role: "execution-author", primary: "opencode", fallbacks: [] },
+  { role: "execution-author", primary: "grok-build", fallbacks: [] },
   { role: "review-general", primary: "codex", fallbacks: [] },
   { role: "review-security", primary: "codex", fallbacks: [] },
 ];

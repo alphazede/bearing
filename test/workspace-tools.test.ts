@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
-import { access, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CommandEnvelopeV1 } from "../src/contracts/run.js";
+import { planDirectoryValid } from "../src/journey/plan-directory.js";
+import { isVisibleWorkspaceName, planWorkspaceName } from "../src/repository/workspace-location.js";
 import {
   workspaceCompact,
   workspaceDoctor,
@@ -57,7 +59,7 @@ async function repository(): Promise<{ base: string; root: string }> {
   await git(root, ["init", "-q"]);
   await git(root, ["config", "user.email", "bearing@example.invalid"]);
   await git(root, ["config", "user.name", "Bearing Test"]);
-  await writeFile(join(root, ".gitignore"), ".bearing/\n");
+  await writeFile(join(root, ".gitignore"), ".bearing/\nbearing-*/\n");
   await writeFile(join(root, "tracked.txt"), "baseline\n");
   await git(root, ["add", "."]);
   await git(root, ["commit", "-qm", "baseline"]);
@@ -220,8 +222,43 @@ describe("workspace footprint", () => {
 
     expect(lines).toContain("Runs: 3 (settled: 1, unsettled: 1, compacted: 1)");
     expect(lines.findIndex((line) => line.startsWith("Runs:"))).toBe(
-      lines.findIndex((line) => line.startsWith("Workspace bytes:")) + 1,
+      lines.findIndex((line) => line.startsWith("Plan workspaces:")) + 1,
     );
+  });
+
+  it("reports the state location of every run, visible per-plan workspaces and legacy homes", async () => {
+    const { root } = await repository();
+    await seedRun(root, "legacy-run", "complete");
+    await seedRun(root, "planned-run", "complete");
+    // A plan-bound run's audit trail lives in the visible per-plan workspace;
+    // simulate the store's verified relocation by moving the run directory.
+    await mkdir(join(root, "bearing-plans-demo", "runs"), { recursive: true });
+    await rename(
+      join(root, ".bearing", "runs", "planned-run"),
+      join(root, "bearing-plans-demo", "runs", "planned-run"),
+    );
+
+    const lines = await workspaceStatus(root, { cwd: root, pathEnv: "" });
+
+    expect(lines).toContain("Run state: legacy-run at .bearing/runs/legacy-run");
+    expect(lines).toContain("Run state: planned-run at bearing-plans-demo/runs/planned-run");
+    // The legacy-home fallback must keep the POSIX receipt grammar the server
+    // validator requires (HEADLESS_STATE_LOCATION); platform `join` would emit
+    // `\` on win32 and break the disclosure.
+    expect(lines.some((line) => /^Run state: legacy-run at (?:[A-Za-z0-9._-]{1,64}\/)?runs\/legacy-run$/.test(line))).toBe(true);
+    expect(lines.findIndex((line) => line.startsWith("Runs:"))).toBe(
+      lines.findIndex((line) => line.startsWith("Plan workspaces:")) + 1,
+    );
+  });
+
+  it("never derives a run state location from a hostile plan name (escaping proof)", () => {
+    // A hostile plan name containing quotes or angle brackets cannot become a
+    // visible workspace: the plan directory grammar rejects it before any
+    // workspace name is derived, and the visible workspace grammar rejects it
+    // even if a directory with such a name existed on disk.
+    expect(planDirectoryValid('docs/plans/inspect"<x>')).toBe(false);
+    expect(() => planWorkspaceName('docs/plans/inspect"<x>')).toThrow(/Plan directory is not valid/);
+    expect(isVisibleWorkspaceName('bearing-inspect"<x>')).toBe(false);
   });
 
   it.each([

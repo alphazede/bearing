@@ -6,6 +6,7 @@ import {
   assertIsolatedVerification,
   type VerificationProjection,
 } from "./verification-roles.js";
+import { isObject } from "../contracts/guards.js";
 
 const MAX_ITEMS = 128;
 const MAX_TEXT = 16_384;
@@ -171,10 +172,6 @@ const EMPTY_INDEPENDENCE: VerificationIndependence = {
   implementerSessionIds: [],
   executionAncestry: [],
 };
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function hasAllowedKeys(value: unknown, required: readonly string[], optional: readonly string[] = []): value is Record<string, unknown> {
   if (!isObject(value)) return false;
@@ -504,8 +501,172 @@ function findingCode(finding: ParkRangerFinding): string {
   return finding.code ?? finding.testStrength ?? finding.id;
 }
 
+/**
+ * Normalizes a finding's repository-relative path to one canonical POSIX
+ * spelling: backslashes become slashes, a leading "./" is stripped, and
+ * duplicate slashes collapse. Without this, `src/journey/a.ts`,
+ * `./src/journey/b.ts`, `src\journey\c.ts`, and `src//journey//d.ts` would
+ * fingerprint and classify as four different locations and subsystems, so the
+ * convergence chain could never see them as related.
+ */
+function canonicalFindingPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/{2,}/g, "/");
+}
+
 export function findingIdentity(finding: ParkRangerFinding): string {
-  return JSON.stringify([finding.location.path, finding.location.line, findingCode(finding)]);
+  return JSON.stringify([canonicalFindingPath(finding.location.path), finding.location.line, findingCode(finding)]);
+}
+
+// --- Review-repair convergence guard -----------------------------------------
+//
+// A repair round fixes one defect and the next review round finds the next one in the same
+// subsystem — see `regressionRisk`, whose whole point is that a repair can trade one bug for
+// another. Nothing before this guard compared one cycle's findings with the prior cycles'
+// fingerprints, so the cycle could run indefinitely without ever surfacing that it is not
+// converging. This guard classifies each new P1/P2 finding as repeated/related/new against the
+// prior cycles' fingerprints, counts consecutive non-converging cycles, and emits a typed,
+// bounded `non_convergence` condition once the count reaches a configurable threshold. The
+// condition is a surfaced typed signal carrying one bounded consolidate-or-stop action — never
+// an enforcement gate and never a stop that discards evidence.
+
+export const DEFAULT_CONVERGENCE_THRESHOLD = 3 as const;
+export const MAX_CONVERGENCE_CYCLES = 16 as const;
+export const MAX_CYCLE_FINDINGS = 64 as const;
+const MAX_TRACKED_FINDINGS = MAX_CONVERGENCE_CYCLES * MAX_CYCLE_FINDINGS;
+
+export type FindingRelation = "repeated" | "related" | "new";
+export type SeverityClass = "repair-relevant" | "other";
+export type NonConvergenceAction = "consolidate" | "stop";
+
+export interface ClassifiedFinding {
+  readonly fingerprint: string;
+  readonly priority: Priority;
+  readonly severityClass: SeverityClass;
+  readonly subsystem: string;
+  readonly relation: FindingRelation;
+}
+
+export interface ConvergenceHistory {
+  /** Classified P1/P2 findings from all prior cycles, newest last, bounded. */
+  readonly tracked: readonly ClassifiedFinding[];
+  /** Consecutive cycles whose every new P1/P2 finding repeated or related to a prior cycle. */
+  readonly chain: number;
+}
+
+export const EMPTY_CONVERGENCE_HISTORY: ConvergenceHistory = { tracked: [], chain: 0 };
+
+/**
+ * Typed convergence signal, present once the chain of related review-repair cycles reaches the
+ * threshold. The relatedness rule is provable from finding fields only: a finding is `repeated`
+ * when its fingerprint already appeared in a prior cycle, `related` when it shares the same
+ * severity class and subsystem (directory of `location.path`) as some prior-cycle finding, and
+ * `new` otherwise. Only P1/P2 findings are tracked — they are the repair-relevant severity class,
+ * and the chain resets on a genuinely new finding or on a cycle with no P1/P2 findings.
+ */
+export interface NonConvergenceCondition {
+  readonly type: "non_convergence";
+  /** Consecutive related cycles at emission time. */
+  readonly cycleCount: number;
+  /** Fingerprints of the current cycle's classified findings, sorted and deduplicated. */
+  readonly fingerprints: readonly string[];
+  /** Most frequent subsystem among the current cycle's classified findings; ties by sort order. */
+  readonly subsystem: string;
+  readonly findings: readonly ClassifiedFinding[];
+  /** "consolidate" at exactly the threshold; "stop" while the chain keeps growing past it. */
+  readonly action: NonConvergenceAction;
+}
+
+export type ReviewCycleResult =
+  | { readonly ok: true; readonly value: { readonly history: ConvergenceHistory; readonly condition?: NonConvergenceCondition } }
+  | { readonly ok: false; readonly reason: "convergence_threshold_invalid" };
+
+export function findingSeverityClass(priority: Priority): SeverityClass {
+  return priority === "P1" || priority === "P2" ? "repair-relevant" : "other";
+}
+
+export function findingSubsystem(finding: ParkRangerFinding): string {
+  const path = canonicalFindingPath(finding.location.path);
+  const segments = path.split("/");
+  const subsystem = segments.slice(0, -1).join("/");
+  return subsystem === "" ? path : subsystem;
+}
+
+function classifyFinding(finding: ParkRangerFinding, prior: readonly ClassifiedFinding[]): ClassifiedFinding {
+  const fingerprint = findingIdentity(finding);
+  const subsystem = findingSubsystem(finding);
+  const severityClass = findingSeverityClass(finding.priority);
+  const relation: FindingRelation = prior.some((tracked) => tracked.fingerprint === fingerprint)
+    ? "repeated"
+    : prior.some((tracked) => tracked.severityClass === severityClass && tracked.subsystem === subsystem)
+      ? "related"
+      : "new";
+  return { fingerprint, priority: finding.priority, severityClass, subsystem, relation };
+}
+
+function dominantSubsystem(classified: readonly ClassifiedFinding[]): string {
+  const counts = new Map<string, number>();
+  for (const { subsystem } of classified) counts.set(subsystem, (counts.get(subsystem) ?? 0) + 1);
+  let dominant = classified[0].subsystem;
+  for (const [subsystem, count] of counts) {
+    const dominantCount = counts.get(dominant) ?? 0;
+    if (count > dominantCount || (count === dominantCount && subsystem < dominant)) dominant = subsystem;
+  }
+  return dominant;
+}
+
+/**
+ * Advances the run's convergence history by one review-repair cycle. The caller owns the history
+ * across cycles (run-scoped state threaded by the orchestration layer) and receives the updated
+ * history plus, once the chain reaches the threshold, the typed `non_convergence` condition.
+ * Classification happens against `history.tracked` only — never against the current cycle — so a
+ * finding can only repeat or relate to something an earlier cycle already reported.
+ */
+export function recordReviewCycle(
+  history: ConvergenceHistory,
+  cycleFindings: readonly ParkRangerFinding[],
+  threshold: number = DEFAULT_CONVERGENCE_THRESHOLD,
+): ReviewCycleResult {
+  if (!Number.isSafeInteger(threshold) || threshold < 1 || threshold > MAX_CONVERGENCE_CYCLES) {
+    return { ok: false, reason: "convergence_threshold_invalid" };
+  }
+
+  const classified = cycleFindings
+    .filter((finding) => finding.priority === "P1" || finding.priority === "P2")
+    .map((finding) => classifyFinding(finding, history.tracked))
+    .sort((left, right) => compareText(left.fingerprint, right.fingerprint))
+    .filter((finding, index, all) => index === 0 || all[index - 1].fingerprint !== finding.fingerprint)
+    .slice(0, MAX_CYCLE_FINDINGS);
+
+  // The chain advances only when the cycle reports at least one P1/P2 finding and every one of
+  // them repeated or related to a prior cycle. A genuinely new finding — or a cycle with no
+  // repair-relevant findings at all — is progress, and the chain resets to zero.
+  const chain = classified.length > 0 && classified.every(({ relation }) => relation !== "new")
+    ? history.chain + 1
+    : 0;
+
+  // Newest last, oldest dropped past the cap, so the guard stays bounded however long a
+  // misbehaving run keeps cycling.
+  const tracked = [...history.tracked, ...classified].slice(-MAX_TRACKED_FINDINGS);
+  const value: { readonly history: ConvergenceHistory; readonly condition?: NonConvergenceCondition } = {
+    history: { tracked, chain },
+  };
+
+  if (chain < threshold) return { ok: true, value };
+
+  return {
+    ok: true,
+    value: {
+      ...value,
+      condition: {
+        type: "non_convergence",
+        cycleCount: chain,
+        fingerprints: classified.map(({ fingerprint }) => fingerprint),
+        subsystem: dominantSubsystem(classified),
+        findings: classified,
+        action: chain === threshold ? "consolidate" : "stop",
+      },
+    },
+  };
 }
 
 function compareText(left: string, right: string): number {

@@ -2,12 +2,62 @@ import { isAbsolute, posix } from "node:path";
 import { provenIndependent } from "../execution/concurrency-control.js";
 const MAX_TEXT = 4096;
 const MAX_ITEMS = 128;
-const SLICE_HEADING = /^###\s+Slice\s+(?<id>[A-Za-z]+\d+|\d+(?:\.\d+)+)\b.*$/gm;
-const MANIFEST_HEADING = /^###\s+(?<id>[A-Za-z]+\d+|\d+(?:\.\d+)+)\s+execution manifest\s*$/gmi;
+// Headings capture the complete first non-whitespace id token; the token must
+// then pass the closed slice id grammar, so a separator like "/" or ":" (or a
+// hyphen) can never be read as a truncated valid id.
+const SLICE_HEADING = /^###\s+Slice\s+(?<id>[A-Za-z0-9]\S*).*$/gm;
+const MANIFEST_HEADING = /^###\s+(?<id>[A-Za-z0-9]\S*)\s+execution manifest\s*$/gmi;
+const SLICE_ID_FORMAT = /^(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)$/;
+// Wave, dependency, phase-graph, and prose references match the same strict
+// token so a hyphenated id is never read as a truncated valid one. A period
+// closes a sentence but opens a dotted id only when a digit follows it.
+const SLICE_ID_MATCH = /\b(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)(?![A-Za-z0-9_-]|\.\d)/g;
 const PLAN_ID = /^(?:AC|RISK)-[A-Z0-9][A-Z0-9.-]*$/i;
 const DESIGN_ID = /^(?:DES|CONTRACT)-[A-Z0-9][A-Z0-9.-]*$/i;
 const SEIT_ID = /^SEIT-[A-Z0-9][A-Z0-9.-]*$/i;
 const COMMAND_ID = /^(?:CMD|PROC)-[A-Z0-9][A-Z0-9.-]*$/i;
+// System ids follow the closed SEIT- prefix grammar: uppercase letters, digits,
+// dots, or hyphens after the SYS- prefix, never underscores.
+const SYS_REFERENCE = /\bSYS-[A-Za-z0-9][A-Za-z0-9.-]*\b/gi;
+// The risk profile is a closed enumeration of surface flags a plan can
+// declare in plan-spec.md. Flag ids are lowercase words joined by
+// underscores, mirroring the typed id grammar of the other plan artifacts.
+const KNOWN_RISK_FLAGS = [
+    "moves_money",
+    "live_financial_action",
+    "agentic_tools",
+    "untrusted_external_content",
+    "personal_or_behavioral_data",
+    "multi_user",
+    "multi_tenant",
+    "company_customers",
+    "public_api_or_sdk",
+    "external_webhooks_and_providers",
+    "regulated_or_sanctions_exposure",
+    "production_service",
+    "availability_required",
+    "automatic_external_issue_creation",
+];
+const RISK_PROFILE_HEADING = /^##[ \t]+Risk Profile[ \t]*$/mi;
+const RISK_PROFILE_COLUMNS = ["flag", "applies", "coverage or rationale"];
+const RISK_COVERAGE_KIND = /^(design|system|seit|slice)\s*:\s*(.+)$/i;
+const RISK_SYSTEM_TOKEN = /^SYS-[A-Za-z0-9][A-Za-z0-9.-]*$/i;
+const SYSTEM_CATALOG_HEADING = /^##[ \t]+System Catalog[ \t]*$/mi;
+const SYSTEM_TRACE_HEADING = /^##[ \t]+Requirement Trace[ \t]*$/mi;
+const SYSTEM_SPEC_HEADING = /^SYS-[A-Za-z0-9][A-Za-z0-9.-]*\b/i;
+const SYSTEM_CATALOG_COLUMNS = ["system id", "system", "responsibility"];
+const SYSTEM_TRACE_COLUMNS = ["requirement id", "system id", "contract id", "seit row id", "slice id", "path"];
+export const requiredSystemSpecFields = [
+    "Ownership",
+    "Inputs",
+    "Outputs",
+    "APIs",
+    "Data ownership",
+    "Invariants",
+    "Trust boundary",
+    "Failure modes",
+    "Observability",
+];
 const TRACE_HEADERS = [
     "seit row id",
     "acceptance/risk id",
@@ -66,18 +116,23 @@ function records(content, pattern) {
     const wanted = [...content.matchAll(new RegExp(pattern.source, pattern.flags))];
     const values = new Map();
     const duplicates = new Set();
+    const invalid = [];
     for (const match of wanted) {
         const id = match.groups?.id;
         if (!id)
             continue;
         const start = match.index ?? 0;
         const end = allHeadings.find((heading) => (heading.index ?? 0) > start)?.index ?? content.length;
+        if (!SLICE_ID_FORMAT.test(id)) {
+            invalid.push(id);
+            continue;
+        }
         if (values.has(id))
             duplicates.add(id);
         else
             values.set(id, content.slice(start, end));
     }
-    return { values, duplicates };
+    return { values, duplicates, invalid };
 }
 export function sectionPresent(content, heading) {
     const match = new RegExp(`^##[ \\t]+${escaped(heading)}[ \\t]*\\r?\\n([\\s\\S]*?)(?=^##[ \\t]+|(?![\\s\\S]))`, "mi").exec(content);
@@ -141,6 +196,286 @@ export function classifyWriteSetClause(writeSet) {
 function tableCells(line) {
     return line.trim().replace(/^\||\|$/g, "").split("|").map((value) => value.trim());
 }
+const NARRATIVE_FIELDS = ["Command", "Positive case", "Negative case", "Evidence", "Evidence target"];
+const NARRATIVE_ROW_ID = /^SEIT-[A-Za-z0-9][A-Za-z0-9.-]*\b/i;
+/**
+ * Procedure narratives are `### SEIT-<id> <title>` subsections of the seit
+ * `## ... Procedures` section. Each narrative restates the traceability row's
+ * command, positive case, negative case, and evidence target so the validator
+ * can detect meaning drift between the matrix and the executable procedure.
+ */
+function procedureNarratives(seitDocument) {
+    const headings = [...seitDocument.matchAll(/^(#{1,6})[ \t]+(.+?)[ \t]*\r?$/gm)].map((match) => ({
+        level: match[1].length,
+        title: match[2].trim(),
+        start: match.index ?? 0,
+        contentStart: match.index + match[0].length,
+    }));
+    const narratives = new Map();
+    for (let index = 0; index < headings.length; index += 1) {
+        const section = headings[index];
+        if (section.level !== 2 || !/procedur/i.test(section.title))
+            continue;
+        const sectionEnd = headings.slice(index + 1).find((candidate) => candidate.level <= 2)?.start ?? seitDocument.length;
+        for (let cursor = index + 1; cursor < headings.length; cursor += 1) {
+            const heading = headings[cursor];
+            if (heading.start >= sectionEnd)
+                break;
+            if (heading.level !== 3)
+                continue;
+            const rowId = NARRATIVE_ROW_ID.exec(heading.title)?.[0]?.toUpperCase();
+            if (!rowId)
+                continue;
+            const bodyEnd = headings.slice(cursor + 1).find((candidate) => candidate.start < sectionEnd && candidate.level <= 3)?.start ?? sectionEnd;
+            const body = seitDocument.slice(heading.contentStart, bodyEnd).trim();
+            const parsedFields = fields(body, NARRATIVE_FIELDS);
+            const entries = narratives.get(rowId) ?? [];
+            entries.push({
+                rowId,
+                heading: heading.title,
+                commandIds: ids(parsedFields.get("Command"), COMMAND_ID),
+                fields: parsedFields,
+            });
+            narratives.set(rowId, entries);
+        }
+    }
+    return narratives;
+}
+function sysIds(value) {
+    if (!value)
+        return new Set();
+    return new Set([...value.matchAll(SYS_REFERENCE)].map((match) => match[0].toUpperCase()));
+}
+/**
+ * The system map is an opt-in maturity convention: a design adopts it by
+ * titling a section `## System Catalog`. The catalog is a table of stable
+ * SYS- ids; each entry resolves to a `### SYS-<id>` per-system specification
+ * inside the same section; an optional `## Requirement Trace` table carries
+ * the requirement-to-system chain, and the closure that every declared
+ * requirement reaches a trace row is enforced only when the table is
+ * present. Designs that never declare the section have no system map, so
+ * nothing here demands one from them.
+ */
+function systemMap(designDocument) {
+    const adopted = SYSTEM_CATALOG_HEADING.test(designDocument);
+    if (!adopted) {
+        return { adopted, catalog: new Map(), catalogIssues: [], specs: new Map(), traceRows: [], traceIssues: [], references: new Set() };
+    }
+    const catalog = new Map();
+    const catalogIssues = [];
+    // The catalog table is the contiguous pipe block before the first
+    // `### SYS-` specification; per-system specification bodies may carry their
+    // own tables, which must never be read as catalog rows.
+    const catalogSection = section(designDocument, "System Catalog") ?? "";
+    const catalogTable = catalogSection.split(/^###[ \t]/m)[0].split(/\r?\n/).filter((line) => line.trim().startsWith("|"));
+    if (!catalogTable.length) {
+        catalogIssues.push("System Catalog section is empty");
+    }
+    else {
+        const headers = tableCells(catalogTable[0]).map((value) => value.toLowerCase());
+        if (headers.length !== SYSTEM_CATALOG_COLUMNS.length || SYSTEM_CATALOG_COLUMNS.some((column) => !headers.includes(column))) {
+            catalogIssues.push(`System Catalog table is missing a required column: ${catalogTable[0]}`);
+        }
+        else {
+            const cell = (values, header) => values[headers.indexOf(header)] ?? "";
+            for (const line of catalogTable.slice(2)) {
+                const values = tableCells(line);
+                if (values.length !== headers.length) {
+                    catalogIssues.push(`System Catalog row width does not match: ${line}`);
+                    continue;
+                }
+                const ids = sysIds(cell(values, "system id"));
+                if (ids.size !== 1) {
+                    catalogIssues.push(`System Catalog rows must contain exactly one typed SYS- id: ${line}`);
+                    continue;
+                }
+                const id = [...ids][0];
+                if (catalog.has(id)) {
+                    catalogIssues.push(`System Catalog ids must be unique: ${id}`);
+                    continue;
+                }
+                catalog.set(id, { id, raw: line });
+            }
+        }
+    }
+    const headings = [...designDocument.matchAll(/^(#{1,6})[ \t]+(.+?)[ \t]*\r?$/gm)].map((match) => ({
+        level: match[1].length,
+        title: match[2].trim(),
+        start: match.index ?? 0,
+        contentStart: (match.index ?? 0) + match[0].length,
+    }));
+    const catalogIndex = headings.findIndex((heading) => heading.level === 2
+        && heading.title.localeCompare("System Catalog", undefined, { sensitivity: "accent" }) === 0);
+    const sectionEnd = catalogIndex < 0
+        ? -1
+        : headings.slice(catalogIndex + 1).find((candidate) => candidate.level <= 2)?.start ?? designDocument.length;
+    const specs = new Map();
+    for (let index = catalogIndex + 1; catalogIndex >= 0 && index < headings.length; index += 1) {
+        const heading = headings[index];
+        if (heading.start >= sectionEnd)
+            break;
+        if (heading.level !== 3)
+            continue;
+        const id = SYSTEM_SPEC_HEADING.exec(heading.title)?.[0]?.toUpperCase();
+        if (!id)
+            continue;
+        if (specs.has(id)) {
+            catalogIssues.push(`per-system specifications must be unique: ${id}`);
+            continue;
+        }
+        const bodyEnd = headings.slice(index + 1).find((candidate) => candidate.start < sectionEnd && candidate.level <= 3)?.start ?? sectionEnd;
+        const body = designDocument.slice(heading.contentStart, bodyEnd).trim();
+        specs.set(id, { id, heading: heading.title, fields: fields(body, requiredSystemSpecFields) });
+    }
+    const traceRows = [];
+    const traceIssues = [];
+    if (SYSTEM_TRACE_HEADING.test(designDocument)) {
+        const traceTable = (section(designDocument, "Requirement Trace") ?? "").split(/\r?\n/).filter((line) => line.trim().startsWith("|"));
+        if (!traceTable.length) {
+            traceIssues.push("Requirement Trace section is empty");
+        }
+        else {
+            const headers = tableCells(traceTable[0]).map((value) => value.toLowerCase());
+            if (headers.length !== SYSTEM_TRACE_COLUMNS.length || SYSTEM_TRACE_COLUMNS.some((column) => !headers.includes(column))) {
+                traceIssues.push(`Requirement Trace table is missing a required column: ${traceTable[0]}`);
+            }
+            else {
+                const cell = (values, header) => values[headers.indexOf(header)] ?? "";
+                for (const line of traceTable.slice(2)) {
+                    const values = tableCells(line);
+                    if (values.length !== headers.length) {
+                        traceIssues.push(`Requirement Trace row width does not match: ${line}`);
+                        continue;
+                    }
+                    const requirements = ids(cell(values, "requirement id"), PLAN_ID);
+                    const systems = sysIds(cell(values, "system id"));
+                    if (!requirements.size || !systems.size) {
+                        traceIssues.push(`Requirement Trace rows must contain typed requirement and system ids: ${line}`);
+                        continue;
+                    }
+                    traceRows.push({
+                        requirements,
+                        systems,
+                        contracts: ids(cell(values, "contract id"), DESIGN_ID),
+                        seits: ids(cell(values, "seit row id"), SEIT_ID),
+                        slices: new Set(cell(values, "slice id").match(SLICE_ID_MATCH) ?? []),
+                        paths: [...cell(values, "path").matchAll(/`([^`]+)`/g)].map((match) => match[1]),
+                    });
+                }
+            }
+        }
+    }
+    const references = new Set([...designDocument.matchAll(SYS_REFERENCE)].map((match) => match[0].toUpperCase()));
+    return { adopted, catalog, catalogIssues, specs, traceRows, traceIssues, references };
+}
+/**
+ * The risk profile is an opt-in risk declaration: a plan adopts it by
+ * titling a `## Risk Profile` section in plan-spec.md. The section is a
+ * Markdown table with the Flag, Applies, and Coverage or rationale columns
+ * that must enumerate every known risk flag. A `yes` flag maps
+ * cross-artifact coverage clauses (`design:` section or `system:` SYS- id,
+ * `seit:` rows, `slice:` ids); a `no` flag carries the not-applicable
+ * rationale instead. Plans that never declare the section have no risk
+ * profile, so nothing here demands one from them.
+ */
+function riskProfile(planDocument) {
+    const adopted = RISK_PROFILE_HEADING.test(planDocument);
+    if (!adopted)
+        return { adopted: false, flags: new Map(), issues: [] };
+    const profileSection = section(planDocument, "Risk Profile") ?? "";
+    const table = profileSection.split(/\r?\n/).filter((line) => line.trim().startsWith("|"));
+    if (!table.length) {
+        return { adopted, flags: new Map(), issues: ["Risk Profile section is empty"] };
+    }
+    const headers = tableCells(table[0]).map((value) => value.toLowerCase());
+    if (headers.length !== RISK_PROFILE_COLUMNS.length || RISK_PROFILE_COLUMNS.some((column) => !headers.includes(column))) {
+        return { adopted, flags: new Map(), issues: [`Risk Profile table is missing a required column: ${table[0]}`] };
+    }
+    const flags = new Map();
+    const issues = [];
+    const cell = (values, header) => values[headers.indexOf(header)] ?? "";
+    for (const line of table.slice(2)) {
+        const values = tableCells(line);
+        if (values.length !== headers.length) {
+            issues.push(`Risk Profile row width does not match: ${line}`);
+            continue;
+        }
+        const flag = cell(values, "flag").trim();
+        const applies = cell(values, "applies").trim().toLowerCase();
+        const body = cell(values, "coverage or rationale").trim();
+        if (!KNOWN_RISK_FLAGS.includes(flag)) {
+            issues.push(`unknown risk flag: ${flag}`);
+            continue;
+        }
+        if (applies !== "yes" && applies !== "no") {
+            issues.push(`Risk Profile flag ${flag} must declare applies yes or no: ${applies}`);
+            continue;
+        }
+        if (flags.has(flag)) {
+            issues.push(`Risk Profile flags must be unique: ${flag}`);
+            continue;
+        }
+        if (applies === "yes") {
+            flags.set(flag, parseRiskCoverage(flag, body, issues));
+        }
+        else {
+            flags.set(flag, { applies, clauses: [], rationale: body, coverageIssues: [] });
+        }
+    }
+    // A declared profile is a complete risk declaration: every known flag must
+    // be enumerated, because an absent row would otherwise silently re-open
+    // the gap the profile exists to close.
+    for (const flag of KNOWN_RISK_FLAGS) {
+        if (!flags.has(flag))
+            issues.push(`Risk Profile is missing the ${flag} flag`);
+    }
+    return { adopted, flags, issues };
+}
+function parseRiskCoverage(flag, body, issues) {
+    const clauses = [];
+    const coverageIssues = [];
+    for (const clause of body.split(";")) {
+        const match = RISK_COVERAGE_KIND.exec(clause.trim());
+        if (!match) {
+            coverageIssues.push(`${flag}: coverage clause must name design, system, seit, or slice: ${clause.trim()}`);
+            continue;
+        }
+        const kind = match[1].toLowerCase();
+        const value = match[2].trim();
+        if (!value || value.length > MAX_TEXT) {
+            coverageIssues.push(`${flag}: coverage clause must carry a bounded value: ${clause.trim()}`);
+            continue;
+        }
+        if (kind === "system") {
+            for (const token of value.split(",").map((part) => part.trim()).filter(Boolean)) {
+                if (!RISK_SYSTEM_TOKEN.test(token))
+                    coverageIssues.push(`${flag}: system coverage must name a typed SYS- id: ${token}`);
+                else
+                    clauses.push({ kind, value: token.toUpperCase() });
+            }
+        }
+        else if (kind === "seit") {
+            for (const token of value.split(",").map((part) => part.trim()).filter(Boolean)) {
+                if (!SEIT_ID.test(token))
+                    coverageIssues.push(`${flag}: SEIT coverage must name typed SEIT- row ids: ${token}`);
+                else
+                    clauses.push({ kind, value: token.toUpperCase() });
+            }
+        }
+        else if (kind === "slice") {
+            for (const token of value.split(",").map((part) => part.trim()).filter(Boolean)) {
+                if (!SLICE_ID_FORMAT.test(token))
+                    coverageIssues.push(`${flag}: slice coverage must name typed slice ids: ${token}`);
+                else
+                    clauses.push({ kind, value: token });
+            }
+        }
+        else {
+            clauses.push({ kind, value });
+        }
+    }
+    return { applies: "yes", clauses, rationale: "", coverageIssues };
+}
 function traceability(seitDocument) {
     const matrix = section(seitDocument, "Traceability Matrix") ?? "";
     const lines = matrix.split(/\r?\n/).filter((line) => line.trim().startsWith("|"));
@@ -198,7 +533,7 @@ function waveMap(implementationDocument) {
             const segment = line.slice((declaration.index ?? 0) + declaration[0].length, declarations[index + 1]?.index ?? line.length);
             const delimiter = /:|\bcovers?\b/i.exec(segment);
             const declared = segment.slice(delimiter ? delimiter.index + delimiter[0].length : 0).split("(", 1)[0];
-            const sliceIds = declared.match(/\b(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)\b/g) ?? [];
+            const sliceIds = declared.match(SLICE_ID_MATCH) ?? [];
             const members = waves.get(Number(declaration[1])) ?? new Set();
             sliceIds.forEach((id) => members.add(id));
             waves.set(Number(declaration[1]), members);
@@ -208,7 +543,7 @@ function waveMap(implementationDocument) {
 }
 function dependencyMap(implementationDocument) {
     const result = new Map();
-    const identifier = /\b(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)\b/g;
+    const identifier = SLICE_ID_MATCH;
     let branchSource;
     for (const line of implementationDocument.split(/\r?\n/).filter((value) => /(?:-->|──>|→)/.test(value))) {
         const groups = line.split(/(?:-->|──>|→)/).map((part) => part.match(identifier) ?? []);
@@ -280,7 +615,7 @@ function parsePhaseGraph(implementationDocument) {
             continue;
         }
         const phaseId = plainCell(cells[phaseColumn] ?? "");
-        const sliceIds = plainCell(cells[slicesColumn] ?? "").match(/\b(?:[A-Za-z]+\d+|\d+(?:\.\d+)+)\b/g) ?? [];
+        const sliceIds = plainCell(cells[slicesColumn] ?? "").match(SLICE_ID_MATCH) ?? [];
         const dependencyCell = plainCell(cells[dependenciesColumn] ?? "");
         const dependsOnPhases = /^(?:—|-|none)$/i.test(dependencyCell)
             ? []
@@ -350,7 +685,10 @@ export function parsePlanDocuments(documents) {
         });
     }
     const trace = traceability(documents.seit);
+    const narratives = procedureNarratives(documents.seit);
     const parsedPhaseGraph = parsePhaseGraph(documents.implementation);
+    const systemMapResult = systemMap(documents.design);
+    const riskProfileResult = riskProfile(documents.plan);
     const planIdSource = `${section(documents.plan, "Acceptance criteria") ?? ""}\n${section(documents.plan, "Risks and open questions") ?? ""}`;
     const identifierValues = [
         ...[...slices.values()].flatMap((slice) => ["Requirement IDs", "Design IDs", "SEIT proof rows"].map((name) => slice.fields.get(name) ?? "")),
@@ -365,6 +703,7 @@ export function parsePlanDocuments(documents) {
         manifests,
         duplicateSliceIds: sliceRecords.duplicates,
         duplicateManifestIds: manifestRecords.duplicates,
+        malformedRecordIds: [...new Set([...sliceRecords.invalid, ...manifestRecords.invalid])],
         traceHeaders: trace.headers,
         traceRows: trace.rows,
         traceIssues: trace.issues,
@@ -376,6 +715,17 @@ export function parsePlanDocuments(documents) {
         dependencies: dependencyMap(documents.implementation),
         phaseGraph: parsedPhaseGraph.entries,
         phaseGraphIssues: parsedPhaseGraph.issues,
+        procedureNarratives: narratives,
+        systemCatalogAdopted: systemMapResult.adopted,
+        systemCatalog: systemMapResult.catalog,
+        systemCatalogIssues: systemMapResult.catalogIssues,
+        systemSpecs: systemMapResult.specs,
+        systemTraceRows: systemMapResult.traceRows,
+        systemTraceIssues: systemMapResult.traceIssues,
+        sysReferences: systemMapResult.references,
+        riskProfileAdopted: riskProfileResult.adopted,
+        riskProfile: riskProfileResult.flags,
+        riskProfileIssues: riskProfileResult.issues,
     };
 }
 function finding(code, artifact, observed, required, remedy, sliceId, severity = "amendment") {
@@ -519,6 +869,7 @@ function isRecordedLedgerKey(name) {
     const payloadKey = /^payload\.([A-Za-z][A-Za-z0-9]*)$/.exec(name)?.[1];
     return payloadKey !== undefined && RECORDED_LEDGER_KEYS.has(payloadKey);
 }
+const RISK_PROFILE_REQUIRED = "the Risk Profile must be a Markdown table with the Flag, Applies, and Coverage or rationale columns enumerating every known flag with applies yes or no, each yes flag mapping a design section or SYS- system, a SEIT row, and a slice, and each no flag carrying an evidence-backed rationale";
 export function structuralFindings(model) {
     const findings = [];
     const push = (...value) => { findings.push(finding(...value)); };
@@ -667,6 +1018,27 @@ export function structuralFindings(model) {
             push("phase_graph_malformed", "implementation.md", "Phase graph membership or dependencies do not match the declared plan", "phase ids and slice membership must be unique and dependencies must name another declared phase", "repair or remove the optional Phase graph");
         }
     }
+    if (model.systemCatalogAdopted) {
+        for (const issue of model.systemCatalogIssues) {
+            push("system_map_malformed", "design.md", issue, "the System Catalog must be a Markdown table with the System ID, System, and Responsibility columns and exactly one typed, unique SYS- id per row", "repair the catalog table");
+        }
+        for (const issue of model.systemTraceIssues) {
+            push("system_map_malformed", "design.md", issue, "the Requirement Trace must be a Markdown table with typed Requirement ID, System ID, Contract ID, SEIT row ID, Slice ID, and Path columns", "repair the trace table");
+        }
+        if (model.systemCatalog.size > MAX_ITEMS) {
+            push("system_map_malformed", "design.md", `${model.systemCatalog.size} catalog entries`, `system catalogs may declare at most ${MAX_ITEMS} entries`, "split the system map");
+        }
+    }
+    if (model.riskProfileAdopted) {
+        for (const issue of model.riskProfileIssues) {
+            push("risk_profile_malformed", "plan-spec.md", issue, RISK_PROFILE_REQUIRED, "repair the Risk Profile table");
+        }
+        for (const entry of model.riskProfile.values()) {
+            for (const issue of entry.coverageIssues) {
+                push("risk_profile_malformed", "plan-spec.md", issue, RISK_PROFILE_REQUIRED, "repair the coverage clause");
+            }
+        }
+    }
     const sliceIds = new Set(model.slices.keys());
     const manifestIds = new Set(model.manifests.keys());
     if (!sliceIds.size
@@ -680,6 +1052,9 @@ export function structuralFindings(model) {
         push("slice_manifest_mismatch", "implementation.md", `slices=${[...sliceIds].join(",")} manifests=${[...manifestIds].join(",")}`, "slice and manifest ids must be unique and equal", "make the slice and manifest id sets match");
     for (const invalid of invalidIdentifiers(model))
         push("id_format_invalid", "implementation.md", invalid, "identifiers must match their closed prefix grammar", "replace the malformed identifier");
+    for (const invalid of model.malformedRecordIds) {
+        push("id_format_invalid", "implementation.md", invalid, "slice and manifest ids must be a letter-run followed by a number (S1) or a dotted number (1.2) and must never contain a hyphen", "rename the slice and manifest id");
+    }
     for (const [id, slice] of model.slices) {
         for (const value of slice.requirementIds)
             if (!model.planIds.has(value))
@@ -710,7 +1085,7 @@ export function structuralFindings(model) {
         if (placeholder)
             push("trace_cell_placeholder", "seit.md", `${placeholder}: ${values[model.traceHeaders.indexOf(placeholder)] ?? ""}`, "every required traceability cell must contain evidence", "replace the placeholder");
     }
-    for (const match of model.documents.implementation.matchAll(/\bSlice\s+([A-Za-z]+\d+|\d+(?:\.\d+)+)\b/g)) {
+    for (const match of model.documents.implementation.matchAll(/\bSlice\s+((?:[A-Za-z]+\d+|\d+(?:\.\d+)+)(?![A-Za-z0-9_-]|\.\d))/g)) {
         if (!sliceIds.has(match[1]))
             push("slice_reference_dangling", "implementation.md", match[1], "every Slice reference must name a declared slice", "declare or remove the dangling reference");
     }

@@ -1,6 +1,17 @@
 import { isJourneyRecoveryOutcome, isJourneyTokenUsage, isVerificationCheckpointPayload, } from "../contracts/run.js";
 import { CONCURRENCY_SIGNALS, RETRY_OUTCOMES, parseRuntimeState, } from "../contracts/runtime-state.js";
 import { EXECUTION_MODES } from "../execution/execution-mode.js";
+/**
+ * The plan-time per-slice workload aim, reported beside measured token usage
+ * so a retrospective can see which work ran hot against what the plan aimed
+ * for. This is the same number the planning validator's `slice_scope_advisory`
+ * uses (`SLICE_WORKLOAD_AIM_TOKENS` in `src/journey/planning-validator.ts`);
+ * it is restated here because the improvement layer imports nothing from the
+ * journey layer, and `test/outcome-projection.test.ts` asserts the two stay
+ * equal. Reporting only — nothing here gates, filters, or re-codes a record
+ * on it, and the aim predicts no run's cost.
+ */
+const SLICE_WORKLOAD_AIM_TOKENS = 500;
 export const MAX_OUTCOME_RECORDS_PER_RUN = 1_000;
 export const MAX_OUTCOME_PATH_REFS = 16;
 export const OUTCOME_SIGNALS = Object.freeze([
@@ -215,6 +226,7 @@ export function projectOutcomes(input) {
                     code: tokenUsage.state,
                     tokens: tokenUsageInitialized ? tokenUsage.total - previousTokenTotal : tokenUsage.total,
                     budget: tokenUsage.budget,
+                    aim: SLICE_WORKLOAD_AIM_TOKENS,
                 });
                 tokenUsageInitialized = true;
                 previousTokenTotal = tokenUsage.total;

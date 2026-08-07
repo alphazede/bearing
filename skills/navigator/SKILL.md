@@ -63,6 +63,8 @@ revision, clause completion, and committed non-author gates. Remediation makes
 a new candidate and invalidates older passes. Navigator verifies findings and
 records gates.
 
+In autonomous Navigator or Expedition mode, create or resume one persistent host goal before execution. Keep the goal active through recoverable blockers and continue dependency-independent work. Store a concrete resume action for each blocked lane. Complete it only after all authorized slices, gates, and reviews finish; mark it blocked only under the host goal system's threshold and status rules. Never bypass authority to make progress.
+
 ## Inputs and outputs schema
 
 Read focus objective, acceptance, paths, commands, blocker, slices, fingerprint,

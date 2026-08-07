@@ -1,6 +1,6 @@
 import { BUILTIN_ROUTES } from "../adapters/adapters.js";
-export const EVALUATION_SCHEMA_VERSION = 1;
-export const EVALUATION_ROUTES = Object.freeze(BUILTIN_ROUTES.map(({ id }) => id));
+const EVALUATION_SCHEMA_VERSION = 1;
+const EVALUATION_ROUTES = Object.freeze(BUILTIN_ROUTES.map(({ id }) => id));
 export const SKILLSBENCH_V1_1_TASK_IDS = [
     "fix-build-agentops", "react-performance-debugging", "spring-boot-jakarta-migration", "data-to-d3",
     "sec-financial-report", "enterprise-information-search", "software-dependency-audit", "citation-check",

@@ -162,6 +162,21 @@ describe("CMD-SKILLS-STRUCTURE", () => {
     }
   });
 
+  it("crewmate continues red-to-green in one invocation and types an early stop with one identity-preserving resume action", async () => {
+    const skill = await source("crewmate");
+    const packaged = await readFile(new URL("../plugin-skills/crewmate/SKILL.md", import.meta.url), "utf8");
+    const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
+    const sN = normalize(skill), pN = normalize(packaged);
+    for (const phrase of [
+      "Continue from red to green within the same invocation when authority and the bounded attempt budget remain",
+      "stop with a typed `incomplete` or `blocked` outcome naming the exact changed paths and one resume action",
+      "resume continues the same packet and never opens a new one",
+    ]) {
+      expect(sN).toContain(phrase);
+      expect(pN).toContain(phrase);
+    }
+  });
+
   it("surveyor is exactly one fresh read-only fallback per review class without native reviewer and reports non-author exact-candidate contract", async () => {
     const skill = await source("surveyor");
     const n = (s: string) => s.replace(/\s+/g, " ").trim();

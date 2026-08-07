@@ -2,10 +2,10 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { constants, readFileSync } from "node:fs";
-import { lstat, open, readdir, realpath } from "node:fs/promises";
-import { basename, isAbsolute, posix, relative, resolve } from "node:path";
+import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
+import { basename, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RepositoryBootstrap, ignoresBearingDirectory } from "../repository/bootstrap.js";
+import { RepositoryBootstrap, ignoresBearingDirectory, ignoresBearingWorkspaces } from "../repository/bootstrap.js";
 import { RepositoryChoiceService } from "../repository/choice.js";
 import { assessRepositorySafety } from "../repository/safety.js";
 import { writeWorkspaceBusyLease } from "../repository/workspace-tools.js";
@@ -16,8 +16,8 @@ import { normalizeReasoningTier } from "../profile/profile.js";
 import { CommandGateway } from "./command-gateway.js";
 import { SseProjection } from "./sse.js";
 import { MAX_SHOWCASE_JSON, MAX_SHOWCASE_REPORT, listWorkflowShowcases, projectWorkflowShowcase, renderWorkflowReport } from "../workflows/showcase.js";
-import { JourneyService, currentPlanningVerdict, planningCheckpointFields, reconOwnerDecisionQuestion } from "../journey/planning-journey.js";
-import { canonicalStringify, isJourneyTokenUsage, MAX_JOURNEY_TOKEN_TOTAL, RECORD_JOURNEY_CHECKPOINT_STAGES, isReviewRecord, isVerificationCheckpointPayload, } from "../contracts/run.js";
+import { JourneyService, currentPlanningVerdict, expeditionSliceDependencyRefusal, planningCheckpointFields, reconOwnerDecisionQuestion } from "../journey/planning-journey.js";
+import { canonicalStringify, isJourneyTokenUsage, isVerificationVerdict, MAX_JOURNEY_TOKEN_TOTAL, RECORD_JOURNEY_CHECKPOINT_STAGES, isReviewRecord, isVerificationCheckpointPayload, } from "../contracts/run.js";
 import { MAX_RUNTIME_STATE_ARRAY, parseRuntimeState, serializeRuntimeState, } from "../contracts/runtime-state.js";
 import { deriveFocusEnvelope, hashExecutionContractBody, hashLegacyRoleRoutes, parseApprovedExecutionContract, roleRoutesShape, } from "../contracts/execution-contract.js";
 import { admitRetry, failureFingerprint, RETRY_WARRANTS, retryWarrantAllowed, } from "../execution/retry-control.js";
@@ -27,7 +27,7 @@ import { planDirectoryValid } from "../journey/plan-directory.js";
 import { createFocusContext, snapshotGitState } from "../journey/focus-mode.js";
 import { focusRequest } from "../journey/standalone-focus.js";
 import { graderVerdict, parseGraderReport } from "../verification/grader.js";
-import { findingIdentity, parseParkRangerReport, synthesizeFindings } from "../verification/park-ranger.js";
+import { EMPTY_CONVERGENCE_HISTORY, findingIdentity, parseParkRangerReport, recordReviewCycle, synthesizeFindings } from "../verification/park-ranger.js";
 import { requiredGates, resolveReviewCadence } from "../verification/review-cadence.js";
 import { assertIndependentVerification } from "../verification/verification-roles.js";
 import { applyConsolidation, planConsolidation, resolvePlanDirectory, } from "../journey/plan-resolution.js";
@@ -35,6 +35,7 @@ import { canonicalizeFitOwnerAnswer, FIT_OWNER_ANSWER_REMEDY, isFitDiagnostic } 
 import { ImprovementService } from "../improvement/improvement-service.js";
 import { detectDegradation } from "../improvement/degradation.js";
 import { projectOutcomes } from "../improvement/outcome-projection.js";
+import { workspaceKeyedDigest } from "../improvement/workspace-keyed-digest.js";
 import { computeMetrics } from "../improvement/improvement-metrics.js";
 import { DEFAULT_IMPROVEMENT_THRESHOLDS, recommend, } from "../improvement/improvement-recommender.js";
 import { buildRecommendationProposal, evaluateBoundedTrial, } from "../improvement/improvement-proposal.js";
@@ -68,7 +69,7 @@ const EXPEDITION_CARD_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/b
 const TITLE_MARK_IMAGE = readFileSync(fileURLToPath(new URL("../../assets/bearing-title-mark.png", import.meta.url)));
 /** Cookie name for the local browser session. The value is the secret; the name is not. */
 export const SESSION_COOKIE_NAME = "bearing_session";
-export const IMPROVEMENT_HANDOFF_NEXT_ACTIONS = Object.freeze([
+const IMPROVEMENT_HANDOFF_NEXT_ACTIONS = Object.freeze([
     "open-fresh-session",
 ]);
 function recordField(record, key) {
@@ -232,11 +233,11 @@ async function readTrialLedger(store) {
     });
 }
 /** Compose the real read-only improvement pipeline over one selected repository store. */
-export async function buildImprovementReport(store) {
+export async function buildImprovementReport(store, repositoryPath) {
     const service = new ImprovementService({
         store,
         clock: () => new Date().toISOString(),
-        digest: (value) => createHash("sha256").update(value).digest("hex"),
+        digest: workspaceKeyedDigest(repositoryPath),
         thresholds: DEFAULT_IMPROVEMENT_THRESHOLDS,
         stages: {
             project: projectOutcomes,
@@ -355,7 +356,7 @@ function checkpointPayload(event) {
         : undefined;
 }
 /** Read only: select the newest run and derive bounded handoff facts from its validated ledger. */
-export async function buildImprovementHandoffFacts(store) {
+export async function buildImprovementHandoffFacts(store, repositoryPath) {
     let listed;
     try {
         listed = await store.list(1);
@@ -414,7 +415,7 @@ export async function buildImprovementHandoffFacts(store) {
     const outcomes = projectOutcomes({
         runId: state.runId,
         events: state.events,
-        digest: (value) => createHash("sha256").update(value).digest("hex"),
+        digest: workspaceKeyedDigest(repositoryPath),
     });
     const degradation = detectDegradation({
         outcomes,
@@ -651,6 +652,7 @@ const NATIVE_HTML_TEMPLATE = "<!doctype html>\n" +
     '<style>@media(min-width:761px){.app-shell{height:83.333vh;min-height:83.333vh;overflow:hidden}.journey-rail{position:relative;height:100%}.workspace{height:100%;overflow:auto}}</style>\n' +
     '<style>.journey-surface{max-width:820px;margin-top:4vh;border-radius:18px;background:rgba(15,16,17,.35);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);box-shadow:0 18px 55px rgba(0,0,0,.25)}.journey-surface>.panel-head{background:rgba(8,9,10,.28)}.setup-sheet{position:fixed;z-index:9;top:50%;left:calc(50% + 114px);transform:translate(-50%,-50%);width:min(780px,calc(100vw - 300px));max-height:calc(100vh - 120px);overflow:auto;background:rgba(15,16,17,.86)!important;-webkit-backdrop-filter:blur(10px)!important;backdrop-filter:blur(10px)!important;box-shadow:0 28px 90px rgba(0,0,0,.72)}.setup-sheet:not([hidden]){animation:none}.setup-sheet .panel-head{position:sticky;top:0;z-index:1;background:rgba(8,9,10,.88)}.setup-sheet .compact-back{margin-left:8px}@media(max-width:760px){.journey-surface{margin-top:0}.setup-sheet{left:50%;width:calc(100vw - 24px);max-height:calc(100vh - 24px)}}@media(prefers-reduced-motion:reduce){.setup-sheet{animation:none}}</style>\n' +
     '<style>.title-mark{width:28px;height:28px;object-fit:contain;flex:0 0 auto}</style>\n' +
+    '<style>.run-inspection{border:1px solid var(--line2);border-radius:9px;background:rgba(8,9,10,.48);padding:12px 14px;margin:14px 0}.run-inspection h4{margin:0 0 8px;font-size:13px}.run-inspection dl{grid-template-columns:150px 1fr;margin:0}.run-inspection code{color:#aeb6ff;overflow-wrap:anywhere}.run-inspection dd{overflow-wrap:anywhere}.run-inspection ol{margin:0;padding-left:20px;max-height:180px;overflow:auto}</style>\n' +
     "</head>\n" +
     "<body>\n" +
     '<div class="app-shell" id="app-shell"><aside class="journey-rail" aria-label="Journey navigation"><div class="rail-brand"><div class="brand"><img class="title-mark" src="/assets/bearing-title-mark.png" alt=""><strong>Bearing</strong></div><button class="rail-collapse" id="collapse-rail" type="button" aria-label="Collapse journey history" aria-expanded="true">‹</button></div><button class="rail-new" id="rail-new-journey" type="button"><span>＋ New journey</span></button><label class="rail-search"><span>Search journeys</span><input id="history-search" type="search" placeholder="Search" autocomplete="off"></label><section class="rail-section" aria-labelledby="rail-history-heading"><div class="rail-section-head"><span id="rail-history-heading">Journeys</span><button class="rail-manage" id="rail-manage-history" type="button">Manage</button></div><div class="rail-history-list" id="rail-history-list"><p class="rail-empty">Choose a workspace to see its journeys.</p></div></section><div class="rail-footer"><button id="rail-view-demo" type="button">How it works</button><button id="rail-view-glossary" type="button">Glossary</button></div></aside><div class="workspace">\n' +
@@ -659,10 +661,10 @@ const NATIVE_HTML_TEMPLATE = "<!doctype html>\n" +
     "<main>\n" +
     '<div class="intro"><div><p class="eyebrow">Local agent control room</p><h1>Set bearings.</h1><p class="hero-help">New to Bearing?<button class="demo-link" id="view-demo" type="button">See how it works</button><button class="demo-link" id="view-glossary" type="button">Glossary</button></p></div><div class="status-wrap"><span class="status-label">Current status</span><p class="status" id="status" role="status" aria-live="polite">Establishing local session\u2026</p></div></div>\n' +
     '<section class="panel setup-sheet" id="repository-panel" hidden aria-labelledby="repository-heading"><div class="panel-head"><h2 id="repository-heading">Choose workspace</h2><div><span class="step">WORKSPACE</span><button class="compact-back" id="close-repository-config" type="button">Close</button></div></div><div class="panel-body"><p class="platform"><span id="platform-name" class="badge"></span><span id="distro-name" class="badge" hidden></span><span id="picker-state" class="badge"></span></p><div class="blocker-note" id="repository-consent" role="status" aria-live="polite" hidden><strong id="repository-consent-message"></strong><div class="journey-actions"><button id="repository-consent-dismiss" type="button">Not now</button><button class="primary" id="repository-consent-confirm" type="button">Confirm</button></div></div><div class="repo-grid"><button class="repo-card" id="current-repository" type="button" disabled><span class="source" id="repository-source">Detected current repository</span><strong id="repository-name">Loading\u2026</strong><span id="repository-path"></span></button><button class="browse" id="browse-repository" type="button" disabled>Browse for repository</button><a class="signature-link" href="https://github.com/alphazede/bearing" target="_blank" rel="noopener noreferrer" aria-label="Open Bearing GitHub repository"><figure class="signature"><img src="/assets/bearing-office.png" alt="A bear in sunglasses working at a tidy office desk."><figcaption>GitHub repo \u2197</figcaption></figure></a></div></div></section>\n' +
-    '<form class="panel setup-sheet" id="route-form" hidden><div class="panel-head"><h2>Choose your agent</h2><div><span class="step">AGENT SETTINGS</span><button class="compact-back" id="close-route-config" type="button">Close</button></div></div><div class="panel-body"><fieldset class="route-fieldset"><legend>Installed agents</legend><p class="support-note">Bearing runs locally and requires no Bearing account. Selected agent CLIs may use external providers under their own accounts, credentials, and data policies.</p><p class="model-note"><span>Choose a discovered model and a reasoning level that agent supports.</span><button id="refresh-routes" type="button">Refresh</button></p><p id="detected-routes">Checking agent and model settings\u2026</p><div class="route-options" id="route-options"></div><div class="route-config" id="route-config" hidden><div><label for="model-choice">Model</label><select id="model-choice" required></select></div><div><label for="reasoning-choice">Reasoning</label><select id="reasoning-choice" required></select></div></div></fieldset><div class="route-details"><div><label for="owner-name">What should we call you?</label><input id="owner-name" type="text" required autocomplete="name" maxlength="80"></div></div><div class="actions actions-end"><button class="primary" id="launch-bearing" disabled>Apply settings</button></div></div></form>\n' +
+    '<form class="panel setup-sheet" id="route-form" hidden><div class="panel-head"><h2>Choose your agent</h2><div><span class="step">AGENT SETTINGS</span><button class="compact-back" id="close-route-config" type="button">Close</button></div></div><div class="panel-body"><fieldset class="route-fieldset"><legend>Installed agents</legend><p class="support-note">Bearing runs locally and requires no Bearing account. Selected agent CLIs may use external providers under their own accounts, credentials, and data policies.</p><p class="model-note"><span>Choose a discovered model and a reasoning level that agent supports.</span><button id="refresh-routes" type="button">Refresh</button></p><p id="detected-routes">Checking agent and model settings\u2026</p><div class="route-options" id="route-options"></div><div class="route-config" id="route-config" hidden><div><label for="model-choice">Model</label><select id="model-choice" required></select></div><div><label for="reasoning-choice">Reasoning</label><select id="reasoning-choice" required></select></div></div></fieldset><div class="route-details"><div id="owner-name-field"><label for="owner-name">What should we call you?</label><input id="owner-name" type="text" required autocomplete="name" maxlength="80"></div><div id="owner-summary" hidden><span>We\'ll call you <strong id="owner-name-summary"></strong>.</span><button id="edit-owner-name" type="button">Edit</button></div></div><div class="actions actions-end"><button class="primary" id="launch-bearing" disabled>Apply settings</button></div></div></form>\n' +
     '<form class="panel prompt-panel chat-landing journey-surface" id="work-form"><div class="chat-heading"><p class="eyebrow">Ready for a new journey</p><h2 id="work-greeting">__BEARING_INITIAL_GREETING__</h2></div><div class="panel-body"><div class="prompt-shell"><div class="context-bar" aria-label="Current workspace and agent settings"><button class="context-chip" id="workspace-chip" type="button" aria-haspopup="dialog"><small>Workspace</small><strong id="workspace-chip-label">Choose repository</strong></button><button class="context-chip" id="work-back" type="button" aria-haspopup="dialog"><small>Agent</small><strong id="agent-chip-label">Choose agent</strong></button><button class="context-chip" id="model-chip" type="button" aria-haspopup="dialog"><small>Model</small><strong id="model-chip-label">Agent default</strong></button><button class="context-chip" id="reasoning-chip" type="button" aria-haspopup="dialog"><small>Reasoning</small><strong id="reasoning-chip-label">Default</strong></button></div><label class="sr-only" for="work-goal">Describe the work</label><textarea id="work-goal" required maxlength="4096" placeholder="What are we working on?"></textarea><div class="prompt-footer"><div class="starter-row" aria-label="Example requests"><button class="starter" type="button" data-starter="Add a feature to this codebase.">Add a feature</button><button class="starter" type="button" data-starter="Investigate a problem in this codebase and propose a fix.">Investigate a problem</button><button class="starter" type="button" data-starter="Assess this codebase for launch readiness and create an investor-ready summary and infographic.">Prepare for launch</button></div><button class="primary">Embark</button></div></div><p class="hint">Bearing plans first. You choose Explorer or Expedition after implementation.md is ready.</p></div></form>\n' +
     '<section class="panel journey-surface" id="history-panel" hidden><div class="panel-head"><h2>Journey history</h2><div class="panel-head-actions"><button class="compact-back history-clear" id="clear-history" type="button">Clear history</button><button class="compact-back" id="close-history" type="button">\u2190 Back</button></div></div><div class="panel-body"><p>Saved locally in this repository. Removing history does not delete generated files.</p><div class="history-list" id="history-list"></div></div></section>\n' +
-    '<section class="panel journey-surface" id="planning-panel" hidden aria-live="polite"><div class="panel-head"><h2>Journey</h2><span class="step" id="journey-phase">SET BEARINGS</span></div><div class="panel-body" id="journey-body" aria-busy="false"><div class="wait-panel" id="journey-wait" hidden><strong id="wait-phase">Set Bearings</strong><p id="wait-help">Your selected agent is working. Bearing will show only validated results.</p><div class="wait-trail" role="progressbar" aria-label="Agent work in progress"></div><div class="wait-meta"><span id="wait-status" role="status" aria-live="polite">Waiting for the agent\u2026</span><span id="wait-elapsed">0s elapsed</span></div><div class="wait-guidance"><strong id="wait-range">Typical time: about 3 minutes</strong><span id="wait-activity">Last activity: phase started just now.</span><span class="wait-slow" id="wait-slow" hidden>Still active; this is taking longer than usual.</span><p>Large repositories, higher reasoning, and model speed can extend this phase.</p><p>Safe to leave\u2014resume this journey from History.</p><ol class="trail-log" id="trail-log" aria-label="Recent journey activity"></ol></div><ul class="artifact-checklist" id="artifact-checklist"><li>No validated artifacts yet.</li></ul></div><div id="journey-content"><h3 id="journey-heading">Set Bearings</h3><p id="journey-summary">Bearing is preparing the bounded journey before gathering owner decisions.</p><aside class="blocker-note" id="recovery-report" hidden><strong id="recovery-heading">Bearing repaired a recoverable agent error.</strong><p id="recovery-summary"></p><p>Share only the redacted diagnostic below. For suspected vulnerabilities, use a private vulnerability report.</p><div class="journey-actions"><button id="dismiss-recovery-report" type="button">Not now</button><a id="private-vulnerability-report" href="https://github.com/alphazede/bearing/security/advisories/new" target="_blank" rel="noopener noreferrer">Report vulnerability privately</a><button id="report-recovery-bug" type="button">Open redacted GitHub issue</button></div></aside><div class="demo-example" id="journey-question-box" hidden><strong>Agent question</strong><br><span id="planning-question"></span><p class="question-help" id="question-help" hidden></p></div><form class="question-form" id="planning-answer-form" hidden><label for="planning-answer">Your answer</label><textarea id="planning-answer" required maxlength="4096" placeholder="Type your answer here\u2026"></textarea><div class="journey-actions"><button id="journey-back" type="button">\u2190 Back</button><button class="primary" type="submit">Continue</button></div></form><div id="journey-action" hidden><div class="journey-actions"><button id="journey-action-back" type="button">\u2190 Back</button><button id="journey-next" class="primary" type="button">Map the Route</button></div></div><div id="mode-choice" hidden><h3>Choose the crew</h3><p>The plan is ready. Choose the execution shape and how often Surveyor reviews it.</p><div class="mode-grid"><button class="mode-card" id="journey-explorer" type="button" aria-pressed="false"><img src="/assets/bearing-explorer-card.png" alt="Two bears following one focused mountain route."><span class="mode-copy"><strong>Explorer</strong><span class="mode-kicker">Focused route \u00b7 fewer sessions</span><span class="mode-line"><b>Best for:</b> compact or mostly sequential plans.</span><span class="mode-line"><b>Tradeoff:</b> less parallelism.</span></span></button><button class="mode-card" id="journey-expedition" type="button" aria-pressed="false"><img src="/assets/bearing-expedition-card.png" alt="Five bears coordinating multiple mountain activities."><span class="mode-copy"><strong>Expedition</strong><span class="mode-kicker">Parallel ascent \u00b7 more sessions</span><span class="mode-line"><b>Best for:</b> independent lanes or multiple phases.</span><span class="mode-line"><b>Tradeoff:</b> higher token and coordination cost.</span></span></button></div><fieldset class="cadence"><legend>Review cadence</legend><div class="cadence-options"><label><input type="radio" name="review-cadence" value="slice">Each slice<span>Fast feedback; highest review cost.</span></label><label><input type="radio" name="review-cadence" value="phase" checked>Each phase <b>(recommended)</b><span>Balanced safety, cost, and recovery.</span></label><label><input type="radio" name="review-cadence" value="end">End only<span>Lowest review cost; issues surface later.</span></label></div></fieldset><label class="cleanup-option" id="slice-choice" hidden>Expedition slice<select id="current-slice"></select><span>Expedition executes only the selected approved slice in this pass.</span></label><label class="cleanup-option"><input id="cleanup-worktrees" type="checkbox" checked> Cleanup merged worktrees <b>(recommended)</b><span>Only clean, proven-merged temporary lanes are removed. Dirty, blocked, failed, or unmerged lanes stay available for recovery.</span></label><div class="journey-actions"><button id="mode-back" type="button">\u2190 Back</button><button id="execute-journey" class="primary" type="button" disabled>Continue</button></div></div><div id="journey-complete" hidden><h3>Evidence complete</h3><p id="completion-summary"></p><ul class="artifact-checklist" id="completion-artifacts"></ul><div class="journey-actions"><button id="completion-back" type="button">\u2190 Back</button><button id="journey-retry" type="button" hidden>Retry</button><button id="new-journey" class="primary" type="button">Start another journey</button></div></div></div></div></section>\n' +
+    '<section class="panel journey-surface" id="planning-panel" hidden aria-live="polite"><div class="panel-head"><h2>Journey</h2><span class="step" id="journey-phase">SET BEARINGS</span></div><div class="panel-body" id="journey-body" aria-busy="false"><div class="wait-panel" id="journey-wait" hidden><strong id="wait-phase">Set Bearings</strong><p id="wait-help">Your selected agent is working. Bearing will show only validated results.</p><div class="wait-trail" role="progressbar" aria-label="Agent work in progress"></div><div class="wait-meta"><span id="wait-status" role="status" aria-live="polite">Waiting for the agent\u2026</span><span id="wait-elapsed">0s elapsed</span></div><div class="wait-guidance"><strong id="wait-range">Typical time: about 3 minutes</strong><span id="wait-activity">Last activity: phase started just now.</span><span class="wait-slow" id="wait-slow" hidden>Still active; this is taking longer than usual.</span><p>Large repositories, higher reasoning, and model speed can extend this phase.</p><p>Safe to leave\u2014resume this journey from History.</p><ol class="trail-log" id="trail-log" aria-label="Recent journey activity"></ol></div><ul class="artifact-checklist" id="artifact-checklist"><li>No validated artifacts yet.</li></ul></div><div id="journey-content"><h3 id="journey-heading">Set Bearings</h3><p id="journey-summary">Bearing is preparing the bounded journey before gathering owner decisions.</p><aside class="blocker-note" id="recovery-report" hidden><strong id="recovery-heading">Bearing repaired a recoverable agent error.</strong><p id="recovery-summary"></p><p>Share only the redacted diagnostic below. For suspected vulnerabilities, use a private vulnerability report.</p><div class="journey-actions"><button id="dismiss-recovery-report" type="button">Not now</button><a id="private-vulnerability-report" href="https://github.com/alphazede/bearing/security/advisories/new" target="_blank" rel="noopener noreferrer">Report vulnerability privately</a><button id="report-recovery-bug" type="button">Open redacted GitHub issue</button></div></aside><aside class="run-inspection" id="run-inspection" hidden aria-label="Run state inspection"><h4>Run state</h4><dl><dt>State location</dt><dd><code id="inspection-state-location"></code></dd><dt>Events</dt><dd id="inspection-events"></dd><dt>Allowed actions</dt><dd id="inspection-actions"></dd><dt>Focus scope</dt><dd id="inspection-focus"></dd><dt>Validation</dt><dd id="inspection-validation"></dd><dt>Evidence</dt><dd id="inspection-evidence"></dd></dl></aside><div class="demo-example" id="journey-question-box" hidden><strong>Agent question</strong><br><span id="planning-question"></span><p class="question-help" id="question-help" hidden></p></div><form class="question-form" id="planning-answer-form" hidden><label for="planning-answer">Your answer</label><textarea id="planning-answer" required maxlength="4096" placeholder="Type your answer here\u2026"></textarea><div class="journey-actions"><button id="journey-back" type="button">\u2190 Back</button><button class="primary" type="submit">Continue</button></div></form><div id="journey-action" hidden><div class="journey-actions"><button id="journey-action-back" type="button">\u2190 Back</button><button id="journey-next" class="primary" type="button">Map the Route</button></div></div><div id="mode-choice" hidden><h3>Choose the crew</h3><p>The plan is ready. Choose the execution shape and how often Surveyor reviews it.</p><div class="mode-grid"><button class="mode-card" id="journey-explorer" type="button" aria-pressed="false"><img src="/assets/bearing-explorer-card.png" alt="Two bears following one focused mountain route."><span class="mode-copy"><strong>Explorer</strong><span class="mode-kicker">Focused route \u00b7 fewer sessions</span><span class="mode-line"><b>Best for:</b> compact or mostly sequential plans.</span><span class="mode-line"><b>Tradeoff:</b> less parallelism.</span></span></button><button class="mode-card" id="journey-expedition" type="button" aria-pressed="false"><img src="/assets/bearing-expedition-card.png" alt="Five bears coordinating multiple mountain activities."><span class="mode-copy"><strong>Expedition</strong><span class="mode-kicker">Parallel ascent \u00b7 more sessions</span><span class="mode-line"><b>Best for:</b> independent lanes or multiple phases.</span><span class="mode-line"><b>Tradeoff:</b> higher token and coordination cost.</span></span></button></div><fieldset class="cadence"><legend>Review cadence</legend><div class="cadence-options"><label><input type="radio" name="review-cadence" value="slice">Each slice<span>Fast feedback; highest review cost.</span></label><label><input type="radio" name="review-cadence" value="phase" checked>Each phase <b>(recommended)</b><span>Balanced safety, cost, and recovery.</span></label><label><input type="radio" name="review-cadence" value="end">End only<span>Lowest review cost; issues surface later.</span></label></div></fieldset><label class="cleanup-option" id="slice-choice" hidden>Expedition slice<select id="current-slice"></select><span>Expedition executes only the selected approved slice in this pass.</span></label><label class="cleanup-option"><input id="cleanup-worktrees" type="checkbox" checked> Cleanup merged worktrees <b>(recommended)</b><span>Only clean, proven-merged temporary lanes are removed. Dirty, blocked, failed, or unmerged lanes stay available for recovery.</span></label><div class="journey-actions"><button id="mode-back" type="button">\u2190 Back</button><button id="execute-journey" class="primary" type="button" disabled>Continue</button></div></div><div id="journey-complete" hidden><h3>Evidence complete</h3><p id="completion-summary"></p><ul class="artifact-checklist" id="completion-artifacts"></ul><div class="journey-actions"><button id="completion-back" type="button">\u2190 Back</button><button id="journey-retry" type="button" hidden>Retry</button><button id="new-journey" class="primary" type="button">Start another journey</button></div></div></div></div></section>\n' +
     '<section class="panel journey-surface" id="plan-review-panel" hidden aria-labelledby="plan-review-heading"><div class="panel-head"><h2 id="plan-review-heading">Review your route</h2><span class="step">04 / APPROVE</span></div><div class="panel-body"><p id="plan-review-summary">Review the complete planning package before any implementation begins.</p><section class="blocker-note" id="review-findings-panel" hidden><strong id="review-verdict"></strong><ul id="review-findings"></ul></section><div class="review-overview"><div><strong id="review-phase-count">0</strong><span>phases</span></div><div><strong id="review-slice-count">0</strong><span>slices</span></div><div><strong id="review-route">\u2014</strong><span>shared model and reasoning</span></div></div><h3>Planning artifacts</h3><p>The review HTML contains the complete planning package. Each source artifact also opens separately.</p><ul class="artifact-checklist" id="review-artifacts"></ul><h3>Slice assignments</h3><table class="assignment-table"><thead><tr><th>Slice</th><th>Role</th><th>Model route</th><th>Reasoning</th></tr></thead><tbody id="review-assignments"></tbody></table><p class="blocker-note"><strong>Execution can pause.</strong> If an agent reaches a blocker or needs authorization, Bearing saves the journey and shows what stopped, why, the recommended next step, and the decision it needs from you.</p><div class="review-change"><label for="review-change">Want something changed?</label><textarea id="review-change" maxlength="4096" placeholder="Describe the planning changes you want before approval."></textarea></div><div class="journey-actions"><button id="review-back" type="button">\u2190 Back</button><button id="request-plan-changes" type="button">Request changes</button><button id="approve-plan" class="primary" type="button">Approve route</button></div></div></section>\n' +
     '<section class="panel demo-panel" id="demo-panel" hidden aria-labelledby="demo-heading"><div class="panel-head"><div><h2 id="demo-heading">How Bearing works</h2><span class="step" id="demo-step" aria-live="polite">Step 1 of 4</span></div><div class="panel-head-actions"><span class="step">NO TOKENS</span><button class="compact-back" id="close-demo" type="button">Close</button></div></div><div class="panel-body"><ol class="demo-progress" aria-label="Tutorial progress"><li aria-current="step">Why Bearing</li><li>Your request</li><li>Choose the crew</li><li>Your evidence</li></ol><div class="demo-stage" data-demo-stage="0"><h3>Stay in control while agents do the work</h3><p>Bearing is a local control room that turns a complex request into an approved plan, bounded agent work, and evidence you can review.</p><ul class="benefit-list"><li><strong>You stay in charge:</strong> choose the repository, model, plan, execution mode, and consequential actions.</li><li><strong>Bearing runs locally:</strong> No Bearing account is required. A selected agent CLI may use an external provider under its own account, credentials, and data policy.</li><li><strong>You can step away:</strong> agents keep moving inside the approved boundaries and stop when they need your decision.</li></ul></div><div class="demo-stage" data-demo-stage="1" hidden><h3>Describe the outcome in your own words</h3><p>Choose the repository and tell Bearing what you want to accomplish. Before planning, it checks whether the source files are here and asks whether there are reference documents it should use.</p><div class="demo-example"><strong>Example request</strong><br>Add bulk customer onboarding with validation, duplicate handling, a dry-run preview, tests, and independent review.</div><p>Bearing asks only the questions needed to remove important ambiguity. Safe defaults are recorded as assumptions, and you can end questions at any point.</p></div><div class="demo-stage" data-demo-stage="2" hidden><h3>Review the plan, then choose the crew</h3><p>Nothing executes until <code>implementation.md</code> is ready for your review. Then you choose the work style. More bears mean more parallel work, coordination, and token use.</p><div class="mode-grid"><button class="mode-card" id="demo-explorer" type="button" aria-pressed="false"><img src="/assets/bearing-explorer-card.png" alt="Two bears following one focused mountain route."><span class="mode-copy"><strong>Explorer</strong><span class="mode-kicker">Focused route \u00b7 fewer agent sessions</span><span class="mode-line"><b>Use when:</b> the plan is compact, mostly sequential, or has one clear workstream.</span><span class="mode-line"><b>Pros:</b> lower token use and simpler coordination.</span><span class="mode-line"><b>Tradeoff:</b> less parallelism on broad plans.</span></span></button><button class="mode-card" id="demo-expedition" type="button" aria-pressed="false"><img src="/assets/bearing-expedition-card.png" alt="Five bears coordinating multiple mountain activities."><span class="mode-copy"><strong>Expedition</strong><span class="mode-kicker">Parallel ascent \u00b7 more agent sessions</span><span class="mode-line"><b>Use when:</b> the plan has several independent lanes, specialties, or waves.</span><span class="mode-line"><b>Pros:</b> more parallel progress and dedicated coordination.</span><span class="mode-line"><b>Tradeoff:</b> higher token use and coordination overhead.</span></span></button></div><p id="demo-mode-status" role="status">Choose a card to continue the tutorial.</p></div><div class="demo-stage" data-demo-stage="3" hidden><h3>Come back to evidence, not just “done”</h3><p id="demo-selected-mode">Your selected execution mode appears here.</p><p>Agents execute only approved slices and stop at owner decisions. An independent Surveyor then checks the result against the plan, tests, and recorded evidence.</p><div class="demo-example"><strong>Your final view</strong><br>What changed \u00b7 what passed \u00b7 what deviated \u00b7 what is blocked \u00b7 what still needs your decision</div></div><div class="demo-actions"><button id="demo-prev" type="button" disabled>\u2190 Previous</button><button class="primary" id="demo-next" type="button">Next \u2192</button></div></div></section>\n' +
     '<dialog class="glossary-dialog" id="glossary-dialog" aria-labelledby="glossary-heading"><div class="panel-head"><h2 id="glossary-heading">Bearing glossary</h2><button class="compact-back" id="close-glossary" type="button">Close</button></div><div class="panel-body"><dl class="glossary-list"><dt>CDD</dt><dd>Contract-Driven Design defines interface behavior, compatibility, validation, and tests before implementation.</dd><dt>SecDD</dt><dd>Security-Driven Design examines threats, trust boundaries, authentication, secrets, sensitive data, and abuse cases.</dd><dt>OOPDSA</dt><dd>Implementation-design hardening that assigns ownership and examines patterns, data structures, algorithms, complexity, and edge cases.</dd><dt>SEIT</dt><dd>The verification and validation plan describing what must be tested, proven, and recorded as evidence.</dd><dt>Explorer</dt><dd>A focused execution route using fewer agent sessions for compact or mostly sequential work.</dd><dt>Expedition</dt><dd>A parallel execution route for plans with independent lanes, specialties, or phases.</dd><dt>Surveyor</dt><dd>An independent reviewer that checks the completed work against the approved route and evidence.</dd></dl></div></dialog>\n' +
@@ -722,7 +724,7 @@ const NATIVE_HTML_TEMPLATE = "<!doctype html>\n" +
     '  function syncEndQuestions() { endQuestions.hidden = planningAnswerForm.hidden || currentStage !== "gather-supplies"; if (!endQuestions.hidden) endQuestions.disabled = false; }\n' +
     '  new MutationObserver(syncEndQuestions).observe(planningAnswerForm, { attributes: true, attributeFilter: ["hidden"] }); new MutationObserver(syncEndQuestions).observe(document.getElementById("planning-question"), { childList: true });\n' +
     '  function setStatus(message, busy) { status.textContent = message; status.classList.toggle("busy", !!busy); }\n' +
-    '  function routeName(id) { return ({ "codex": "Codex CLI", "claude": "Claude Code", "agy": "Agy", "opencode": "OpenCode", "pi": "Pi" })[id] || id || "Choose agent"; }\n' +
+    '  function routeName(id) { return ({ "codex": "Codex CLI", "claude": "Claude Code", "agy": "Agy", "grok-build": "Grok Build", "opencode": "OpenCode", "pi": "Pi" })[id] || id || "Choose agent"; }\n' +
     '  function syncShellSummary() { var workspace = document.getElementById("workspace-chip-label"); workspace.textContent = selectedRepositoryPath ? selectedRepositoryPath.split(/[\\\\/]/).filter(Boolean).pop() || selectedRepositoryPath : "Choose repository"; workspace.parentElement.title = selectedRepositoryPath; document.getElementById("agent-chip-label").textContent = selectedRoute ? routeName(selectedRoute.id) : "Choose agent"; document.getElementById("model-chip-label").textContent = selectedRoute ? (selectedRoute.model === "*" ? "Agent default" : selectedRoute.model) : "Agent default"; document.getElementById("reasoning-chip-label").textContent = selectedRoute ? selectedRoute.reasoning : "Default"; }\n' +
     '  function fail(msg) { setStatus("Session could not start: " + msg, false); }\n' +
     '  function requestError(label, r) { throw new Error(label + " (" + r.status + "). Refresh the run state and try again."); }\n' +
@@ -741,7 +743,7 @@ const NATIVE_HTML_TEMPLATE = "<!doctype html>\n" +
     '  function ensureWaitControls() { if (document.getElementById("wait-controls")) return; var wait = document.getElementById("journey-wait"); var meta = document.querySelector(".wait-meta"); var git = document.createElement("button"); git.id = "git-count"; git.className = "git-count"; git.type = "button"; git.disabled = true; git.setAttribute("aria-expanded", "false"); git.textContent = "Git: checking\u2026"; meta.insertBefore(git, document.getElementById("wait-elapsed")); var panel = document.createElement("section"); panel.id = "git-change-panel"; panel.className = "git-change-panel"; panel.hidden = true; var heading = document.createElement("h4"); heading.textContent = "Changed files"; var files = document.createElement("div"); files.id = "git-file-list"; files.className = "git-file-list"; var diff = document.createElement("pre"); diff.id = "git-diff"; diff.className = "git-diff"; diff.hidden = true; panel.append(heading, files, diff); var controls = document.createElement("div"); controls.id = "wait-controls"; controls.className = "wait-controls"; var input = document.createElement("input"); input.id = "steer-instruction"; input.maxLength = 4096; input.placeholder = "Steer this phase\u2026"; input.setAttribute("aria-label", "Steering instruction"); var steer = document.createElement("button"); steer.id = "steer-journey"; steer.type = "button"; steer.textContent = "Steer"; var stop = document.createElement("button"); stop.id = "stop-journey"; stop.type = "button"; stop.className = "danger"; stop.textContent = "Stop"; controls.append(input, steer, stop); wait.insertBefore(panel, document.getElementById("artifact-checklist")); wait.insertBefore(controls, document.getElementById("artifact-checklist")); git.addEventListener("click", function () { panel.hidden = !panel.hidden; git.setAttribute("aria-expanded", String(!panel.hidden)); if (!panel.hidden) renderGitFiles(currentGitChanges); }); steer.addEventListener("click", function () { sendJourneyControl("steer"); }); stop.addEventListener("click", function () { sendJourneyControl("stop"); }); }\n' +
     '  function renderGitFiles(changes) { var list = document.getElementById("git-file-list"); var diff = document.getElementById("git-diff"); list.replaceChildren(); diff.hidden = true; changes.forEach(function (change) { var button = document.createElement("button"); button.type = "button"; button.className = "git-file"; var name = document.createElement("span"); name.className = "git-file-name"; name.textContent = change.path; var added = document.createElement("span"); added.className = "diff-add"; added.textContent = change.additions === null ? (change.status === "??" ? "new" : "") : "+" + change.additions; var deleted = document.createElement("span"); deleted.className = "diff-del"; deleted.textContent = change.deletions === null ? "" : "-" + change.deletions; button.append(name, added, deleted); button.addEventListener("click", function () { showGitDiff(change.path); }); list.appendChild(button); }); }\n' +
     '  function showGitDiff(path) { var target = document.getElementById("git-diff"); target.hidden = false; target.textContent = "Loading " + path + "\u2026"; fetch("/api/v1/git-diff?path=" + encodeURIComponent(path), { credentials: "same-origin" }).then(function (r) { if (!r.ok) requestError("Diff could not be loaded", r); return r.json(); }).then(function (body) { target.replaceChildren(); (body.diff || "No textual diff available.").split(/\\r?\\n/).forEach(function (text) { var line = document.createElement("span"); line.className = text.startsWith("+") && !text.startsWith("+++") ? "diff-add" : text.startsWith("-") && !text.startsWith("---") ? "diff-del" : text.startsWith("@@") ? "diff-hunk" : ""; line.textContent = text || " "; target.appendChild(line); }); }, function (error) { target.textContent = error instanceof Error ? error.message : "Diff could not be loaded."; }); }\n' +
-    '  function refreshJourneyStatus() { if (!currentRunId) return; fetch("/api/v1/journey/" + encodeURIComponent(currentRunId) + "/status", { credentials: "same-origin" }).then(function (r) { if (!r.ok) return null; return r.json(); }).then(function (body) { if (!body) return; if (!body.run || body.run.stage === currentStage) renderActivityTrail(body.activityTrail); var git = document.getElementById("git-count"); currentGitChanges = Array.isArray(body.gitChanges) ? body.gitChanges : []; git.textContent = body.changedFiles === null ? "Git unavailable" : "Git: " + body.changedFiles + " changed " + (body.changedFiles === 1 ? "file" : "files"); git.disabled = !currentGitChanges.length; if (!document.getElementById("git-change-panel").hidden) renderGitFiles(currentGitChanges); if (body.run) renderArtifacts(body.run); var artifacts = body.run && Array.isArray(body.run.artifacts) ? body.run.artifacts.length : 0; var signature = String(body.changedFiles) + ":" + artifacts; if (signature !== waitSignature) { waitSignature = signature; recordTrail("Repository snapshot: " + (body.changedFiles === null ? "Git unavailable" : body.changedFiles + " changed " + (body.changedFiles === 1 ? "file" : "files")) + "; " + artifacts + " validated " + (artifacts === 1 ? "artifact" : "artifacts") + "."); } }); }\n' +
+    '  function refreshJourneyStatus() { if (!currentRunId) return; fetch("/api/v1/journey/" + encodeURIComponent(currentRunId) + "/status", { credentials: "same-origin" }).then(function (r) { if (!r.ok) return null; return r.json(); }).then(function (body) { if (!body) return; if (!body.run || body.run.stage === currentStage) renderActivityTrail(body.activityTrail); var git = document.getElementById("git-count"); currentGitChanges = Array.isArray(body.gitChanges) ? body.gitChanges : []; git.textContent = body.changedFiles === null ? "Git unavailable" : "Git: " + body.changedFiles + " changed " + (body.changedFiles === 1 ? "file" : "files"); git.disabled = !currentGitChanges.length; if (!document.getElementById("git-change-panel").hidden) renderGitFiles(currentGitChanges); if (body.run) renderArtifacts(body.run); if (body.run) renderRunInspection(body.run); var artifacts = body.run && Array.isArray(body.run.artifacts) ? body.run.artifacts.length : 0; var signature = String(body.changedFiles) + ":" + artifacts; if (signature !== waitSignature) { waitSignature = signature; recordTrail("Repository snapshot: " + (body.changedFiles === null ? "Git unavailable" : body.changedFiles + " changed " + (body.changedFiles === 1 ? "file" : "files")) + "; " + artifacts + " validated " + (artifacts === 1 ? "artifact" : "artifacts") + "."); } }); }\n' +
     '  function sendJourneyControl(action) { var input = document.getElementById("steer-instruction"); var instruction = input.value.trim(); if (action === "steer" && !instruction) { input.focus(); return; } document.getElementById("steer-journey").disabled = true; document.getElementById("stop-journey").disabled = true; fetch("/api/v1/journey/control", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ runId: currentRunId, action: action, ...(action === "steer" ? { instruction: instruction } : {}) }) }).then(function (r) { if (!r.ok) requestError("Journey control was rejected", r); input.value = ""; recordTrail(action === "steer" ? "Steering instruction received." : "Stop requested."); document.getElementById("wait-status").textContent = action === "steer" ? "Steering received. Restarting this phase\u2026" : "Stopping the active agent\u2026"; }, function () { document.getElementById("steer-journey").disabled = false; document.getElementById("stop-journey").disabled = false; setStatus("Journey control failed. Try again.", false); }); }\n' +
     '  function showWait(stage) { ensureWaitControls(); setStatus(phaseNames[stage] + " is working\u2026", true); document.getElementById("journey-content").hidden = true; document.getElementById("journey-wait").hidden = false; document.getElementById("git-change-panel").hidden = true; document.getElementById("git-count").setAttribute("aria-expanded", "false"); document.getElementById("journey-body").setAttribute("aria-busy", "true"); document.getElementById("wait-phase").textContent = phaseNames[stage]; document.getElementById("wait-help").textContent = waitExplanations[stage]; document.getElementById("wait-status").textContent = "Waiting for real activity\u2026"; var estimate = waitEstimate(stage); document.getElementById("wait-range").textContent = estimate ? "Agent estimate: " + estimate.minMinutes + "\u2013" + estimate.maxMinutes + " minutes \u2014 " + estimate.basis : "Timing estimate will appear after agent inspection."; document.getElementById("wait-slow").hidden = true; document.getElementById("trail-log").replaceChildren(); document.getElementById("steer-journey").disabled = false; document.getElementById("stop-journey").disabled = false; elapsedStarted = Date.now(); waitActivityAt = 0; waitActivitySequence = 0; waitSignature = ""; clearInterval(elapsedTimer); clearInterval(statusTimer); updateWaitClock(); elapsedTimer = setInterval(updateWaitClock, 1000); refreshJourneyStatus(); statusTimer = setInterval(refreshJourneyStatus, 2000); }\n' +
     '  function hideWait() { clearInterval(elapsedTimer); clearInterval(statusTimer); clearTimeout(reconcileTimer); elapsedTimer = null; statusTimer = null; reconcileTimer = null; document.getElementById("journey-wait").hidden = true; document.getElementById("journey-content").hidden = false; document.getElementById("journey-body").setAttribute("aria-busy", "false"); loadRailHistory(); }\n' +
@@ -761,14 +763,21 @@ const NATIVE_HTML_TEMPLATE = "<!doctype html>\n" +
     '  function renderArtifactList(list, body) { list.replaceChildren(); var paths = body.artifacts || []; if (!paths.length) { var empty = document.createElement("li"); empty.textContent = "No validated artifacts yet."; list.appendChild(empty); return; } paths.forEach(function (path) { var item = document.createElement("li"); item.textContent = path; var link = (body.artifactLinks || []).find(function (entry) { return entry.path === path; }); if (link) { item.textContent = ""; var anchor = document.createElement("a"); anchor.href = link.url; anchor.target = "_blank"; anchor.rel = "noopener"; anchor.textContent = path; item.appendChild(anchor); } list.appendChild(item); }); }\n' +
     '  function renderArtifacts(body) { renderArtifactList(document.getElementById("artifact-checklist"), body); }\n' +
     '  function renderRecoveryReport(recovery) { var panel = document.getElementById("recovery-report"); document.getElementById("journey-summary").after(panel); panel.hidden = !recovery || (recovery.status !== "repaired" && recovery.status !== "stopped"); if (panel.hidden) return; var fitDiagnosticFields = {scope_repository:["repository","authorizedWorkspaceRoot"],receipt_shape:["receipt"],receipt_reason:["reason"],receipt_ok:["ok"],question_text:["question"],assumption_shape:["assumption"],assumption_repository:["repository"],assumption_plan_directory:["planDirectory"],assumption_rationale:["rationale"],assumption_evidence:["evidence"],evidence_shape:["evidence"],evidence_kind:["kind"],evidence_path:["path"],evidence_detail:["detail"],evidence_containment:["path"],result_envelope:["assistantText","envelope"]}; var fitDiagnostic = recovery.fitDiagnostic; var fields = fitDiagnostic && typeof fitDiagnostic.check === "string" && typeof fitDiagnostic.field === "string" ? fitDiagnosticFields[fitDiagnostic.check] : undefined; var hasFitDiagnostic = Array.isArray(fields) && fields.indexOf(fitDiagnostic.field) !== -1; var diagnosticSummary = hasFitDiagnostic ? " Repository fit check: " + fitDiagnostic.check + "; field: " + fitDiagnostic.field + "." : ""; document.getElementById("recovery-heading").textContent = recovery.status === "repaired" ? "Bearing repaired a recoverable agent error." : "Bearing stopped a repeated recoverable agent error."; document.getElementById("recovery-summary").textContent = "Stage " + recovery.stage + (recovery.status === "repaired" ? " recovered from " : " stopped after ") + recovery.code + " using " + recovery.retryLevel + "." + diagnosticSummary; document.getElementById("report-recovery-bug").onclick = function () { var title = "Bearing " + recovery.version + ": " + recovery.code + " during " + recovery.stage; var body = ["Bearing version: " + recovery.version, "Stage: " + recovery.stage, "Failure class: " + recovery.failureClass, "Failure code: " + recovery.code, "Retry level: " + recovery.retryLevel].concat(hasFitDiagnostic ? ["Repository fit check: " + fitDiagnostic.check, "Repository fit field: " + fitDiagnostic.field] : []).join("\\n"); window.open("https://github.com/alphazede/bearing/issues/new?title=" + encodeURIComponent(title) + "&body=" + encodeURIComponent(body), "_blank", "noopener,noreferrer"); }; }\n' +
+    '  // Run inspection renders only server-bounded fields, always through textContent: a hostile plan\n' +
+    '  // name can never become markup. The single #run-inspection block is moved between the wait view\n' +
+    '  // and the content view so both surfaces show the same inspection while a run is active.\n' +
+    '  function renderRunInspection(run) { var panel = document.getElementById("run-inspection"); if (!run || typeof run.stateLocation !== "string") return; var wait = document.getElementById("journey-wait"); if (wait.hidden) document.getElementById("journey-summary").after(panel); else wait.insertBefore(panel, document.getElementById("artifact-checklist")); panel.hidden = false; document.getElementById("inspection-state-location").textContent = run.stateLocation; var events = document.getElementById("inspection-events"); events.replaceChildren(); var eventList = document.createElement("ol"); (Array.isArray(run.events) ? run.events : []).slice(-8).forEach(function (event) { var item = document.createElement("li"); item.textContent = String(event.sequence) + " · " + String(event.type); eventList.appendChild(item); }); events.appendChild(eventList); document.getElementById("inspection-actions").textContent = Array.isArray(run.allowedActions) && run.allowedActions.length ? run.allowedActions.join(", ") : "None."; var scope = run.focusScope || run.selectedScope; document.getElementById("inspection-focus").textContent = scope && typeof scope.currentSlice === "string" ? scope.currentSlice : "No Focus scope recorded."; var validation = run.validation; var validationText = ""; if (validation && typeof validation.planVerdict === "string") validationText = "Planning: " + validation.planVerdict; if (validation && validation.verification && typeof validation.verification.layer === "string" && typeof validation.verification.verdict === "string") validationText += (validationText ? " \\u00b7 " : "") + validation.verification.layer + ": " + validation.verification.verdict; document.getElementById("inspection-validation").textContent = validationText || "No validation outcome recorded."; var artifacts = Array.isArray(run.artifacts) ? run.artifacts : []; document.getElementById("inspection-evidence").textContent = artifacts.length ? artifacts.length + (artifacts.length === 1 ? " artifact" : " artifacts") + " recorded" : "No artifacts recorded."; }\n' +
+    '  // A saved-result render (rail resume, history resume) has only lastResult, which carries no\n' +
+    '  // state location. One status fetch supplies the inspection without touching anything else.\n' +
+    '  function renderInspectionFromStatus() { if (!currentRunId) return; fetch("/api/v1/journey/" + encodeURIComponent(currentRunId) + "/status", { credentials: "same-origin" }).then(function (r) { if (!r.ok) return null; return r.json(); }).then(function (body) { if (body && body.run) renderRunInspection(body.run); }); }\n' +
     '  function recordPlanReview(answer) { var question = "Approve the complete planning package before implementation?"; return readRun(currentRunId).then(function (state) { if (state.pendingDecision && state.pendingDecision.question !== question) throw new Error("Resolve the current owner decision before reviewing the route."); var save = state.pendingDecision ? Promise.resolve(state) : postCommand(currentRunId, state, "requireDecision", { decisionId: "plan-review-" + crypto.randomUUID(), question: question, consequential: true }).then(function () { return readRun(currentRunId); }); return save; }).then(function (state) { if (!state.pendingDecision || state.pendingDecision.question !== question) throw new Error("Planning approval could not be recorded."); return postCommand(currentRunId, state, "recordOwnerAnswer", { decisionId: state.pendingDecision.decisionId, answer: answer }); }); }\n' +
     '  function confirmFocusAmendment(stage) { var question = "The approved Focus contract changed. Review the drift summary. Confirm the Focus amendment to adopt the updated plan and recapture the Git baseline."; var answer = "Confirmed Focus amendment for execution retry"; var decisionId = "focus-amendment-" + crypto.randomUUID(); return readRun(currentRunId).then(function (state) { if (state.pendingDecision) throw new Error("Resolve the current owner decision before confirming the Focus amendment."); return postCommand(currentRunId, state, "requireDecision", { decisionId: decisionId, question: question, consequential: true }); }).then(function () { return readRun(currentRunId); }).then(function (state) { if (!state.pendingDecision || state.pendingDecision.decisionId !== decisionId || state.pendingDecision.question !== question) throw new Error("Focus amendment confirmation could not be recorded."); return postCommand(currentRunId, state, "recordOwnerAnswer", { decisionId: decisionId, answer: answer }); }).then(function () { return readRun(currentRunId); }).then(function (state) { if (state.pendingDecision) throw new Error("Another owner decision is pending."); focusAmendmentPending = false; invokeJourney(stage, { focusAmendmentConfirmed: true, focusAmendmentDecisionId: decisionId, focusAmendmentExpectedRevision: state.revision }); }, showError); }\n' +
     '  function renderPlanReview(body) { var review = body.planningReview; if (!review) { renderFailure({ code: "artifact_invalid" }); return; } planningPanel.hidden = true; planReviewPanel.hidden = false; var recovery = document.getElementById("recovery-report"); if (!recovery.hidden) planReviewPanel.querySelector(".panel-body").prepend(recovery); document.getElementById("plan-review-summary").textContent = body.summary; document.getElementById("review-phase-count").textContent = String(review.phases); document.getElementById("review-slice-count").textContent = String(review.slices); document.getElementById("review-route").textContent = review.assignments.length + " assigned routes"; renderArtifactList(document.getElementById("review-artifacts"), body); var target = document.getElementById("review-assignments"); var currentSlice = document.getElementById("current-slice"); target.replaceChildren(); currentSlice.replaceChildren(); review.assignments.forEach(function (assignment) { var row = document.createElement("tr"); [assignment.slice, assignment.role, assignment.model, assignment.reasoning].forEach(function (value) { var cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell); }); target.appendChild(row); var selected = /^Slice\s+((?:[A-Za-z]+\d+|\d+(?:\.\d+)+))\b/.exec(assignment.slice); if (selected) { var option = document.createElement("option"); option.value = selected[1]; option.textContent = assignment.slice; currentSlice.appendChild(option); } }); var validation = body.planningValidation || {}; var verdict = validation.verdict || "NEEDS_AMENDMENT"; var findings = Array.isArray(validation.findings) ? validation.findings : []; var findingPanel = document.getElementById("review-findings-panel"); var findingList = document.getElementById("review-findings"); findingList.replaceChildren(); findings.forEach(function (finding) { var item = document.createElement("li"); item.textContent = [finding.code, finding.artifact, finding.sliceId].filter(Boolean).join(" · ") + ": " + finding.observed + " Required: " + finding.required + " Remedy: " + finding.remedy; findingList.appendChild(item); }); findingPanel.hidden = findings.length === 0; document.getElementById("review-verdict").textContent = verdict === "PASS" ? "Planning validation passed with advisory findings." : verdict === "OWNER_DECISION_REQUIRED" ? "Owner decision required before approval." : "Planning amendments required before approval."; var approve = document.getElementById("approve-plan"); approve.disabled = verdict !== "PASS"; document.getElementById("review-change").value = ""; setStatus(verdict === "PASS" ? "Review every artifact, request changes, or approve the route." : verdict === "OWNER_DECISION_REQUIRED" ? "Review the findings and record the required owner decision before approval." : "Review the findings and request the required planning amendments.", false); }\n' +
     '  function renderFailure(body) { hideWait(); planningSubmit.disabled = false; planningAnswerForm.hidden = true; document.getElementById("journey-action").hidden = true; document.getElementById("mode-choice").hidden = true; var complete = document.getElementById("journey-complete"); complete.hidden = false; complete.firstElementChild.textContent = "Journey paused"; focusAmendmentPending = body.code === "focus_amendment_required"; document.getElementById("journey-summary").textContent = body.code === "artifact_invalid" && currentStage === "draft-implementation" ? "Your questions are complete; the generated files need another validation pass." : "Bearing saved your progress and stopped before moving to the next phase."; var drift = body.focusDrift && Array.isArray(body.focusDrift.changedPlanSources) ? " Changed plan sources: " + body.focusDrift.changedPlanSources.join(", ") + "." : ""; document.getElementById("completion-summary").textContent = focusAmendmentPending ? (body.amendmentPrompt || "Review and confirm the Focus amendment.") + drift : body.continuityLost ? body.continuityDisclosure : body.escalationTarget ? "Automatic retry stopped. Escalation target: " + body.escalationTarget + "." : body.retryRefusal ? "Retry refused: " + body.retryRefusal + "." : body.code === "cancelled" ? "You stopped " + phaseNames[currentStage] + ". Any Git changes remain visible and the phase can be retried." : body.code === "interrupted" ? "Bearing stopped while " + phaseNames[currentStage] + " was running. Inspect the Git changes before deciding whether to retry the saved phase." : body.code === "token_budget" ? "This run reached its token budget before the phase completed. Retry after lowering reasoning with /model or raise the CLI budget." : body.recovery && body.recovery.status === "stopped" ? "Bearing tried one focused repair and one simpler contract-preserving repair. The same deterministic failure remains, so automatic repair stopped: " + body.code + "." : body.code === "artifact_invalid" && currentStage === "draft-implementation" ? "Your answers and planning files are saved. Bearing could not verify the generated implementation package. Retry this step; you will not repeat the questions." : "The agent could not complete " + phaseNames[currentStage] + ": " + (body.code || "request_failed") + ". No success was recorded."; document.getElementById("completion-artifacts").replaceChildren(); var retry = document.getElementById("journey-retry"); retry.textContent = focusAmendmentPending ? "Confirm amendment" : "Retry"; retry.hidden = !focusAmendmentPending && (!!body.continuityLost || !!body.escalationTarget || !!body.retryRefusal || body.code === "role_boundary_violation" || !!(body.recovery && body.recovery.status === "stopped")); document.getElementById("new-journey").hidden = true; setStatus(focusAmendmentPending ? "Owner confirmation is required for the Focus amendment." : body.continuityLost ? "Conversation continuity was lost; review the disclosure." : body.escalationTarget ? "Automatic retry escalated to " + body.escalationTarget + "." : body.retryRefusal ? "Retry refused: " + body.retryRefusal + "." : body.code === "cancelled" ? "Journey stopped by owner." : body.code === "interrupted" ? "Journey interrupted. Inspect changes before retrying." : body.recovery && body.recovery.status === "stopped" ? "Automatic repair stopped after repeated equivalent failures." : "Journey blocked. Retry is available.", false); }\n' +
-    '  function renderJourney(body) { hideWait(); planningSubmit.disabled = false; renderArtifacts(body); renderRecoveryReport(body.recovery); pendingQuestionCount = body.status === "question" && Array.isArray(body.questions) ? Math.max(0, body.questions.length - 1) : 0; document.getElementById("journey-phase").textContent = phaseNames[currentStage].toUpperCase(); document.getElementById("journey-heading").textContent = phaseNames[currentStage]; document.getElementById("journey-summary").textContent = body.status === "action" ? body.summary : currentStage === "gather-supplies" ? "Answer the planning questions before the route map is written." : "The selected agent needs an owner answer before it can continue."; document.getElementById("journey-complete").hidden = true; document.getElementById("mode-choice").hidden = true; document.getElementById("journey-action").hidden = true; if (body.status === "failure") { renderFailure(body); return; } if (body.status === "question") { document.getElementById("journey-question-box").hidden = false; document.getElementById("planning-question").textContent = body.question || ""; var help = questionHelp(body.question || ""); document.getElementById("question-help").textContent = help; document.getElementById("question-help").hidden = !help; planningAnswerForm.hidden = false; planningAnswer.value = ""; planningAnswer.focus(); setStatus(currentStage === "gather-supplies" && pendingQuestionCount ? "Question saved locally. " + pendingQuestionCount + " remaining." : phaseNames[currentStage] + " needs your answer.", false); return; } document.getElementById("journey-question-box").hidden = true; document.getElementById("question-help").hidden = true; planningAnswerForm.hidden = true; if (currentStage === "draft-implementation") { renderPlanReview(body); return; } if (currentStage === "execute-explorer" || currentStage === "execute-expedition") { invokeJourney("review"); return; } if (currentStage === "review") { document.getElementById("journey-complete").hidden = false; document.getElementById("completion-summary").textContent = body.summary; renderArtifactList(document.getElementById("completion-artifacts"), body); document.getElementById("journey-retry").hidden = true; document.getElementById("new-journey").hidden = false; setStatus("Journey complete. Review the validated evidence.", false); return; } var next = document.getElementById("journey-next"); next.textContent = currentStage === "set-bearings" ? "Gather Supplies" : "Map the Route"; document.getElementById("journey-action").hidden = false; setStatus(phaseNames[currentStage] + " complete. Owner handoff required.", false); }\n' +
+    '  function renderJourney(body) { hideWait(); if (body && typeof body.stateLocation === "string") renderRunInspection(body); planningSubmit.disabled = false; renderArtifacts(body); renderRecoveryReport(body.recovery); pendingQuestionCount = body.status === "question" && Array.isArray(body.questions) ? Math.max(0, body.questions.length - 1) : 0; document.getElementById("journey-phase").textContent = phaseNames[currentStage].toUpperCase(); document.getElementById("journey-heading").textContent = phaseNames[currentStage]; document.getElementById("journey-summary").textContent = body.status === "action" ? body.summary : currentStage === "gather-supplies" ? "Answer the planning questions before the route map is written." : "The selected agent needs an owner answer before it can continue."; document.getElementById("journey-complete").hidden = true; document.getElementById("mode-choice").hidden = true; document.getElementById("journey-action").hidden = true; if (body.status === "failure") { renderFailure(body); return; } if (body.status === "question") { document.getElementById("journey-question-box").hidden = false; document.getElementById("planning-question").textContent = body.question || ""; var help = questionHelp(body.question || ""); document.getElementById("question-help").textContent = help; document.getElementById("question-help").hidden = !help; planningAnswerForm.hidden = false; planningAnswer.value = ""; planningAnswer.focus(); setStatus(currentStage === "gather-supplies" && pendingQuestionCount ? "Question saved locally. " + pendingQuestionCount + " remaining." : phaseNames[currentStage] + " needs your answer.", false); return; } document.getElementById("journey-question-box").hidden = true; document.getElementById("question-help").hidden = true; planningAnswerForm.hidden = true; if (currentStage === "draft-implementation") { renderPlanReview(body); return; } if (currentStage === "execute-explorer" || currentStage === "execute-expedition") { invokeJourney("review"); return; } if (currentStage === "review") { document.getElementById("journey-complete").hidden = false; document.getElementById("completion-summary").textContent = body.summary; renderArtifactList(document.getElementById("completion-artifacts"), body); document.getElementById("journey-retry").hidden = true; document.getElementById("new-journey").hidden = false; setStatus("Journey complete. Review the validated evidence.", false); return; } var next = document.getElementById("journey-next"); next.textContent = currentStage === "set-bearings" ? "Gather Supplies" : "Map the Route"; document.getElementById("journey-action").hidden = false; setStatus(phaseNames[currentStage] + " complete. Owner handoff required.", false); }\n' +
     '  var renderJourneyResponse = renderJourney; renderJourney = function (body) { cacheEstimate(body); if (body.status === "action" && currentStage === "recon" && body.recon && body.recon.state === "RECON_FAILED") { renderFailure({ code: "recon_failed" }); return; } if (body.status === "action" && currentStage === "recon" && body.recon && body.recon.state === "OWNER_DECISION_REQUIRED") { if (!body.ownerDecisionId || !body.ownerDecisionQuestion) { renderFailure({ code: "owner_decision_required" }); return; } var q = body.ownerDecisionQuestion; if (body.ownerDecisionAnswered === true) { invokeJourney("draft-implementation"); } else { persistAgentQuestion(q, body.ownerDecisionId).then(function () { renderJourneyResponse(Object.assign({}, body, { status: "question", question: q })); }, function () { renderFailure({ code: "owner_decision_required" }); }); } return; } renderJourneyResponse(body); if (body.status === "action" && currentStage === "repository-fit") invokeJourney("set-bearings"); else if (body.status === "action" && currentStage === "gather-supplies") invokeJourney("map-route"); else if (body.status === "action" && currentStage === "map-route") invokeJourney("recon"); else if (body.status === "action" && currentStage === "recon" && body.recon && (body.recon.state === "SKIPPED" || body.recon.state === "RECON_READY")) invokeJourney("draft-implementation"); };\n' +
     '  function renderSavedExecution(body) { hideWait(); retryStage = "review"; planningSubmit.disabled = false; planningAnswerForm.hidden = true; document.getElementById("journey-action").hidden = true; document.getElementById("mode-choice").hidden = true; var complete = document.getElementById("journey-complete"); complete.hidden = false; complete.firstElementChild.textContent = "Implementation saved"; document.getElementById("journey-summary").textContent = "Implementation completed successfully and is durably saved."; document.getElementById("completion-summary").textContent = "The follow-on review request disconnected. Your implementation success is saved; choose Retry to start Surveyor review."; renderArtifactList(document.getElementById("completion-artifacts"), body); document.getElementById("journey-retry").hidden = false; document.getElementById("new-journey").hidden = true; setStatus("Implementation complete and saved. Review is ready when you are.", false); }\n' +
-    '  function reconcileJourney() { var runId = currentRunId, stage = currentStage; clearTimeout(reconcileTimer); reconcileTimer = null; fetch("/api/v1/journey/" + encodeURIComponent(runId) + "/status", { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error("status"); return r.json(); }).then(function (body) { if (currentRunId !== runId || currentStage !== stage) return; var run = body.run; if (!run) throw new Error("unsaved"); currentStage = run.stage; if (run.status === "running") { if (document.getElementById("journey-wait").hidden || run.stage !== stage) showWait(currentStage); setStatus("Reconnected to the saved " + phaseNames[currentStage] + " action.", true); reconcileTimer = setTimeout(function () { if (currentRunId === runId && currentStage === run.stage && !document.getElementById("journey-wait").hidden) reconcileJourney(); }, 2000); return; } if (!run.lastResult) throw new Error("unsaved"); var result = Object.assign({}, run.lastResult, { artifacts: run.artifacts || [], artifactLinks: run.artifactLinks || [] }); cacheEstimate(result); if ((run.stage === "execute-explorer" || run.stage === "execute-expedition") && result.status === "action") { renderSavedExecution(result); return; } renderJourney(result); }, function () { if (currentRunId === runId && currentStage === stage) renderFailure({ code: "network_error" }); }); }\n' +
+    '  function reconcileJourney() { var runId = currentRunId, stage = currentStage; clearTimeout(reconcileTimer); reconcileTimer = null; fetch("/api/v1/journey/" + encodeURIComponent(runId) + "/status", { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error("status"); return r.json(); }).then(function (body) { if (currentRunId !== runId || currentStage !== stage) return; var run = body.run; if (!run) throw new Error("unsaved"); renderRunInspection(run); currentStage = run.stage; if (run.status === "running") { if (document.getElementById("journey-wait").hidden || run.stage !== stage) showWait(currentStage); setStatus("Reconnected to the saved " + phaseNames[currentStage] + " action.", true); reconcileTimer = setTimeout(function () { if (currentRunId === runId && currentStage === run.stage && !document.getElementById("journey-wait").hidden) reconcileJourney(); }, 2000); return; } if (!run.lastResult) throw new Error("unsaved"); var result = Object.assign({}, run.lastResult, { artifacts: run.artifacts || [], artifactLinks: run.artifactLinks || [] }); cacheEstimate(result); if ((run.stage === "execute-explorer" || run.stage === "execute-expedition") && result.status === "action") { renderSavedExecution(result); return; } renderJourney(result); }, function () { if (currentRunId === runId && currentStage === stage) renderFailure({ code: "network_error" }); }); }\n' +
     '  function invokeJourney(stage, extra, quiet) { currentStage = stage; if (!quiet) showWait(stage); var payload = Object.assign({ runId: currentRunId, stage: stage, workGoal: currentGoal }, extra || {}); fetch("/api/v1/journey", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify(payload) }).then(function (r) { return r.json().catch(function () { return { status: "failure", code: "request_failed" }; }).then(function (body) { if (!r.ok && body.status !== "failure") return { status: "failure", code: "request_failed" }; return body; }); }).then(function (body) { if (body.status === "question" && body.question) { return persistAgentQuestion(body.question, body.ownerDecisionId).then(function () { return body; }); } return body; }).then(renderJourney, reconcileJourney); }\n' +
     '  function showError(error) { setStatus(error instanceof Error ? error.message : "Request failed.", false); }\n' +
     '  function showDemoStage(next) { var stages = document.querySelectorAll("[data-demo-stage]"); var progress = document.querySelectorAll(".demo-progress li"); demoStage = Math.max(0, Math.min(stages.length - 1, next)); stages.forEach(function (stage, index) { stage.hidden = index !== demoStage; }); progress.forEach(function (step, index) { if (index === demoStage) step.setAttribute("aria-current", "step"); else step.removeAttribute("aria-current"); }); document.getElementById("demo-step").textContent = "Step " + (demoStage + 1) + " of " + stages.length; document.getElementById("demo-prev").disabled = demoStage === 0; document.getElementById("demo-next").textContent = demoStage === stages.length - 1 ? (currentRunId ? "Back to journey" : "Start journey") : "Next \\u2192"; }\n' +
@@ -776,12 +785,12 @@ const NATIVE_HTML_TEMPLATE = "<!doctype html>\n" +
     '  function openDemo() { demoReturnPanel = !planReviewPanel.hidden ? planReviewPanel : !planningPanel.hidden ? planningPanel : !workForm.hidden ? workForm : !routeForm.hidden ? routeForm : repositoryPanel; [repositoryPanel, routeForm, workForm, planningPanel, planReviewPanel].forEach(function (panel) { panel.hidden = true; }); demoPanel.hidden = false; viewDemo.textContent = "Exit tutorial"; chooseDemoMode(""); showDemoStage(0); setStatus("How it works. No model calls or tokens.", false); }\n' +
     '  function closeDemoPanel() { demoPanel.hidden = true; viewDemo.textContent = "See how it works"; if (demoReturnPanel) demoReturnPanel.hidden = false; setStatus(rememberedGreeting || (demoReturnPanel === repositoryPanel ? "Choose a repository." : "Tutorial closed."), false); }\n' +
     '  function configureRoute(route) { var modelChoice = document.getElementById("model-choice"); var reasoningChoice = document.getElementById("reasoning-choice"); var config = document.getElementById("route-config"); selectedRoute = null; config.hidden = true; document.getElementById("launch-bearing").disabled = true; detectedRoutes.textContent = "Loading model choices for " + route.id + "…"; fetch("/api/v1/routes/" + encodeURIComponent(route.id) + "/models", { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error("models"); return r.json(); }).then(function (body) { var models = body.models || []; modelChoice.replaceChildren(); models.forEach(function (option) { var item = document.createElement("option"); item.value = option.model; item.textContent = option.label; if (option.model === route.model) item.selected = true; modelChoice.appendChild(item); }); function configureReasoning() { var option = models.find(function (candidate) { return candidate.model === modelChoice.value; }) || models[0]; reasoningChoice.replaceChildren(); if (!option) return; reasoningTiers.forEach(function (level) { var item = document.createElement("option"); item.value = level; item.textContent = level; reasoningChoice.appendChild(item); }); var preferred = reasoningTiers.indexOf(route.reasoning) >= 0 ? route.reasoning : reasoningTiers.indexOf(option.defaultReasoning) >= 0 ? option.defaultReasoning : "medium"; reasoningChoice.value = preferred; selectedRoute = { id: route.id, provider: route.provider, model: option.model, reasoning: reasoningChoice.value }; document.getElementById("launch-bearing").disabled = false; } modelChoice.onchange = configureReasoning; reasoningChoice.onchange = function () { selectedRoute = { id: route.id, provider: route.provider, model: modelChoice.value, reasoning: reasoningChoice.value }; }; config.hidden = false; configureReasoning(); detectedRoutes.textContent = "Model choices loaded. Choose a model and reasoning level."; }, function () { detectedRoutes.textContent = "Model choices unavailable. Choose another detected agent or refresh detection."; }); }\n' +
-    '  function renderRoutes(routes) { var names = { "codex": "Codex CLI", "claude": "Claude Code", "agy": "Agy", "opencode": "OpenCode", "pi": "Pi" }; var firstAvailable = null; selectedRoute = null; document.getElementById("route-config").hidden = true; document.getElementById("launch-bearing").disabled = true; routeOptions.replaceChildren(); routes.forEach(function (route, index) { var label = document.createElement("label"); label.className = "route-card" + (route.detected ? "" : " unavailable"); var input = document.createElement("input"); input.type = "radio"; input.name = "route"; input.id = "route-option-" + index; input.required = true; input.disabled = !route.detected; input.addEventListener("change", function () { configureRoute(route); }); var copy = document.createElement("span"); var title = document.createElement("strong"); title.textContent = names[route.id] || route.id; var statusText = document.createElement("span"); statusText.className = "route-status"; statusText.id = input.id + "-status"; statusText.textContent = route.detected ? "Agent detected" : "Agent unavailable"; input.setAttribute("aria-describedby", statusText.id); var modelText = document.createElement("span"); modelText.className = "route-model"; modelText.textContent = (route.model === "*" ? "Current model: agent default" : "Current model: " + route.model) + " · reasoning: " + route.reasoning; copy.append(title, statusText, modelText); label.append(input, copy); routeOptions.appendChild(label); if (!firstAvailable && route.detected) firstAvailable = input; }); var detected = routes.filter(function (route) { return route.detected; }).length; detectedRoutes.textContent = detected + " of " + routes.length + " supported agents detected. Choose one to see its models and reasoning levels."; if (firstAvailable) firstAvailable.focus(); }\n' +
+    '  function renderRoutes(routes) { var names = { "codex": "Codex CLI", "claude": "Claude Code", "agy": "Agy", "grok-build": "Grok Build", "opencode": "OpenCode", "pi": "Pi" }; var firstAvailable = null; selectedRoute = null; document.getElementById("route-config").hidden = true; document.getElementById("launch-bearing").disabled = true; routeOptions.replaceChildren(); routes.forEach(function (route, index) { var label = document.createElement("label"); label.className = "route-card" + (route.detected ? "" : " unavailable"); var input = document.createElement("input"); input.type = "radio"; input.name = "route"; input.id = "route-option-" + index; input.required = true; input.disabled = !route.detected; input.addEventListener("change", function () { configureRoute(route); }); var copy = document.createElement("span"); var title = document.createElement("strong"); title.textContent = names[route.id] || route.id; var statusText = document.createElement("span"); statusText.className = "route-status"; statusText.id = input.id + "-status"; statusText.textContent = route.detected ? "Agent detected" : "Agent unavailable"; input.setAttribute("aria-describedby", statusText.id); var modelText = document.createElement("span"); modelText.className = "route-model"; modelText.textContent = (route.model === "*" ? "Current model: agent default" : "Current model: " + route.model) + " · reasoning: " + route.reasoning; copy.append(title, statusText, modelText); label.append(input, copy); routeOptions.appendChild(label); if (!firstAvailable && route.detected) firstAvailable = input; }); var detected = routes.filter(function (route) { return route.detected; }).length; detectedRoutes.textContent = detected + " of " + routes.length + " supported agents detected. Choose one to see its models and reasoning levels."; if (firstAvailable) firstAvailable.focus(); }\n' +
     '  function loadRoutes() { detectedRoutes.textContent = "Checking supported agents\u2026"; fetch("/api/v1/routes", { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error("routes"); return r.json(); }).then(function (body) { renderRoutes(body.routes); }, function () { detectedRoutes.textContent = "Agent detection unavailable; no route has been selected or verified."; }); }\n' +
-    '  function resumeRailEntry(entry) { [repositoryPanel, routeForm, workForm, planningPanel, planReviewPanel, historyPanel, demoPanel].forEach(function (panel) { panel.hidden = true; }); var hasSavedResult = !!(entry.stage && entry.lastResult); if (entry.busy && entry.stage) { currentRunId = entry.runId; currentGoal = entry.goal; currentStage = entry.stage; planningPanel.hidden = false; showWait(currentStage); setStatus("Returned to the active journey.", true); } else if (hasSavedResult) { currentRunId = entry.runId; currentGoal = entry.goal; currentStage = entry.stage; planningPanel.hidden = false; renderJourney(Object.assign({}, entry.lastResult, { artifacts: entry.artifacts || [], artifactLinks: entry.artifactLinks || [] })); setStatus(entry.status === "complete" ? "Opened completed journey evidence." : "Resumed the saved journey.", false); } else { currentRunId = ""; currentGoal = ""; workForm.hidden = false; document.getElementById("work-goal").value = entry.goal; document.getElementById("work-goal").focus(); setStatus("Saved request loaded. Embark when you are ready to start a new journey.", false); } renderRailHistory(historyEntries); appShell.classList.remove("rail-open"); }\n' +
+    '  function resumeRailEntry(entry) { [repositoryPanel, routeForm, workForm, planningPanel, planReviewPanel, historyPanel, demoPanel].forEach(function (panel) { panel.hidden = true; }); var hasSavedResult = !!(entry.stage && entry.lastResult); if (entry.busy && entry.stage) { currentRunId = entry.runId; currentGoal = entry.goal; currentStage = entry.stage; planningPanel.hidden = false; showWait(currentStage); setStatus("Returned to the active journey.", true); } else if (hasSavedResult) { currentRunId = entry.runId; currentGoal = entry.goal; currentStage = entry.stage; planningPanel.hidden = false; renderJourney(Object.assign({}, entry.lastResult, { artifacts: entry.artifacts || [], artifactLinks: entry.artifactLinks || [] })); renderInspectionFromStatus(); setStatus(entry.status === "complete" ? "Opened completed journey evidence." : "Resumed the saved journey.", false); } else { currentRunId = ""; currentGoal = ""; workForm.hidden = false; document.getElementById("work-goal").value = entry.goal; document.getElementById("work-goal").focus(); setStatus("Saved request loaded. Embark when you are ready to start a new journey.", false); } renderRailHistory(historyEntries); appShell.classList.remove("rail-open"); }\n' +
     '  function renderRailHistory(entries) { historyEntries = entries; railHistoryList.replaceChildren(); var query = document.getElementById("history-search").value.trim().toLowerCase(); var shown = entries.filter(function (entry) { return !query || (entry.title + " " + entry.goal).toLowerCase().includes(query); }); if (!shown.length) { var empty = document.createElement("p"); empty.className = "rail-empty"; empty.textContent = entries.length ? "No matching journeys." : selectedRepositoryPath ? "No journeys yet." : "Choose a workspace to see its journeys."; railHistoryList.appendChild(empty); return; } shown.forEach(function (entry) { var action = document.createElement("button"); action.type = "button"; action.className = "rail-journey" + (entry.runId === currentRunId ? " current" : ""); action.setAttribute("aria-label", (entry.busy ? "Return to running journey: " : "Open journey: ") + entry.title); var dot = document.createElement("span"); dot.className = "journey-dot " + (entry.busy ? "running" : entry.status === "complete" ? "complete" : "paused"); dot.setAttribute("aria-hidden", "true"); var copy = document.createElement("div"); var title = document.createElement("strong"); title.textContent = entry.title; var detail = document.createElement("small"); detail.textContent = entry.busy ? "Running · " + (phaseNames[entry.stage] || entry.stage || "Working") : entry.status === "complete" ? "Complete" : "Saved · " + new Date(entry.updatedAt).toLocaleDateString(); copy.append(title, detail); action.append(dot, copy); action.addEventListener("click", function () { resumeRailEntry(entry); }); railHistoryList.appendChild(action); }); }\n' +
     '  function loadRailHistory() { if (!selectedRepositoryPath) return; fetch("/api/v1/history", { credentials: "same-origin" }).then(function (r) { if (!r.ok) throw new Error("history"); return r.json(); }).then(function (body) { renderRailHistory(body.history || []); }, function () { railHistoryList.replaceChildren(); var empty = document.createElement("p"); empty.className = "rail-empty"; empty.textContent = "History is temporarily unavailable."; railHistoryList.appendChild(empty); }); }\n' +
-    '  function renderHistory(entries) { historyList.replaceChildren(); document.getElementById("clear-history").disabled = !entries.length; if (!entries.length) { var empty = document.createElement("p"); empty.textContent = "No saved journeys in this repository yet."; historyList.appendChild(empty); return; } entries.forEach(function (entry) { var card = document.createElement("article"); card.className = "history-card"; var copy = document.createElement("div"); var title = document.createElement("strong"); title.textContent = entry.title; var detail = document.createElement("span"); detail.textContent = entry.status + " · " + new Date(entry.updatedAt).toLocaleString(); copy.append(title, detail); var actions = document.createElement("div"); actions.className = "history-actions"; var action = document.createElement("button"); action.type = "button"; var hasSavedResult = !!(entry.stage && entry.lastResult); action.textContent = entry.busy ? "Return to running journey" : entry.status === "complete" && hasSavedResult ? "View completed evidence" : hasSavedResult ? "Resume journey" : "Reuse request"; action.addEventListener("click", function () { historyPanel.hidden = true; if (entry.busy && entry.stage) { currentRunId = entry.runId; currentGoal = entry.goal; currentStage = entry.stage; planningPanel.hidden = false; showWait(currentStage); setStatus("Returned to the active journey.", true); } else if (hasSavedResult) { currentRunId = entry.runId; currentGoal = entry.goal; currentStage = entry.stage; planningPanel.hidden = false; renderJourney(Object.assign({}, entry.lastResult, { artifacts: entry.artifacts || [], artifactLinks: entry.artifactLinks || [] })); setStatus(entry.status === "complete" ? "Opened completed journey evidence." : "Resumed the saved journey.", false); } else { workForm.hidden = false; document.getElementById("work-goal").value = entry.goal; document.getElementById("work-goal").focus(); setStatus("Saved request loaded. Embark when you are ready to start a new journey.", false); } }); var remove = document.createElement("button"); remove.type = "button"; remove.className = "danger"; remove.textContent = "Delete"; remove.disabled = !!entry.busy; remove.addEventListener("click", function () { if (!confirm("Delete this journey from history? Generated files will stay in the repository.")) return; deleteHistory(entry.runId); }); actions.append(action, remove); card.append(copy, actions); historyList.appendChild(card); }); }\n' +
+    '  function renderHistory(entries) { historyList.replaceChildren(); document.getElementById("clear-history").disabled = !entries.length; if (!entries.length) { var empty = document.createElement("p"); empty.textContent = "No saved journeys in this repository yet."; historyList.appendChild(empty); return; } entries.forEach(function (entry) { var card = document.createElement("article"); card.className = "history-card"; var copy = document.createElement("div"); var title = document.createElement("strong"); title.textContent = entry.title; var detail = document.createElement("span"); detail.textContent = entry.status + " · " + new Date(entry.updatedAt).toLocaleString(); copy.append(title, detail); var actions = document.createElement("div"); actions.className = "history-actions"; var action = document.createElement("button"); action.type = "button"; var hasSavedResult = !!(entry.stage && entry.lastResult); action.textContent = entry.busy ? "Return to running journey" : entry.status === "complete" && hasSavedResult ? "View completed evidence" : hasSavedResult ? "Resume journey" : "Reuse request"; action.addEventListener("click", function () { historyPanel.hidden = true; if (entry.busy && entry.stage) { currentRunId = entry.runId; currentGoal = entry.goal; currentStage = entry.stage; planningPanel.hidden = false; showWait(currentStage); setStatus("Returned to the active journey.", true); } else if (hasSavedResult) { currentRunId = entry.runId; currentGoal = entry.goal; currentStage = entry.stage; planningPanel.hidden = false; renderJourney(Object.assign({}, entry.lastResult, { artifacts: entry.artifacts || [], artifactLinks: entry.artifactLinks || [] })); renderInspectionFromStatus(); setStatus(entry.status === "complete" ? "Opened completed journey evidence." : "Resumed the saved journey.", false); } else { workForm.hidden = false; document.getElementById("work-goal").value = entry.goal; document.getElementById("work-goal").focus(); setStatus("Saved request loaded. Embark when you are ready to start a new journey.", false); } }); var remove = document.createElement("button"); remove.type = "button"; remove.className = "danger"; remove.textContent = "Delete"; remove.disabled = !!entry.busy; remove.addEventListener("click", function () { if (!confirm("Delete this journey from history? Generated files will stay in the repository.")) return; deleteHistory(entry.runId); }); actions.append(action, remove); card.append(copy, actions); historyList.appendChild(card); }); }\n' +
     '  function loadHistory() { setStatus("Loading local journey history\u2026", true); fetch("/api/v1/history", { credentials: "same-origin" }).then(function (r) { if (!r.ok) requestError("History could not be loaded", r); return r.json(); }).then(function (body) { renderRailHistory(body.history || []); renderHistory(body.history || []); setStatus("Journey history for this repository.", false); }, showError); }\n' +
     '  function deleteHistory(runId) { setStatus(runId ? "Removing journey from history\u2026" : "Clearing journey history\u2026", true); fetch(runId ? "/api/v1/history/" + encodeURIComponent(runId) : "/api/v1/history", { method: "DELETE", credentials: "same-origin" }).then(function (r) { if (!r.ok) requestError("History could not be deleted", r); if (!runId || currentRunId === runId) { currentRunId = ""; currentGoal = ""; historyReturnPanel = workForm; } return loadHistory(); }, showError); }\n' +
     '  function openHistory() { historyReturnPanel = !planReviewPanel.hidden ? planReviewPanel : !planningPanel.hidden ? planningPanel : !workForm.hidden ? workForm : routeForm; [repositoryPanel, routeForm, workForm, planningPanel, planReviewPanel, demoPanel].forEach(function (panel) { panel.hidden = true; }); historyPanel.hidden = false; loadHistory(); }\n' +
@@ -802,7 +811,7 @@ const NATIVE_HTML_TEMPLATE = "<!doctype html>\n" +
     '  function loadRepositoryOptions() { fetch("/api/v1/repository-options", { credentials: "same-origin" }).then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); }).then(function (result) { if (!result.ok) { browseAvailable = false; setStatus(result.body.remedy || "Repository options unavailable. Current repository remains available.", false); restoreRepositoryControls(); return; } var body = result.body; browseAvailable = body.browse.available; document.getElementById("platform-name").textContent = body.platform; var distro = document.getElementById("distro-name"); if (body.linuxDistro) { distro.textContent = body.linuxDistro; distro.hidden = false; } document.getElementById("picker-state").textContent = browseAvailable ? "BROWSE READY" : "BROWSE UNAVAILABLE"; document.getElementById("repository-source").textContent = body.current.source === "git-root" ? "Detected launch Git root" : "Detected launch directory"; document.getElementById("repository-name").textContent = body.current.source === "git-root" ? "Use current repository" : "Use current directory"; document.getElementById("repository-path").textContent = body.current.path; restoreRepositoryControls(); }, function () { browseAvailable = false; setStatus("Repository options unavailable. Current repository remains available.", false); restoreRepositoryControls(); }); }\n' +
     '  function chooseRepository(choice, confirmNonGit) { var payload = { choice: choice }; if (confirmNonGit === true) payload.confirmNonGit = true; submitRepository(payload, choice === "browse" ? "Opening system repository picker..." : "Validating current repository..."); }\n' +
     '  function confirmNonGitRepository(candidate, choice) { if (candidate) { submitRepository({ path: candidate, confirmNonGit: true }, "Confirming planning-only directory..."); return true; } if (choice) { chooseRepository(choice, true); return true; } return false; }\n' +
-    '  function submitRepository(payload, pending) { hideRepositoryConsent(); currentRepository.disabled = true; browseRepository.disabled = true; setStatus(pending, true); fetch("/api/v1/repository", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify(payload) }).then(function (r) { return r.text().then(function (text) { var body = {}; try { body = JSON.parse(text); } catch (_) {} return { ok: r.ok, status: r.status, body: body }; }); }).then(function (result) { if (!result.ok) { var code = result.body.code || "repository_selection_failed"; var remedy = result.body.remedy || ""; if (code === "repository_not_git") { var candidate = result.body.candidate; var rejected = payload.choice; setStatus(remedy, false); restoreRepositoryControls(); askRepositoryConsent(remedy, "Use for planning-only", "Choose another", function () { confirmNonGitRepository(candidate, rejected); }, function () { setStatus("Repository unchanged. Choose a Git repository.", false); restoreRepositoryControls(); }); return; } if (code === "repository_picker_unavailable") { browseAvailable = false; repositoryPanel.hidden = false; document.getElementById("workspace-chip").setAttribute("aria-expanded", "true"); loadRepositoryOptions(); } if (code === "journey_in_progress") changeRepository.textContent = "Return to journey"; setStatus(remedy || (code === "journey_in_progress" ? "The active journey is still running. Return to it before changing repositories." : code === "repository_picker_cancelled" ? "Browse cancelled. Current repository is still available." : code === "repository_picker_unavailable" ? "System picker unavailable. Use the current repository." : code === "repository_picker_timeout" ? "System picker timed out. Try again or use current." : code === "repository_picker_invalid" ? "Picker returned an invalid repository. Nothing changed." : "Repository could not be chosen (" + result.status + ")."), false); restoreRepositoryControls(); return; } var repositoryHasOwner = !!result.body.ownerName; if (repositoryHasOwner) rememberedName = result.body.ownerName; rememberedGreeting = result.body.greeting || ""; selectedRepositoryPath = result.body.repositoryPath || ""; syncShellSummary(); loadRailHistory(); document.getElementById("owner-name").value = rememberedName; changeRepository.hidden = false; changeRepository.textContent = "Change repository"; viewDemo.textContent = "See how it works"; planningPanel.hidden = true; planReviewPanel.hidden = true; historyPanel.hidden = true; demoPanel.hidden = true; workForm.hidden = false; setStatus(rememberedGreeting || (result.body.status === "resumed" ? "Repository resumed. Choose your agent settings." : result.body.disclosure || "Workspace ready. Choose your agent settings."), false); if (result.body.status === "initialized" && result.body.gitignoreMissing) { askRepositoryConsent("`.bearing/` is not gitignored. Add it so planning state is never committed?", "Add .bearing/ to .gitignore", "Not now", addBearingGitignore, function () { repositoryPanel.hidden = true; openRouteChooser(); setStatus(".gitignore left unchanged. Choose your agent, model, and reasoning.", false); }); return; } repositoryPanel.hidden = true; openRouteChooser(); }, function () { setStatus("Repository request failed. Try again.", false); restoreRepositoryControls(); }); }\n' +
+    '  function syncOwnerNameSettled(settled) { document.getElementById("owner-summary").hidden = !settled; document.getElementById("owner-name-field").hidden = settled; if (settled) document.getElementById("owner-name-summary").textContent = rememberedName; }  function submitRepository(payload, pending) { hideRepositoryConsent(); currentRepository.disabled = true; browseRepository.disabled = true; setStatus(pending, true); fetch("/api/v1/repository", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify(payload) }).then(function (r) { return r.text().then(function (text) { var body = {}; try { body = JSON.parse(text); } catch (_) {} return { ok: r.ok, status: r.status, body: body }; }); }).then(function (result) { if (!result.ok) { var code = result.body.code || "repository_selection_failed"; var remedy = result.body.remedy || ""; if (code === "repository_not_git") { var candidate = result.body.candidate; var rejected = payload.choice; setStatus(remedy, false); restoreRepositoryControls(); askRepositoryConsent(remedy, "Use for planning-only", "Choose another", function () { confirmNonGitRepository(candidate, rejected); }, function () { setStatus("Repository unchanged. Choose a Git repository.", false); restoreRepositoryControls(); }); return; } if (code === "repository_picker_unavailable") { browseAvailable = false; repositoryPanel.hidden = false; document.getElementById("workspace-chip").setAttribute("aria-expanded", "true"); loadRepositoryOptions(); } if (code === "journey_in_progress") changeRepository.textContent = "Return to journey"; setStatus(remedy || (code === "journey_in_progress" ? "The active journey is still running. Return to it before changing repositories." : code === "repository_picker_cancelled" ? "Browse cancelled. Current repository is still available." : code === "repository_picker_unavailable" ? "System picker unavailable. Use the current repository." : code === "repository_picker_timeout" ? "System picker timed out. Try again or use current." : code === "repository_picker_invalid" ? "Picker returned an invalid repository. Nothing changed." : "Repository could not be chosen (" + result.status + ")."), false); restoreRepositoryControls(); return; } var repositoryHasOwner = !!result.body.ownerName; rememberedName = result.body.ownerName || ""; rememberedGreeting = result.body.greeting || ""; selectedRepositoryPath = result.body.repositoryPath || ""; syncShellSummary(); loadRailHistory(); document.getElementById("owner-name").value = rememberedName; syncOwnerNameSettled(repositoryHasOwner); changeRepository.hidden = false; changeRepository.textContent = "Change repository"; viewDemo.textContent = "See how it works"; planningPanel.hidden = true; planReviewPanel.hidden = true; historyPanel.hidden = true; demoPanel.hidden = true; workForm.hidden = false; setStatus(rememberedGreeting || (result.body.status === "resumed" ? "Repository resumed. Choose your agent settings." : result.body.disclosure || "Workspace ready. Choose your agent settings."), false); if (result.body.status === "initialized" && result.body.gitignoreMissing) { askRepositoryConsent("`.bearing/` is not gitignored. Add it so planning state is never committed?", "Add .bearing/ to .gitignore", "Not now", addBearingGitignore, function () { repositoryPanel.hidden = true; openRouteChooser(); setStatus(".gitignore left unchanged. Choose your agent, model, and reasoning.", false); }); return; } repositoryPanel.hidden = true; openRouteChooser(); }, function () { setStatus("Repository request failed. Try again.", false); restoreRepositoryControls(); }); }\n' +
     "  // The capability lives only in the fragment; it is never sent on the GET.\n" +
     '  var m = /^#cap=([0-9a-f]{1,256})$/.exec(location.hash);\n' +
     '  if (!m) { fail("no capability present."); return; }\n' +
@@ -869,7 +878,7 @@ const NATIVE_HTML_TEMPLATE = "<!doctype html>\n" +
     '  document.getElementById("journey-retry").addEventListener("click", function () { document.getElementById("journey-complete").firstElementChild.textContent = "Evidence complete"; var stage = retryStage || currentStage; retryStage = ""; focusAmendmentPending ? confirmFocusAmendment(stage) : invokeJourney(stage); });\n' +
     '  document.getElementById("new-journey").addEventListener("click", startNewJourney);\n' +
     '  workBack.addEventListener("click", openRouteChooser);\n' +
-    '  document.getElementById("owner-name").addEventListener("input", function () { this.setCustomValidity(""); });\n' +
+    '  document.getElementById("owner-name").addEventListener("input", function () { this.setCustomValidity(""); }); document.getElementById("edit-owner-name").addEventListener("click", function () { syncOwnerNameSettled(false); document.getElementById("owner-name").focus(); });\n' +
     '  routeForm.addEventListener("submit", function (ev) {\n' +
     "    ev.preventDefault();\n" +
     '    var ownerName = document.getElementById("owner-name"); var name = ownerName.value.trim(); if (!name) { ownerName.setCustomValidity("Tell us what to call you."); ownerName.reportValidity(); return; } ownerName.setCustomValidity(""); if (!routeForm.reportValidity() || !selectedRoute) return; setStatus("Launching Bearing with " + (selectedRoute.model === "*" ? "the agent default" : selectedRoute.model) + "...", true); fetch("/api/v1/readiness", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ provider: selectedRoute.provider, model: selectedRoute.model, reasoning: selectedRoute.reasoning }) }).then(function (r) { return r.json(); }).then(function (body) { setStatus(body.status === "detected" ? "Agent detected; provider verification required." : body.status === "blocked" ? "Agent route unavailable." : status.textContent, body.status === "detected"); if (body.status === "ready") finishReady(name, false); }, function () { setStatus("Launch check failed.", false); });\n' +
@@ -1236,7 +1245,7 @@ function handleRepositoryPost(req, res, service, repositoryBootstrap, repository
                     status: result.status,
                     repositoryPath: result.repositoryPath,
                     ...(result.status === "initialized" ? {
-                        disclosure: `Bearing writes durable planning state to ${result.repositoryPath}/.bearing/ (gitignored).`,
+                        disclosure: `Bearing writes durable planning state to ${result.repositoryPath}/.bearing/ and visible bearing-<plan>/ plan workspaces (gitignored).`,
                         gitignoreMissing: result.gitignoreMissing,
                     } : {}),
                     ...(result.ownerName ? { ownerName: result.ownerName, greeting: greetingFor(result.ownerName) } : {}),
@@ -1430,8 +1439,16 @@ async function handleRepositoryGitignorePost(req, res, service, selected) {
             return;
         }
         const body = await file.readFile("utf8");
-        if (!ignoresBearingDirectory(body)) {
-            await file.write(`${body.length > 0 && !body.endsWith("\n") ? "\n" : ""}.bearing/\n`);
+        const additions = [];
+        if (!ignoresBearingDirectory(body))
+            additions.push(".bearing/");
+        // Anchored to the repository root: an unanchored `bearing-*/` also ignores a user's real
+        // `packages/bearing-core/` at any depth. bootstrap.ts accepts the anchored spelling.
+        if (!ignoresBearingWorkspaces(body))
+            additions.push("/bearing-*/");
+        if (additions.length > 0) {
+            const prefix = body.length > 0 && !body.endsWith("\n") ? "\n" : "";
+            await file.write(`${prefix}${additions.join("\n")}\n`);
             await file.sync();
         }
         res.writeHead(200, {
@@ -1690,14 +1707,68 @@ function retryErrorSignature(code) {
         return "git_state";
     return "evidence_invalid";
 }
+/**
+ * Planning stages whose validation failures are corrected by editing the plan documents in
+ * `docs/plans/**`. Those documents are gitignored, so their changes never reach the git-diff
+ * `changedPaths` that otherwise distinguish one attempt from the next.
+ */
+const PLANNING_DOCUMENT_STAGES = new Set(["map-route", "draft-implementation"]);
+/**
+ * Deterministic content hash of the plan document files under `planDirectory` (relative to the
+ * repository). `null` when no plan directory is available or the files cannot be read, so a
+ * missing directory is a stable signal rather than a changing one.
+ */
+async function planContentHashFor(repositoryPath, planDirectory) {
+    if (typeof planDirectory !== "string" || !planDirectoryValid(planDirectory))
+        return null;
+    let names;
+    try {
+        names = await readdir(join(repositoryPath, planDirectory));
+    }
+    catch {
+        return null;
+    }
+    const hash = createHash("sha256");
+    for (const name of names.filter((entry) => entry !== ".bearing").sort()) {
+        const entryPath = join(repositoryPath, planDirectory, name);
+        // Only regular files contribute — a subdirectory (e.g. `prompts/` or `tmp/`) is not a plan
+        // document and would throw EISDIR from readFile, collapsing the whole signal to null.
+        try {
+            if (!(await lstat(entryPath)).isFile())
+                continue;
+        }
+        catch {
+            return null;
+        }
+        let content;
+        try {
+            content = await readFile(entryPath);
+        }
+        catch {
+            return null;
+        }
+        hash.update(`${name}\0${content.length}\0`);
+        hash.update(content);
+    }
+    return hash.digest("hex");
+}
 async function browserFailureFingerprint(repositoryPath, stage, result, state) {
-    const changes = await gitChanges(repositoryPath);
+    const planningStage = PLANNING_DOCUMENT_STAGES.has(stage);
+    const planContentHash = planningStage
+        ? await planContentHashFor(repositoryPath, state.planDirectory)
+        : undefined;
+    // For planning stages the git working tree is noise: the plan documents in docs/plans/** are
+    // gitignored and Bearing's own .bearing checkpoint writes are untracked, so any git change would
+    // move the fingerprint without the owner having touched a plan document. The plan content hash
+    // above is the only signal that distinguishes one planning attempt from the next.
+    const changes = planningStage ? null : await gitChanges(repositoryPath);
     return failureFingerprint({
         stage,
         failureCode: result.code,
         errorSignature: retryErrorSignature(result.code),
         relevantState: {
             planDirectory: state.planDirectory ?? null,
+            ...(planContentHash === undefined ? {} : { planContentHash }),
             artifacts: [...state.artifacts].sort(),
             ownerAnswerCount: state.qa.length,
             gatherQuestionsDiscovered: state.gatherQuestionsDiscovered,
@@ -2194,6 +2265,31 @@ function parseCheckpointJson(value, fallback) {
         return fallback;
     }
 }
+/**
+ * Slice-completion evidence for the Expedition dependency gate, reconstructed
+ * from the durable ledger. Both shapes of validator evidence are scanned: the
+ * typed checkpoint `verification` projection (execution-contract flow) and the
+ * full action result in `lastResultJson` (browser flow, which never carries an
+ * execution contract).
+ */
+function completedSliceIdsFromDurable(durable) {
+    const completed = new Set();
+    for (const event of durable.events) {
+        if (event.type !== "journeyCheckpointRecorded")
+            continue;
+        const parsed = parseVerificationCheckpoint(event.payload.verification);
+        if (parsed.ok && parsed.value.layer === "validator" && parsed.value.verdict === "PASS") {
+            for (const slice of parsed.value.completedSlices ?? [])
+                completed.add(slice.sliceId);
+        }
+        const lastResult = parseCheckpointJson(event.payload.lastResultJson, undefined);
+        if (lastResult?.status === "action" && lastResult.verification?.verdict === "PASS") {
+            for (const slice of lastResult.verification.completedSlices ?? [])
+                completed.add(slice.sliceId);
+        }
+    }
+    return completed;
+}
 function restoreJourney(entry) {
     const checkpoint = entry.checkpoint;
     if (!checkpoint)
@@ -2575,6 +2671,20 @@ function handleJourneyPost(req, res, service, selected, journey, beforeExecution
         if (retryFailure
             && (retryRequiresWarrant(retryFailure) || !stageChanged && state.pendingRetryWarrant !== undefined)) {
             const fingerprint = await browserFailureFingerprint(repositoryPath, value.stage, retryFailure, state);
+            // Issue 136: a planning-stage validation failure is corrected by editing the plan documents
+            // in docs/plans/**, which are gitignored, so a git-diff-only fingerprint never changes and
+            // the retry dead-ends on retry_requires_warrant (no MCP action can supply a warrant for
+            // planning stages). For planning stages the fingerprint already excludes git noise, so a
+            // fingerprint that differs from the previous attempt's means the owner changed plan
+            // content — that is the new evidence that warrants one same-stage planning retry.
+            const previousFingerprint = state.retryLedger.at(-1)?.fingerprint;
+            if (previousFingerprint !== undefined
+                && fingerprint !== previousFingerprint
+                && state.pendingRetryWarrant === undefined
+                && !value.focusAmendmentConfirmed
+                && PLANNING_DOCUMENT_STAGES.has(value.stage)) {
+                state.pendingRetryWarrant = "new_evidence";
+            }
             const decision = recordRetryDecision(state, fingerprint, retryScope(value.stage, retryFailure.code), value.focusAmendmentConfirmed ? "approved_amendment" : state.pendingRetryWarrant);
             if (decision.ok && !decision.escalation)
                 state.pendingRetryWarrant = undefined;
@@ -2894,6 +3004,16 @@ function handleJourneyPost(req, res, service, selected, journey, beforeExecution
             appendJourneyQa(state, "Execution mode", value.executionMode);
         if (value.reviewCadence)
             appendJourneyQa(state, "Review cadence", value.reviewCadence);
+        if (value.stage === "execute-expedition" && value.currentSlice && state.planDirectory) {
+            // Admission gate: never execute a selected slice whose declared prerequisite slices are
+            // incomplete or unvalidated. Respond without mutating or persisting state so the run stays
+            // in the planning state the owner can correct (complete the prerequisites, then reselect).
+            const refusal = await expeditionSliceDependencyRefusal(repositoryPath, state.planDirectory, value.currentSlice, completedSliceIdsFromDurable(durable));
+            if (refusal) {
+                writeJourneyFailure(res, 409, "dependency_refused");
+                return;
+            }
+        }
         if (value.currentSlice) {
             state.currentSlice = value.currentSlice;
             appendJourneyQa(state, "Current slice", value.currentSlice);
@@ -3081,12 +3201,33 @@ function handleJourneyPost(req, res, service, selected, journey, beforeExecution
         if (checkpointDiagnostic)
             state.lastResult = { ...result, checkpointDiagnostic };
         const links = state.artifacts.flatMap((path, index) => /\.(?:html|md)$/i.test(path) ? [{ path, url: `/api/v1/journey/${encodeURIComponent(value.runId)}/artifacts/${index}` }] : []);
+        // The inspection projection needs the freshly persisted checkpoint (events
+        // and verification just written above), so it reloads instead of reusing
+        // the pre-execution `durable`. Availability flags reuse `durable`: owner
+        // answers and route decisions all precede this POST, so its ledger still
+        // governs the next transition. `recoveryAvailable` is deliberately not
+        // probed here — the authoritative action set always comes from the status
+        // payload, which the browser reconciles on resume and during waits.
+        let inspection;
+        try {
+            inspection = await headlessRunInspection(selected.store, value.runId, await selected.store.load(value.runId), state, {
+                planReviewAvailable: await planReviewAvailable(state, durable, repositoryPath),
+                explorerAvailable: await executionTransitionAllowed(state, durable, repositoryPath, "execute-explorer", "explorer", "slice"),
+                recoveryAvailable: false,
+            });
+        }
+        catch {
+            // Best-effort disclosure: a store fault (e.g. the plan workspace being
+            // renamed or deleted mid-phase) must not orphan the POST promise or stall
+            // the browser request. The response is fully formed without the projection.
+        }
         writeShowcaseJson(res, {
             ...browserLastResult(state.lastResult),
             artifacts: state.artifacts,
             artifactLinks: links,
             ...(recoveryReport ? { recovery: recoveryReport } : {}),
             ...journeyDisclosures(state, result),
+            ...(inspection ?? {}),
         });
     }, (error) => writeRejection(res, error instanceof RangeError ? 413 : 400));
 }
@@ -3293,6 +3434,13 @@ async function handleJourneyStatusGet(req, res, service, selected, runId, journe
                 explorerAvailable,
                 recoveryAvailable,
                 ...journeyDisclosures(state),
+                ...(durable && runId
+                    ? await headlessRunInspection(selected.store, runId, durable, state, {
+                        planReviewAvailable: routeApprovalAvailable,
+                        explorerAvailable,
+                        recoveryAvailable,
+                    })
+                    : {}),
             },
         } : {}),
     });
@@ -3396,8 +3544,13 @@ function rewriteArtifactLinks(html, route, links) {
         if (start < 0)
             break;
         if (lower.startsWith("<!--", start)) {
-            const commentEnd = lower.indexOf("-->", start + 4);
-            search = commentEnd < 0 ? html.length : commentEnd + 3;
+            // A comment ends at `-->` or, per the HTML comment-end-bang state, at `--!>`.
+            // Skipping only `-->` leaves markup between `--!>` and the next `-->` treated
+            // as comment text while a browser renders it live, so those anchors stay unrouted.
+            const dashEnd = lower.indexOf("-->", start + 4);
+            const bangEnd = lower.indexOf("--!>", start + 4);
+            const commentEnd = dashEnd < 0 ? bangEnd : bangEnd < 0 ? dashEnd : Math.min(dashEnd, bangEnd);
+            search = commentEnd < 0 ? html.length : commentEnd + (bangEnd === commentEnd ? 4 : 3);
             continue;
         }
         if (lower[start + 1] !== "a") {
@@ -3552,7 +3705,7 @@ async function handleImprovementReportGet(req, res, service, selected, report) {
         writeRunReadFailure(res, "repository_not_selected");
         return;
     }
-    const selectedReport = report ?? ((input) => (buildImprovementReport(input.store)));
+    const selectedReport = report ?? ((input) => (buildImprovementReport(input.store, input.repositoryPath)));
     let result;
     try {
         result = await selectedReport({ repositoryPath: selected.repositoryPath, store: selected.store });
@@ -3621,7 +3774,7 @@ async function handleOwnerImprovementApplication(req, res, service, selected, re
     selected.inFlightImprovementProposals.add(body.proposalHash);
     try {
         // Verify proposal present in current report (read-only) and exact surface-target-value binding.
-        const selectedReport = report ?? ((input) => (buildImprovementReport(input.store)));
+        const selectedReport = report ?? ((input) => (buildImprovementReport(input.store, input.repositoryPath)));
         let reportRes;
         try {
             reportRes = await selectedReport({ repositoryPath: selected.repositoryPath ?? "", store: selected.store });
@@ -3729,7 +3882,7 @@ async function handleImprovementHandoffGet(req, res, service, selected) {
         writeRunReadFailure(res, "repository_not_selected");
         return;
     }
-    const result = await buildImprovementHandoffFacts(selected.store);
+    const result = await buildImprovementHandoffFacts(selected.store, selected.repositoryPath);
     if (!result.ok) {
         writeImprovementHandoffFailure(res, result.reason);
         return;
@@ -4010,6 +4163,7 @@ function parseVerificationCheckpoint(value) {
             ...(value.completedSlices === undefined ? {} : { completedSlices: value.completedSlices }),
             ...(value.reviewedSliceIds === undefined ? {} : { reviewedSliceIds: value.reviewedSliceIds }),
             ...(value.confirmedFindings === undefined ? {} : { confirmedFindings: value.confirmedFindings }),
+            ...(value.convergence === undefined ? {} : { convergence: value.convergence }),
         },
     };
 }
@@ -4068,9 +4222,33 @@ async function handleVerificationReportGet(req, res, service, selected, runId, l
             ...(parsed.value.completedSlices === undefined ? {} : { completedSlices: parsed.value.completedSlices }),
             ...(parsed.value.reviewedSliceIds === undefined ? {} : { reviewedSliceIds: parsed.value.reviewedSliceIds }),
             ...(parsed.value.confirmedFindings === undefined ? {} : { confirmedFindings: parsed.value.confirmedFindings }),
+            ...(parsed.value.convergence === undefined ? {} : { convergence: parsed.value.convergence }),
         });
     }
     writeRunReadJson(res, { runId, layer, entries });
+}
+/**
+ * The run's convergence history as of the latest Park Ranger checkpoint,
+ * derived from the ledger so the chain survives restarts and replay. A
+ * checkpoint recorded before the guard was wired carries no convergence
+ * projection and contributes nothing — the chain starts fresh at the first
+ * wired cycle. The checkpoint for the report being re-posted (same commandId)
+ * is skipped so an idempotent re-POST receipt matches the stored record.
+ */
+function convergenceHistoryFromEvents(events, excludeCommandId) {
+    let history = EMPTY_CONVERGENCE_HISTORY;
+    for (const event of events) {
+        if (event.type !== "journeyCheckpointRecorded" || event.causationId === excludeCommandId)
+            continue;
+        const parsed = parseVerificationCheckpoint(event.payload.verification);
+        if (!parsed.ok || parsed.value.layer !== "park-ranger" || parsed.value.convergence === undefined)
+            continue;
+        history = {
+            tracked: parsed.value.convergence.history.tracked,
+            chain: parsed.value.convergence.history.chain,
+        };
+    }
+    return history;
 }
 async function handleVerificationReportPost(req, res, service, selected, runId, layer) {
     if (!service.validOrigin(req.headers.origin)) {
@@ -4115,6 +4293,7 @@ async function handleVerificationReportPost(req, res, service, selected, runId, 
     }
     let verification;
     let reportIdentity;
+    let synthesizedFindings;
     // Implementer sessions are read from the ledger, so self_certification is enforced against
     // recorded fact rather than anything the caller asserts.
     //
@@ -4196,6 +4375,7 @@ async function handleVerificationReportPost(req, res, service, selected, runId, 
             writeRunReadFailure(res, synthesized.reason);
             return;
         }
+        synthesizedFindings = synthesized.value.findings;
         const confirmedFindings = synthesized.value.findings
             .map((finding) => ({
             findingRef: createHash("sha256").update(findingIdentity(finding)).digest("hex"),
@@ -4218,6 +4398,23 @@ async function handleVerificationReportPost(req, res, service, selected, runId, 
     const commandId = `verification-${createHash("sha256")
         .update(canonicalStringify({ runId, layer, contractHash: contract.contentHash, report: reportIdentity }))
         .digest("hex")}`;
+    if (synthesizedFindings !== undefined) {
+        // The convergence guard is a surfaced typed signal, never a gate: it must
+        // not block, retry, or change transitions. The history is threaded through
+        // the checkpoint stream, so the chain survives restarts and replay.
+        const cycle = recordReviewCycle(convergenceHistoryFromEvents(durable.events, commandId), synthesizedFindings);
+        if (!cycle.ok) {
+            writeRunReadFailure(res, "verification_projection_invalid");
+            return;
+        }
+        verification = {
+            ...verification,
+            convergence: {
+                history: cycle.value.history,
+                ...(cycle.value.condition === undefined ? {} : { condition: cycle.value.condition }),
+            },
+        };
+    }
     const existing = durable.events.find((event) => event.causationId === commandId);
     if (existing) {
         writeRunReadJson(res, {
@@ -4560,9 +4757,33 @@ export function createRequestHandler(service, repositoryBootstrap = new Reposito
     };
 }
 const HEADLESS_BOUND_HOST = "127.0.0.1:0";
-const HEADLESS_WORKSPACE_DISCLOSURE = "Bearing writes durable planning state to the selected repository's .bearing/ directory.";
+const HEADLESS_WORKSPACE_DISCLOSURE = "Bearing writes durable planning state to the selected repository's .bearing/ directory and visible bearing-<plan>/ plan workspaces.";
 const MAX_HEADLESS_TEXT = 4_096;
 const MAX_HEADLESS_ARTIFACTS = 32;
+/** Run inspection discloses at most this many audit-trail events, newest last. */
+const MAX_INSPECTED_EVENTS = 64;
+/**
+ * Repository-relative audit-trail locations are bounded by construction: an
+ * optional single workspace segment (visible `bearing-<plan>` names and the
+ * legacy `.bearing` home share the `[A-Za-z0-9._-]` charset) plus the run
+ * directory under `runs/`. Anything else is not a Bearing state location.
+ */
+const HEADLESS_STATE_LOCATION = /^(?:[A-Za-z0-9._-]{1,64}\/)?runs\/[A-Za-z0-9_-]{1,128}$/;
+const HEADLESS_INSPECTED_EVENT_TYPES = [
+    "workRequestCreated",
+    "decisionRequired",
+    "ownerAnswered",
+    "executionModeRecommended",
+    "executionModeApproved",
+    "executionModeOverridden",
+    "journeyCheckpointRecorded",
+    "ownerImprovementApplicationRecorded",
+    "legacyRoleRoutesApproved",
+    "legacyExecutionContractApproved",
+];
+const HEADLESS_PLAN_VERDICTS = ["PASS", "NEEDS_AMENDMENT", "OWNER_DECISION_REQUIRED"];
+const HEADLESS_VERIFICATION_LAYERS = ["validator", "grader", "park-ranger"];
+const HEADLESS_EVENT_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const HEADLESS_SECRET = /(?:\b(?:api[_ -]?key|secret|token|password|authorization)\s*[=:]\s*|\bBearer\s+|\bsk-[A-Za-z0-9_-]{8,}|\bAKIA[A-Z0-9]{16}|\bgh[oprsu]_[A-Za-z0-9]{16,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[A-Za-z0-9_-]{20,}|\bASIA[A-Z0-9]{16})[^\s,;]*/i;
 const HEADLESS_JOURNEY_FAILURE_CODES = new Set([
     "input_invalid",
@@ -4586,6 +4807,7 @@ const HEADLESS_JOURNEY_FAILURE_CODES = new Set([
     "fit_malformed",
     "fit_undecidable",
     "role_boundary_violation",
+    "review_generation_failed",
 ]);
 function headlessResponseCode(status) {
     if (status === 400 || status === 413 || status === 422)
@@ -4969,11 +5191,116 @@ function headlessSelectedScope(value) {
         return undefined;
     return { currentSlice, remainingSlices: [currentSlice], allowedPaths: [...allowedPaths], seitCommandIds: [...seitCommandIds] };
 }
+/**
+ * Where the run's durable audit trail lives, plus the bounded inspection facts
+ * disclosed about it. Typed store data only: the events are projected from the
+ * validated ledger (never from the checkpoint JSON), the validation outcome
+ * from the typed planning validation and verification checkpoint records, and
+ * the focus scope from the last recorded result. Allowed actions are the
+ * status read plus whatever the caller's availability probes already resolved
+ * — this helper never re-probes readiness or routes.
+ */
+async function headlessRunInspection(store, runId, durable, state, flags) {
+    const runPath = await store.runWorkspacePath(runId);
+    const workspace = await store.runWorkspaceName(runId);
+    // Repository-relative receipt grammar is POSIX (HEADLESS_STATE_LOCATION), so
+    // the fallback must never use platform separators; `join` would emit `\` on
+    // win32 and the receipt validator would silently drop the location.
+    const stateLocation = runPath ?? posix.join(".bearing", "runs", runId);
+    const events = durable.events.slice(-MAX_INSPECTED_EVENTS).map((event) => ({
+        sequence: event.sequence,
+        recordedAt: event.recordedAt,
+        type: event.type,
+    }));
+    const allowedActions = [
+        "status",
+        ...(flags.planReviewAvailable ? ["approve-route"] : []),
+        ...(flags.explorerAvailable ? ["select-explorer"] : []),
+        ...(flags.recoveryAvailable ? ["resume"] : []),
+    ];
+    const lastResult = state.lastResult;
+    const planningValidation = lastResult !== undefined && lastResult.status === "action" ? lastResult.planningValidation : undefined;
+    const verification = durable.journeyCheckpoint?.verification;
+    const validation = planningValidation || verification
+        ? {
+            ...(planningValidation ? { planVerdict: planningValidation.verdict } : {}),
+            ...(verification ? { verification: { layer: verification.layer, verdict: verification.verdict } } : {}),
+        }
+        : undefined;
+    const focusScope = lastResult?.selectedScope;
+    return {
+        stateLocation,
+        ...(workspace ? { workspace } : {}),
+        events,
+        allowedActions,
+        ...(focusScope ? { focusScope } : {}),
+        ...(validation ? { validation } : {}),
+    };
+}
+/** Bound a state location read from JSON: exactly the grammar {@link HEADLESS_STATE_LOCATION} allows. */
+function headlessStateLocation(value) {
+    return typeof value === "string" && HEADLESS_STATE_LOCATION.test(value) ? value : undefined;
+}
+/**
+ * Bound an events array read from JSON to the same projection the status
+ * payload carries: non-empty, at most {@link MAX_INSPECTED_EVENTS} entries,
+ * each with a non-negative integer sequence, a ledger-shaped timestamp, and a
+ * known event type. Anything else fails the whole field closed.
+ */
+function headlessInspectedEvents(value) {
+    if (!Array.isArray(value) || value.length === 0 || value.length > MAX_INSPECTED_EVENTS)
+        return undefined;
+    const projected = [];
+    for (const candidate of value) {
+        if (typeof candidate !== "object" || candidate === null)
+            return undefined;
+        const event = candidate;
+        if (!Number.isSafeInteger(event.sequence) || event.sequence < 0)
+            return undefined;
+        if (typeof event.recordedAt !== "string" || !HEADLESS_EVENT_TIMESTAMP.test(event.recordedAt))
+            return undefined;
+        if (typeof event.type !== "string" || !HEADLESS_INSPECTED_EVENT_TYPES.includes(event.type))
+            return undefined;
+        projected.push({ sequence: event.sequence, recordedAt: event.recordedAt, type: event.type });
+    }
+    return projected;
+}
+/** Bound a validation projection read from JSON; the whole field fails closed on any unknown value. */
+function headlessInspectionValidation(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+        return undefined;
+    const validation = value;
+    const planVerdict = validation.planVerdict;
+    if (planVerdict !== undefined && (typeof planVerdict !== "string" || !HEADLESS_PLAN_VERDICTS.includes(planVerdict)))
+        return undefined;
+    const verification = validation.verification;
+    if (verification === undefined) {
+        return typeof planVerdict === "string" ? { planVerdict: planVerdict } : undefined;
+    }
+    if (typeof verification !== "object" || verification === null || Array.isArray(verification))
+        return undefined;
+    const layer = verification.layer;
+    const verdict = verification.verdict;
+    if (typeof layer !== "string" || !HEADLESS_VERIFICATION_LAYERS.includes(layer))
+        return undefined;
+    if (!isVerificationVerdict(layer, verdict))
+        return undefined;
+    return {
+        ...(typeof planVerdict === "string" ? { planVerdict: planVerdict } : {}),
+        verification: { layer: layer, verdict: verdict },
+    };
+}
 function projectHeadlessReceipt(run, pendingDecision, readinessReady) {
     const recoveryPlan = headlessRecoveryPlan(run, pendingDecision, readinessReady);
     const allowedActions = recoveryPlan.allowedActions ?? [];
     if (!run)
         return recoveryPlan;
+    // Run inspection travels on the same status payload that reaches the CLI and
+    // the browser; every field is re-bounded here because the receipt is built
+    // from JSON, never from typed store state.
+    const stateLocation = headlessStateLocation(run.stateLocation);
+    const events = headlessInspectedEvents(run.events);
+    const validation = headlessInspectionValidation(run.validation);
     const lastResult = typeof run.lastResult === "object" && run.lastResult !== null && !Array.isArray(run.lastResult)
         ? run.lastResult
         : undefined;
@@ -5028,6 +5355,9 @@ function projectHeadlessReceipt(run, pendingDecision, readinessReady) {
             : {}),
         ...(outcome ? { outcome } : {}),
         ...(findings.length ? { findings } : {}),
+        ...(stateLocation ? { stateLocation } : {}),
+        ...(events ? { events } : {}),
+        ...(validation ? { validation } : {}),
     };
 }
 /**
@@ -5044,8 +5374,13 @@ export async function readDurableContinuation(repository, runId) {
     if (repositoryPath === undefined)
         return { ok: false, code: "repository_rejected" };
     let durable;
+    let workspace;
+    let runPath;
     try {
-        durable = await new BearingStore(repositoryPath).load(runId);
+        const store = new BearingStore(repositoryPath);
+        durable = await store.load(runId);
+        workspace = await store.runWorkspaceName(runId);
+        runPath = await store.runWorkspacePath(runId);
     }
     catch {
         return { ok: false, code: "store_unreadable", repositoryPath };
@@ -5144,6 +5479,8 @@ export async function readDurableContinuation(repository, runId) {
         ...(planDirectory !== undefined && headlessText(planDirectory) && repositoryRelativePlanDirectory(planDirectory)
             ? { planDirectory }
             : {}),
+        ...(workspace !== undefined ? { workspace } : {}),
+        ...(runPath !== undefined ? { runPath } : {}),
         ...(checkpoint?.verification ? { verification: checkpoint.verification } : {}),
         ...(checkpoint ? { checkpoint: { stage: checkpoint.stage, status: checkpoint.status } } : {}),
         blockers: [...blockers],

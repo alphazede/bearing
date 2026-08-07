@@ -14,6 +14,18 @@ import { EXECUTION_MODES } from "../execution/execution-mode.js";
 import type { Role } from "../profile/profile.js";
 import type { ReasoningTier } from "../profile/reasoning-policy.js";
 
+/**
+ * The plan-time per-slice workload aim, reported beside measured token usage
+ * so a retrospective can see which work ran hot against what the plan aimed
+ * for. This is the same number the planning validator's `slice_scope_advisory`
+ * uses (`SLICE_WORKLOAD_AIM_TOKENS` in `src/journey/planning-validator.ts`);
+ * it is restated here because the improvement layer imports nothing from the
+ * journey layer, and `test/outcome-projection.test.ts` asserts the two stay
+ * equal. Reporting only — nothing here gates, filters, or re-codes a record
+ * on it, and the aim predicts no run's cost.
+ */
+const SLICE_WORKLOAD_AIM_TOKENS = 500;
+
 export const MAX_OUTCOME_RECORDS_PER_RUN = 1_000;
 export const MAX_OUTCOME_PATH_REFS = 16;
 
@@ -91,7 +103,7 @@ export type OutcomeRecord = {
           : S extends "park_ranger_finding"
             ? { readonly sliceRef: string; readonly sequence: number; readonly findingRef: string }
             : S extends "token_usage"
-              ? { readonly tokens: number; readonly budget: number }
+              ? { readonly tokens: number; readonly budget: number; readonly aim: number }
               : S extends "recovery"
                 ? { readonly attempts: number }
           : {})>;
@@ -162,7 +174,7 @@ type OutcomeRecordDraft<S extends OutcomeSignal> = OutcomeRecordBase & {
       : S extends "park_ranger_finding"
         ? { readonly sliceRef: string; readonly sequence: number; readonly findingRef: string }
         : S extends "token_usage"
-          ? { readonly tokens: number; readonly budget: number }
+          ? { readonly tokens: number; readonly budget: number; readonly aim: number }
           : S extends "recovery"
             ? { readonly attempts: number }
         : {});
@@ -315,6 +327,7 @@ export function projectOutcomes(input: ProjectOutcomesInput): readonly OutcomeRe
         code: tokenUsage.state,
         tokens: tokenUsageInitialized ? tokenUsage.total - previousTokenTotal : tokenUsage.total,
         budget: tokenUsage.budget,
+        aim: SLICE_WORKLOAD_AIM_TOKENS,
       });
       tokenUsageInitialized = true;
       previousTokenTotal = tokenUsage.total;

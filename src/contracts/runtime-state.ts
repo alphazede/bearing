@@ -1,6 +1,7 @@
 /** Pure, bounded contract for runtime state persisted with journey checkpoints. */
 import type { JourneyActivity } from "../journey/planning-journey.js";
 import { REASONING_TIERS, type ReasoningTier } from "../profile/reasoning-policy.js";
+import { enumValue, nonNegativeInteger, positiveInteger } from "./guards.js";
 
 export const MAX_RUNTIME_STATE_JSON = 640 * 1024;
 export const MAX_RUNTIME_STATE_STRING = 4096;
@@ -103,18 +104,6 @@ function hasOwnKeys(value: Record<string, unknown>, keys: readonly string[]): bo
 function boundedString(value: unknown, max = MAX_RUNTIME_STATE_STRING): RuntimeStateParseFailure | undefined {
   if (typeof value !== "string" || value.length === 0) return "malformed";
   return value.length > max ? "string_too_long" : undefined;
-}
-
-function positiveInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
-}
-
-function nonNegativeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function enumValue<T extends string>(value: unknown, values: readonly T[]): value is T {
-  return typeof value === "string" && (values as readonly string[]).includes(value);
 }
 
 function validateActivity(value: unknown): RuntimeStateParseFailure | undefined {

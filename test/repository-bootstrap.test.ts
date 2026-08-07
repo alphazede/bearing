@@ -49,7 +49,7 @@ async function writeManifest(root: string, body: unknown): Promise<void> {
 describe("RepositoryBootstrap", () => {
   it("atomically initializes and resumes a repository manifest", async () => {
     const root = await tempRepo();
-    await writeFile(join(root, ".gitignore"), ".bearing/\n");
+    await writeFile(join(root, ".gitignore"), ".bearing/\nbearing-*/\n");
     const repositoryPath = await realpath(root);
     const bootstrap = new RepositoryBootstrap();
 
@@ -88,6 +88,29 @@ describe("RepositoryBootstrap", () => {
       ok: true,
       status: "initialized",
       gitignoreMissing: false,
+    });
+  });
+
+  it("blocks a top-level bearing-* directory that is not a Bearing workspace, before writing state", async () => {
+    const root = await tempRepo();
+    // An owner-owned directory that only looks like a visible per-plan workspace: no runs/,
+    // no manifest. Once Bearing ignores `bearing-*/` and enumerates these names it would be
+    // misreported as a plan workspace, so choose() fails closed with a typed reason.
+    await mkdir(join(root, "bearing-notes"));
+    await writeFile(join(root, "bearing-notes", "scratch.txt"), "x");
+
+    expect(await new RepositoryBootstrap().choose(root)).toEqual({
+      ok: false,
+      reason: "visible_workspace_placeholder",
+    });
+    await expect(lstat(join(root, ".bearing"))).rejects.toMatchObject({ code: "ENOENT" });
+
+    // A real workspace directory (contains runs/) is not a placeholder.
+    const workspaced = await tempRepo();
+    await mkdir(join(workspaced, "bearing-real", "runs"), { recursive: true });
+    expect(await new RepositoryBootstrap().choose(workspaced)).toMatchObject({
+      ok: true,
+      status: "initialized",
     });
   });
 
@@ -143,7 +166,7 @@ describe("RepositoryBootstrap", () => {
 
   it("accepts a git worktree marker file and resumes it normally", async () => {
     const primary = await tempRepo();
-    await writeFile(join(primary, ".gitignore"), ".bearing/\n");
+    await writeFile(join(primary, ".gitignore"), ".bearing/\nbearing-*/\n");
     await execFileAsync("git", ["-C", primary, "add", ".gitignore"]);
     await execFileAsync("git", [
       "-C", primary,
@@ -181,15 +204,21 @@ describe("RepositoryBootstrap", () => {
     })).toEqual({ ok: true, status: "resumed", repositoryPath });
   });
 
-  it("reports whether an existing gitignore lacks the .bearing rule on first init", async () => {
+  it("reports whether an existing gitignore covers both Bearing state locations on first init", async () => {
     const missingRuleRoot = await tempRepo();
     await writeFile(join(missingRuleRoot, ".gitignore"), "dist/\n");
     expect(await new RepositoryBootstrap().choose(missingRuleRoot, {
       agentExecutableRealpaths: [],
     })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: true });
 
+    const partiallyIgnoredRoot = await tempRepo();
+    await writeFile(join(partiallyIgnoredRoot, ".gitignore"), ".bearing/\n");
+    expect(await new RepositoryBootstrap().choose(partiallyIgnoredRoot, {
+      agentExecutableRealpaths: [],
+    })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: true });
+
     const ignoredRoot = await tempRepo();
-    await writeFile(join(ignoredRoot, ".gitignore"), ".bearing/\n");
+    await writeFile(join(ignoredRoot, ".gitignore"), ".bearing/\nbearing-*/\n");
     expect(await new RepositoryBootstrap().choose(ignoredRoot, {
       agentExecutableRealpaths: [],
     })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: false });
@@ -219,16 +248,26 @@ describe("RepositoryBootstrap", () => {
     })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: true, gitignoreAbsent: false });
   });
 
-  it("accepts every literal .bearing ignore spelling and rejects unrelated lines", async () => {
+  it("accepts every literal Bearing ignore spelling and rejects unrelated lines", async () => {
     for (const line of [".bearing", ".bearing/", "/.bearing", "/.bearing/"]) {
       const root = await tempRepo();
-      await writeFile(join(root, ".gitignore"), `dist/\n${line}\n`);
+      await writeFile(join(root, ".gitignore"), `dist/\n${line}\nbearing-*/\n`);
       expect(await new RepositoryBootstrap().choose(root, {
         agentExecutableRealpaths: [],
       })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: false });
     }
 
     for (const line of [".bearings", "bearing/", "#.bearing", ".bearing/runs"]) {
+      const root = await tempRepo();
+      await writeFile(join(root, ".gitignore"), `dist/\n${line}\n`);
+      expect(await new RepositoryBootstrap().choose(root, {
+        agentExecutableRealpaths: [],
+      })).toMatchObject({ ok: true, status: "initialized", gitignoreMissing: true });
+    }
+
+    // The visible workspace rule is its own set: any .bearing spelling alone never
+    // covers the visible bearing-<plan>/ workspaces.
+    for (const line of ["bearing-*", "bearing-*/", "/bearing-*", "/bearing-*/"]) {
       const root = await tempRepo();
       await writeFile(join(root, ".gitignore"), `dist/\n${line}\n`);
       expect(await new RepositoryBootstrap().choose(root, {
