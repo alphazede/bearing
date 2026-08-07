@@ -225,6 +225,13 @@ agent CLI and provider account you point it at remain yours to supply. Full
 detail, including the native platform testing still outstanding, is in
 [repository layout and platform](guide/repository-layout.md).
 
+## Contributing
+
+Issues are the most useful contribution right now. [CONTRIBUTING.md](CONTRIBUTING.md)
+explains how this repository relates to the one Bearing is developed in, and why
+that changes what happens to a pull request. Everyone taking part is covered by
+the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Security
 
 Bearing fail-closed revalidates workspace root path identity and containment

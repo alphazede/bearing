@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a change to what Bearing does.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        State the problem before the solution. Bearing is deliberately bounded: local, single user, no telemetry, no hosted service, and no agent that certifies its own work.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does Bearing get in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Workarounds you already use, and why they are not enough.

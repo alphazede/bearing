@@ -1,0 +1,58 @@
+name: Bug report
+description: Something in Bearing behaved incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report a security problem here. Use the [private vulnerability reporting form](https://github.com/alphazede/bearing/security/advisories/new) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what Bearing did instead of what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: receipt
+    attributes:
+      label: Receipt or error code
+      description: Paste the receipt, error code, or console output. This usually tells us more than a description does.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Bearing version
+      placeholder: "0.1.7"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - npm install --global
+        - npx
+        - Codex plugin
+        - Claude Code plugin
+        - Source checkout
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and Node version
+      placeholder: "Ubuntu 24.04, Node 22.19"
+    validations:
+      required: true
+  - type: input
+    id: harness
+    attributes:
+      label: Selected harness
+      description: The provider route you chose, if the problem happened during a run.
+      placeholder: "Codex, Claude, Grok, Agy, Pi"
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Use synthetic data. Never paste credentials, capability URLs, or private repository contents.
