@@ -44,7 +44,7 @@ describe("reasoning provider mapping", () => {
   });
 
   it("documents reachable abstract and legacy CLI reasoning values", () => {
-    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+    const readme = readFileSync(new URL("../guide/execution-modes.md", import.meta.url), "utf8");
 
     expect(readme).toContain("`--reasoning very-high` is accepted directly");
     expect(readme).toContain("`--reasoning ultra --provider codex` is accepted as a legacy alias and normalizes to abstract `max`");

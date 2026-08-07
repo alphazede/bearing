@@ -1,6 +1,6 @@
 {
   "name": "@alphazede/bearing",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Harness-agnostic orchestration for AI coding agents: approved plans, DAG-scheduled routes, bounded execution, and reviewable evidence.",
   "keywords": [
     "ai-agents",
@@ -42,6 +42,7 @@
     "hooks/",
     "examples/fictional-b2b/",
     "skills/",
+    "guide/",
     "README.md",
     "SECURITY.md",
     "LICENSE-APACHE"
@@ -69,7 +70,8 @@
   },
   "pnpm": {
     "overrides": {
-      "postcss": ">=8.5.23"
+      "postcss": ">=8.5.23",
+      "nanoid": "^3.3.18"
     }
   }
 }

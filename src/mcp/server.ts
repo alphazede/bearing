@@ -53,7 +53,7 @@ export interface JsonRpcResponse {
 /** Newest first. A request that names anything else is refused, not guessed. */
 export const MCP_PROTOCOL_VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18"] as const;
 
-const SERVER_INFO = { name: "bearing", version: "0.1.6" } as const;
+const SERVER_INFO = { name: "bearing", version: "0.1.7" } as const;
 /** Modern per-request and per-result metadata keys. Legacy carries neither. */
 const PROTOCOL_VERSION_META = "io.modelcontextprotocol/protocolVersion";
 const SERVER_INFO_META = "io.modelcontextprotocol/serverInfo";

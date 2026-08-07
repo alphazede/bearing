@@ -21,10 +21,10 @@ describe("Bearing plugin contract", () => {
       author: { name: "William Rumph / AlphaZede" },
       interface: { developerName: "William Rumph / AlphaZede" },
     });
-    expect(codexManifest.version).toBe("0.1.6");
+    expect(codexManifest.version).toBe("0.1.7");
     expect(claudeManifest).toMatchObject({
       name: "bearing",
-      version: "0.1.6",
+      version: "0.1.7",
       skills: "./plugin-skills/",
       hooks: "./hooks/claude-codex-hooks.json",
       author: { name: "William Rumph / AlphaZede" },
@@ -34,7 +34,7 @@ describe("Bearing plugin contract", () => {
       plugins: [{ name: "bearing", source: "./" }],
     });
     const packageJson = JSON.parse(await read("../package.json"));
-    expect(packageJson.version).toBe("0.1.6");
+    expect(packageJson.version).toBe("0.1.7");
     expect(codexManifest.version).toBe(packageJson.version);
     expect(claudeManifest.version).toBe(packageJson.version);
     expect(packageJson.author).toBe("William Rumph / AlphaZede");
@@ -42,6 +42,11 @@ describe("Bearing plugin contract", () => {
     expect(packageJson.files).toEqual(expect.arrayContaining([
       ".mcp.json", ".claude-plugin/", ".codex-plugin/", "plugin-skills/", "skills/", "hooks/", "SECURITY.md", "LICENSE-APACHE",
     ]));
+    // Guides live in guide/, never docs/. docs/ is gitignored because Bearing
+    // writes private plans there, so packaging it would publish another
+    // repository's planning artifacts.
+    expect(packageJson.files).toContain("guide/");
+    expect(packageJson.files).not.toContain("docs/");
     expect(codexManifest.license).toBe(packageJson.license);
     expect(claudeManifest.license).toBe(packageJson.license);
     expect(packageJson.files).not.toContain("commands/");
@@ -181,6 +186,20 @@ describe("Bearing plugin contract", () => {
     await expect(read("../dist/cli.js")).resolves.toContain("#!/usr/bin/env node");
   });
 
+  it("keeps every packaged guide reachable from the README", async () => {
+    const repository = new URL("..", import.meta.url);
+    const readme = await read("../README.md");
+    const { stdout } = await exec("git", ["ls-files", "guide/*.md"], { cwd: repository });
+    const guides = stdout.split("\n").filter(Boolean);
+    expect(guides.length).toBeGreaterThan(0);
+    // Every guide is linked, so splitting the README cannot orphan a page.
+    for (const guide of guides) expect(readme).toContain(`(${guide})`);
+    // And every relative link resolves, so a moved page fails here, not for a reader.
+    const links = [...readme.matchAll(/]\((?!https?:|#)([^)]+)\)/g)].map((m) => m[1]!.split("#")[0]!);
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) await expect(read(`../${link}`)).resolves.toBeTruthy();
+  });
+
   it("documents both plugin entry points and packaged skill customization", async () => {
     const readme = await read("../README.md");
     const readmeProse = prose(readme);
@@ -190,14 +209,16 @@ describe("Bearing plugin contract", () => {
     expect(readme).toContain("/plugin install bearing@bearing");
     expect(readmeProse).toContain("Invoke `/bearing` or ask Claude to use Bearing");
     expect(readmeProse).toContain("public npm package is `@alphazede/bearing`");
-    expect(readmeProse).toContain("reads the relevant packaged `SKILL.md` files and embeds them");
-    expect(readmeProse).toContain("do not need AlphaZede's private skill installation");
-    expect(readmeProse).toContain("guarded Explorer, Navigator, and Crewmate wrappers");
-    expect(readmeProse).toContain("The internal skills disable user and model invocation");
-    expect(readmeProse).toContain("The hook is optional");
-    expect(readmeProse).toContain("one-use loopback guard process");
-    expect(readmeProse).toContain("security boundaries, artifact validation, approval checks, and deterministic `review.html` generation");
     expect(readmeProse).toContain("not launch on SessionStart");
+    // Skill and Focus detail lives in its own packaged guide, not the README.
+    const focus = prose(await read("../guide/focus-mode.md"));
+    expect(focus).toContain("reads the relevant packaged `SKILL.md` files and embeds them");
+    expect(focus).toContain("do not need AlphaZede's private skill installation");
+    expect(focus).toContain("guarded Explorer, Navigator, and Crewmate wrappers");
+    expect(focus).toContain("The internal skills disable user and model invocation");
+    expect(focus).toContain("The hook is optional");
+    expect(focus).toContain("one-use loopback guard process");
+    expect(focus).toContain("security boundaries, artifact validation, approval checks, and deterministic `review.html` generation");
     expect(readmeProse).toContain("When the request does not name a mode");
     expect(readmeProse).toContain("guided workflow in the current conversation, open the browser UI, or use the headless CLI");
     expect(readmeProse).toContain("best-effort opens the browser automatically");
@@ -207,8 +228,8 @@ describe("Bearing plugin contract", () => {
   });
 
   it("keeps the installed headless journey grammar aligned with its stable receipt boundary", async () => {
-    const rawReadme = await read("../README.md");
-    const rawHeadlessJourney = rawReadme.split("## Headless journey", 2)[1]!.split("## Real browser journey", 1)[0]!;
+    // The headless journey is its own packaged guide; the whole page is the section.
+    const rawHeadlessJourney = await read("../guide/cli.md");
     const readme = prose(rawHeadlessJourney);
     const rawSkill = await read("../plugin-skills/bearing/SKILL.md");
     expect(rawSkill).toContain("## Guided workflow");

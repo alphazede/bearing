@@ -144,7 +144,7 @@ describe("NodePickerProcessRunner", () => {
 });
 
 describe("resolveBearingCli (version- and provenance-aware)", () => {
-  it("selects bundled (0.1.6) over older PATH executable (0.1.5) with runtime_version_mismatch and reports both", async () => {
+  it("selects bundled (0.1.7) over older PATH executable (0.1.5) with runtime_version_mismatch and reports both", async () => {
     // create older PATH candidate fixture with matching layout <root>/package.json + <root>/dist/cli.js
     const olderRoot = await root("bearing-older-pkg-");
     await writeFile(join(olderRoot, "package.json"), `${JSON.stringify({ name: "@alphazede/bearing", version: "0.1.5" })}\n`);
@@ -160,8 +160,8 @@ describe("resolveBearingCli (version- and provenance-aware)", () => {
       const res = resolveBearingCli();
       expect(res.source).toBe("bundled");
       expect(res.reason).toBe("runtime_version_mismatch");
-      expect(res.version).toBe("0.1.6");
-      expect(res.bundled).toEqual({ path: expect.any(String), version: "0.1.6" });
+      expect(res.version).toBe("0.1.7");
+      expect(res.bundled).toEqual({ path: expect.any(String), version: "0.1.7" });
       expect(res.pathCandidate).toEqual({ path: expect.any(String), version: "0.1.5" });
       // effective uses bundled
       expect(res.path).toBe(res.bundled.path);
@@ -190,7 +190,7 @@ describe("resolveBearingCli (version- and provenance-aware)", () => {
       expect(res.reason).toMatch(/preferred|path/);
       expect(res.path).toBe(compatCli);
       expect(res.pathCandidate?.version).toBe("0.1.7");
-      expect(res.bundled.version).toBe("0.1.6");
+      expect(res.bundled.version).toBe("0.1.7");
     } finally {
       process.env.PATH = savedPath;
     }
