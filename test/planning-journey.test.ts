@@ -912,7 +912,10 @@ describe("JourneyService", () => {
     expect(first).toHaveLength(20);
     expect(first.map((entry) => entry.sequence)).toEqual(Array.from({ length: 20 }, (_, index) => index + 5));
     expect(first.every((entry) => !Number.isNaN(Date.parse(entry.recordedAt)))).toBe(true);
-    expect(JSON.stringify(first)).not.toMatch(/sk-abcdefgh|private|source|900|999/);
+    // Scan every projected field except the server clock. `recordedAt` is checked
+    // above, and a millisecond of .900 or .999 would otherwise match this pattern
+    // and fail the run on timing alone.
+    expect(JSON.stringify(first.map(({ recordedAt, ...projected }) => projected))).not.toMatch(/sk-abcdefgh|private|source|900|999/);
     expect(first.at(-1)).toMatchObject({ kind: "turn.completed" });
 
     expect((await service.execute({ ...input, stage: "review" })).status).toBe("action");
