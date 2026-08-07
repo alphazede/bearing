@@ -50,6 +50,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Check committed dist freshness
+        run: node scripts/check-dist-freshness.mjs
+
       - name: Native synthetic evaluation
         run: pnpm eval:native
 

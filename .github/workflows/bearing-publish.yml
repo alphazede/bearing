@@ -114,6 +114,7 @@ jobs:
       - name: Verify release
         run: |
           pnpm typecheck
+          pnpm typecheck:test
           pnpm test
           pnpm test:integration
           pnpm build

@@ -88,11 +88,21 @@ this repo and `alphazede/bearing`, which also tracks `dist/`.
    and resolve every review conversation. These are CodeQL default-setup job
    names; a stale required context that never reports blocks the merge with all
    checks green.
-6. Merge the pull request into public `main` with a merge commit, preserving its
-   individual commits. Do not squash: each commit carries its own issue
-   reference and root-cause message, and that history is the release's audit
-   trail.
+6. **Rebase-merge** the pull request into public `main` (`gh pr merge --rebase`).
+   Protected `main` sets `required_linear_history`, so a merge commit is
+   rejected outright, and squash merging is disabled on the repository. Rebase
+   is the only permitted method, and it is also the one we want: each commit
+   keeps its own issue reference and root-cause message, and that history is
+   the release's audit trail.
 7. Obtain owner approval for immutable tag creation and publication.
+8. Create the tag, then **wait for the required checks to finish on the tag's
+   commit** before dispatching `bearing-publish.yml`. Pushing a tag starts a
+   fresh check run; the publish workflow verifies those checks and fails if any
+   is still `in_progress`.
+9. Dispatch `bearing-publish.yml` with the tag and the exact
+   `<package>@<version>` confirmation, then approve the `npm-publish`
+   environment gate. Publication uses trusted publishing with provenance;
+   `bootstrap_npm_token` is only for a first-ever publish.
 
 Never report a release as ready while required validation or security checks are
 failing.
