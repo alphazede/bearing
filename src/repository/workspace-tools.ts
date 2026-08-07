@@ -13,9 +13,10 @@ import {
   type RetentionPlanEntry,
   type RetentionPolicy,
 } from "../store/bearing-store.js";
-import { ignoresBearingDirectory } from "./bootstrap.js";
+import { gitignoreCoversBearingState } from "./bootstrap.js";
 import { assessRepositorySafety } from "./safety.js";
 import { assertContained, assertWorkspaceRoot, isWorkspaceRootError, pinWorkspaceRoot } from "./workspace-root.js";
+import { visibleWorkspaces } from "./workspace-location.js";
 
 const BEARING_DIR = ".bearing";
 const TEMP_PREFIX = ".bearing.tmp-";
@@ -23,14 +24,14 @@ const RUN_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const HASH_RE = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const BUSY_LEASE_FILE = "busy-lease.json";
 /** A crashed server can block maintenance for at most 30 seconds. Live servers refresh every 10 seconds. */
-export const BUSY_LEASE_TTL_MS = 30_000;
+const BUSY_LEASE_TTL_MS = 30_000;
 
-export interface GitResult {
+interface GitResult {
   readonly exitCode: number;
   readonly stdout: string;
 }
 
-export type GitRunner = (cwd: string, args: readonly string[]) => Promise<GitResult>;
+type GitRunner = (cwd: string, args: readonly string[]) => Promise<GitResult>;
 
 interface RetentionStore {
   retentionPlan(
@@ -81,10 +82,17 @@ export async function workspaceStatus(
     ownerConfirmedNonGit: false,
   });
   const bearingPath = join(repository, BEARING_DIR);
+  const planWorkspaces = await visibleWorkspaces(repository);
+  // The audit trail spans the hidden .bearing tree and every visible bearing-<plan>/ workspace;
+  // measuring only .bearing understates what Bearing writes.
+  const workspaceBytes = (await byteSize(bearingPath)) + (await Promise.all(
+    planWorkspaces.map((name) => byteSize(join(repository, name))),
+  )).reduce((total, size) => total + size, 0);
   return [
     `Resolved repository: ${repository}`,
     `Bearing workspace: ${bearingPath}`,
-    `Workspace bytes: ${await byteSize(bearingPath)} bytes`,
+    `Workspace bytes: ${workspaceBytes} bytes`,
+    `Plan workspaces: ${planWorkspaces.length === 0 ? "none" : planWorkspaces.join(", ")}`,
     ...await runBreakdown(repository),
     `Gitignore: ${await ignoresBearing(repository) ? "ignored" : "not ignored"}`,
     `Safety verdict: ${safety.ok ? "safe" : `blocked (${safety.code})`}`,
@@ -302,26 +310,42 @@ async function resolveRepository(
 
 async function runBreakdown(repository: string): Promise<readonly string[]> {
   const runsRoot = join(repository, BEARING_DIR, "runs");
-  let entries;
-  try {
-    entries = await readdir(runsRoot, { withFileTypes: true });
-  } catch (error) {
-    if (isNodeError(error, "ENOENT")) return ["Runs: 0 (settled: 0, unsettled: 0, compacted: 0)"];
-    throw error;
+  const ids = new Map<string, number>();
+  const readRuns = async (root: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.isSymbolicLink() && RUN_ID_RE.test(entry.name)) {
+        ids.set(entry.name, (ids.get(entry.name) ?? 0) + 1);
+      }
+    }
+  };
+  await readRuns(runsRoot);
+  for (const workspace of await visibleWorkspaces(repository)) {
+    await readRuns(join(repository, workspace, "runs"));
   }
   const store = new BearingStore(repository);
-  const states = await Promise.all(entries
-    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && RUN_ID_RE.test(entry.name))
-    .map(async (entry) => {
-      try {
-        return { runId: entry.name, state: await store.load(entry.name) };
-      } catch (error) {
-        if (isStoreIntegrityError(error)) {
-          return { runId: entry.name, integrityError: error.code };
-        }
-        throw error;
+  const states = await Promise.all([...ids.keys()].map(async (runId) => {
+    try {
+      const state = await store.load(runId);
+      // Repository-relative audit-trail path (visible per-plan workspace when
+      // plan-bound, legacy `.bearing` home otherwise). A concurrent relocation
+      // surfacing a run_location_conflict here fails the run the same way a
+      // load failure does.
+      const homePath = await store.runWorkspacePath(runId) ?? [BEARING_DIR, "runs", runId].join("/");
+      return { runId, state, homePath };
+    } catch (error) {
+      if (isStoreIntegrityError(error)) {
+        return { runId, integrityError: error.code };
       }
-    }));
+      throw error;
+    }
+  }));
   let settled = 0;
   let unsettled = 0;
   let compacted = 0;
@@ -338,13 +362,21 @@ async function runBreakdown(repository: string): Promise<readonly string[]> {
       state.journeyCheckpoint.status === "complete") settled += 1;
     else unsettled += 1;
   }
+  const stateLines = states
+    .filter((entry) => entry.state !== undefined)
+    .map((entry) => `Run state: ${entry.runId} at ${entry.homePath}`)
+    .sort();
   if (unreadableRuns.length === 0) {
-    return [`Runs: ${states.length} (settled: ${settled}, unsettled: ${unsettled}, compacted: ${compacted})`];
+    return [
+      `Runs: ${states.length} (settled: ${settled}, unsettled: ${unsettled}, compacted: ${compacted})`,
+      ...stateLines,
+    ];
   }
   unreadableRuns.sort((a, b) => a.runId.localeCompare(b.runId));
   return [
     `Runs: ${states.length} (settled: ${settled}, unsettled: ${unsettled}, compacted: ${compacted}, unreadable: ${unreadableRuns.length})`,
     `Unreadable runs: ${unreadableRuns.map((entry) => `${entry.runId} (${entry.integrityError})`).join(", ")}`,
+    ...stateLines,
   ];
 }
 
@@ -555,7 +587,9 @@ async function byteSize(path: string): Promise<number> {
 }
 
 // Bootstrap owns the single authoritative `.bearing` ignore rule set; status must
-// never contradict it with a narrower list of its own.
+// never contradict it with a narrower list of its own. Both the hidden `.bearing`
+// and the visible `bearing-<plan>/` workspaces must be ignored before Bearing
+// reports the repository as safe to commit.
 async function ignoresBearing(repository: string): Promise<boolean> {
   const path = join(repository, ".gitignore");
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -570,7 +604,7 @@ async function ignoresBearing(repository: string): Promise<boolean> {
       || opened.dev !== linked.dev
       || opened.ino !== linked.ino
     ) return false;
-    return ignoresBearingDirectory(await handle.readFile("utf8"));
+    return gitignoreCoversBearingState(await handle.readFile("utf8"));
   } catch (error) {
     if (isNodeError(error, "ENOENT") || isNodeError(error, "ELOOP")) return false;
     throw error;

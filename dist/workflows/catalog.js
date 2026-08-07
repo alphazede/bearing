@@ -1,4 +1,4 @@
-export const FICTIONAL_B2B_ROOT = "examples/fictional-b2b";
+const FICTIONAL_B2B_ROOT = "examples/fictional-b2b";
 const safety = {
     deterministic: true,
     providers: "disabled",

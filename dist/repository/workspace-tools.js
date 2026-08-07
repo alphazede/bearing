@@ -6,16 +6,17 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 import { BearingStore, isCompactedRunState, isStoreIntegrityError, } from "../store/bearing-store.js";
-import { ignoresBearingDirectory } from "./bootstrap.js";
+import { gitignoreCoversBearingState } from "./bootstrap.js";
 import { assessRepositorySafety } from "./safety.js";
 import { assertContained, assertWorkspaceRoot, isWorkspaceRootError, pinWorkspaceRoot } from "./workspace-root.js";
+import { visibleWorkspaces } from "./workspace-location.js";
 const BEARING_DIR = ".bearing";
 const TEMP_PREFIX = ".bearing.tmp-";
 const RUN_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const HASH_RE = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const BUSY_LEASE_FILE = "busy-lease.json";
 /** A crashed server can block maintenance for at most 30 seconds. Live servers refresh every 10 seconds. */
-export const BUSY_LEASE_TTL_MS = 30_000;
+const BUSY_LEASE_TTL_MS = 30_000;
 export async function workspaceStatus(requestedRepository, deps = {}) {
     const repository = await resolveRepository(requestedRepository, deps);
     const isGit = await isGitRoot(repository);
@@ -26,10 +27,15 @@ export async function workspaceStatus(requestedRepository, deps = {}) {
         ownerConfirmedNonGit: false,
     });
     const bearingPath = join(repository, BEARING_DIR);
+    const planWorkspaces = await visibleWorkspaces(repository);
+    // The audit trail spans the hidden .bearing tree and every visible bearing-<plan>/ workspace;
+    // measuring only .bearing understates what Bearing writes.
+    const workspaceBytes = (await byteSize(bearingPath)) + (await Promise.all(planWorkspaces.map((name) => byteSize(join(repository, name))))).reduce((total, size) => total + size, 0);
     return [
         `Resolved repository: ${repository}`,
         `Bearing workspace: ${bearingPath}`,
-        `Workspace bytes: ${await byteSize(bearingPath)} bytes`,
+        `Workspace bytes: ${workspaceBytes} bytes`,
+        `Plan workspaces: ${planWorkspaces.length === 0 ? "none" : planWorkspaces.join(", ")}`,
         ...await runBreakdown(repository),
         `Gitignore: ${await ignoresBearing(repository) ? "ignored" : "not ignored"}`,
         `Safety verdict: ${safety.ok ? "safe" : `blocked (${safety.code})`}`,
@@ -217,25 +223,41 @@ async function resolveRepository(requestedRepository, deps) {
 }
 async function runBreakdown(repository) {
     const runsRoot = join(repository, BEARING_DIR, "runs");
-    let entries;
-    try {
-        entries = await readdir(runsRoot, { withFileTypes: true });
-    }
-    catch (error) {
-        if (isNodeError(error, "ENOENT"))
-            return ["Runs: 0 (settled: 0, unsettled: 0, compacted: 0)"];
-        throw error;
+    const ids = new Map();
+    const readRuns = async (root) => {
+        let entries;
+        try {
+            entries = await readdir(root, { withFileTypes: true });
+        }
+        catch (error) {
+            if (isNodeError(error, "ENOENT"))
+                return;
+            throw error;
+        }
+        for (const entry of entries) {
+            if (entry.isDirectory() && !entry.isSymbolicLink() && RUN_ID_RE.test(entry.name)) {
+                ids.set(entry.name, (ids.get(entry.name) ?? 0) + 1);
+            }
+        }
+    };
+    await readRuns(runsRoot);
+    for (const workspace of await visibleWorkspaces(repository)) {
+        await readRuns(join(repository, workspace, "runs"));
     }
     const store = new BearingStore(repository);
-    const states = await Promise.all(entries
-        .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && RUN_ID_RE.test(entry.name))
-        .map(async (entry) => {
+    const states = await Promise.all([...ids.keys()].map(async (runId) => {
         try {
-            return { runId: entry.name, state: await store.load(entry.name) };
+            const state = await store.load(runId);
+            // Repository-relative audit-trail path (visible per-plan workspace when
+            // plan-bound, legacy `.bearing` home otherwise). A concurrent relocation
+            // surfacing a run_location_conflict here fails the run the same way a
+            // load failure does.
+            const homePath = await store.runWorkspacePath(runId) ?? [BEARING_DIR, "runs", runId].join("/");
+            return { runId, state, homePath };
         }
         catch (error) {
             if (isStoreIntegrityError(error)) {
-                return { runId: entry.name, integrityError: error.code };
+                return { runId, integrityError: error.code };
             }
             throw error;
         }
@@ -259,13 +281,21 @@ async function runBreakdown(repository) {
         else
             unsettled += 1;
     }
+    const stateLines = states
+        .filter((entry) => entry.state !== undefined)
+        .map((entry) => `Run state: ${entry.runId} at ${entry.homePath}`)
+        .sort();
     if (unreadableRuns.length === 0) {
-        return [`Runs: ${states.length} (settled: ${settled}, unsettled: ${unsettled}, compacted: ${compacted})`];
+        return [
+            `Runs: ${states.length} (settled: ${settled}, unsettled: ${unsettled}, compacted: ${compacted})`,
+            ...stateLines,
+        ];
     }
     unreadableRuns.sort((a, b) => a.runId.localeCompare(b.runId));
     return [
         `Runs: ${states.length} (settled: ${settled}, unsettled: ${unsettled}, compacted: ${compacted}, unreadable: ${unreadableRuns.length})`,
         `Unreadable runs: ${unreadableRuns.map((entry) => `${entry.runId} (${entry.integrityError})`).join(", ")}`,
+        ...stateLines,
     ];
 }
 async function liveCallerCleanlinessProof(repository, deps) {
@@ -480,7 +510,9 @@ async function byteSize(path) {
     return sizes.reduce((total, size) => total + size, 0);
 }
 // Bootstrap owns the single authoritative `.bearing` ignore rule set; status must
-// never contradict it with a narrower list of its own.
+// never contradict it with a narrower list of its own. Both the hidden `.bearing`
+// and the visible `bearing-<plan>/` workspaces must be ignored before Bearing
+// reports the repository as safe to commit.
 async function ignoresBearing(repository) {
     const path = join(repository, ".gitignore");
     let handle;
@@ -494,7 +526,7 @@ async function ignoresBearing(repository) {
             || opened.dev !== linked.dev
             || opened.ino !== linked.ino)
             return false;
-        return ignoresBearingDirectory(await handle.readFile("utf8"));
+        return gitignoreCoversBearingState(await handle.readFile("utf8"));
     }
     catch (error) {
         if (isNodeError(error, "ENOENT") || isNodeError(error, "ELOOP"))

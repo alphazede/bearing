@@ -305,14 +305,168 @@ export function parseRoleRoutesSection(planSpec) {
     }
     return roleRoutesShape(candidates) ? candidates : undefined;
 }
+// ==== Issue 83: durable owner decisions ====
+/** The one artifact a Gather Supplies owner decision affects; the stage writes only plan-spec.md. */
+export const OWNER_DECISION_ARTIFACT = "plan-spec.md";
+/**
+ * Volatile labeled parts of a Gather Supplies question. The gather-supplies
+ * skill mandates the explicit ask FIRST, then the labeled details
+ * Recommendation, Evidence, Options, Affected section, and Safe default.
+ * Options and safe defaults may change between runs without the decision
+ * changing, so the canonical question identity is the ask BEFORE the first
+ * label; a question without any label is its own identity verbatim.
+ */
+const OWNER_QUESTION_LABELS = /\*\*(?:Recommendation|Evidence|Options|Affected section|Safe default):?\*\*/g;
+/** Marker Bearing places at the end of a composed amendment; stripped before fingerprinting so the amendment's identity is the changed question's ask. */
+const AMENDMENT_CONTEXT_MARKER = "[Amendment context";
+function stripAmendmentContext(question) {
+    const index = question.indexOf(AMENDMENT_CONTEXT_MARKER);
+    return index < 0 ? question : question.slice(0, index).trimEnd();
+}
+function normalizedStem(value) {
+    return value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
+}
+/**
+ * The canonical question ask: the text before the first known label, with any
+ * Bearing amendment context removed. Everything after the ask is volatile
+ * detail (recommendation, evidence, options, section, safe default) and is
+ * excluded, so a re-ask with changed forced options keeps the same identity.
+ * Falls back to the full question when nothing precedes the labels, so a
+ * legacy free-form question is its own stable identity.
+ */
+export function ownerDecisionStem(question) {
+    const stripped = stripAmendmentContext(question);
+    const ask = beforeFirstLabel(stripped).trim();
+    return normalizedStem(ask || stripped);
+}
+function beforeFirstLabel(question) {
+    OWNER_QUESTION_LABELS.lastIndex = 0;
+    const match = OWNER_QUESTION_LABELS.exec(question);
+    return match === null ? question : question.slice(0, match.index);
+}
+function sectionValue(value) {
+    const trimmed = value?.trim().replace(/\.+$/, "");
+    return trimmed || undefined;
+}
+/** The plan-spec section a decision affects, when the question names one; the Role routes question is server-authored and affects the "Role routes" section. */
+export function ownerDecisionSection(question) {
+    if (question === ROLE_ROUTES_QUESTION)
+        return ROLE_ROUTES_HEADING;
+    const match = /\*\*Affected section:?\*\*[ \t]*([^\r\n*]+)/i.exec(stripAmendmentContext(question));
+    return sectionValue(match?.[1]);
+}
+/**
+ * Canonical decision identity: the ask, the affected section when named, and
+ * the recommendation and evidence that carry the decision's substance. Options
+ * and safe defaults are volatile — they may change between runs without the
+ * decision changing — but a changed recommendation or evidence means a
+ * different decision was asked, so exact reuse must not conflate the two.
+ */
+export function ownerDecisionFingerprint(question) {
+    const section = ownerDecisionSection(question);
+    const recommendation = labeledValue(question, "Recommendation");
+    const evidence = labeledValue(question, "Evidence");
+    const ask = section === undefined ? ownerDecisionStem(question) : `${ownerDecisionStem(question)}|${normalizedStem(section)}`;
+    return `${ask}|${recommendation === undefined ? "" : normalizedStem(recommendation)}|${evidence === undefined ? "" : normalizedStem(evidence)}`;
+}
+export function deriveOwnerDecisions(priorOwnerQa) {
+    return priorOwnerQa.map((entry, revision) => {
+        const affectedSection = ownerDecisionSection(entry.question);
+        const fingerprint = ownerDecisionFingerprint(entry.question);
+        return {
+            decisionId: `decision-${createHash("sha256").update(fingerprint).digest("hex").slice(0, 16)}`,
+            fingerprint,
+            stem: ownerDecisionStem(entry.question),
+            question: entry.question,
+            answer: entry.answer,
+            artifact: OWNER_DECISION_ARTIFACT,
+            affectedSection,
+            revision,
+        };
+    });
+}
+function labeledValue(question, label) {
+    const match = new RegExp(`\\*\\*${label}:?\\*\\*[ \\t]*([^\\r\\n*]+)`, "i").exec(question);
+    const value = match?.[1]?.trim().replace(/\.+$/, "");
+    return value || undefined;
+}
+function boundedDecisionText(value, max) {
+    return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+/**
+ * Composes the explicit amendment for a question that changed substance in a
+ * decision area with a recorded decision: the changed question in full, then a
+ * context block naming the prior decision, its accepted answer, and the
+ * changed options. The whole text must stay within the 4096-character owner
+ * Q&A bound so a later run's request still validates; when the changed
+ * question alone leaves no room for context, the question degrades to a plain
+ * ask — the recorded decision is never overwritten either way.
+ */
+function composeAmendment(prior, candidate) {
+    const sectionPhrase = prior.affectedSection === undefined
+        ? ""
+        : ` for the plan-spec "${boundedDecisionText(prior.affectedSection, 60)}" section`;
+    const sectionSentence = sectionPhrase ? `The question${sectionPhrase} changed.` : "The question for this decision changed.";
+    const priorOptions = labeledValue(prior.question, "Options");
+    const candidateOptions = labeledValue(candidate, "Options");
+    const changedOptions = priorOptions !== undefined && candidateOptions !== undefined && priorOptions !== candidateOptions
+        ? ` Options changed to: ${boundedDecisionText(candidateOptions, 160)} (was: ${boundedDecisionText(priorOptions, 160)}).`
+        : "";
+    const template = (questionSlot, answerSlot) => `[Amendment context — prior decision ${prior.decisionId}: "${questionSlot}" — accepted answer: "${answerSlot}". ${sectionSentence}${changedOptions} The prior answer stands until you amend it explicitly; a safe default is never applied over it.]`;
+    const overhead = candidate.length + 2 + template("", "").length;
+    if (overhead + 32 > MAX_TEXT)
+        return candidate;
+    const slot = Math.min(512, Math.floor((MAX_TEXT - overhead) / 2));
+    return `${candidate}\n\n${template(boundedDecisionText(prior.question, slot), boundedDecisionText(prior.answer, slot))}`;
+}
+/**
+ * Resolves the model-returned Gather Supplies question set against the durable
+ * owner decisions (issue 83). A question whose canonical identity — ask,
+ * affected section, recommendation, and evidence — was already accepted is
+ * dropped, so the recorded answer is reused on every later run: a re-ask whose
+ * forced options exclude the accepted free-text answer can never make it
+ * unrepresentable, and a safe default is never applied over it. A question
+ * that shares only its ask or section with a recorded decision but changed
+ * substance (or asks something different in the same decision area) becomes
+ * an explicit amendment presenting the prior decision — it is never silently
+ * dropped. Anything else passes through unchanged.
+ */
+export function resolveGatherQuestions(candidates, priorOwnerQa) {
+    const decisions = deriveOwnerDecisions(priorOwnerQa);
+    const byFingerprint = new Map();
+    const byStem = new Map();
+    const bySection = new Map();
+    for (const decision of decisions) {
+        byFingerprint.set(decision.fingerprint, decision);
+        byStem.set(decision.stem, decision);
+        if (decision.affectedSection !== undefined)
+            bySection.set(normalizedStem(decision.affectedSection), decision);
+    }
+    const resolved = [];
+    for (const candidate of candidates) {
+        if (byFingerprint.has(ownerDecisionFingerprint(candidate)))
+            continue;
+        const stem = ownerDecisionStem(candidate);
+        const section = ownerDecisionSection(candidate);
+        const prior = byStem.get(stem) ?? (section === undefined ? undefined : bySection.get(normalizedStem(section)));
+        resolved.push(prior === undefined ? candidate : composeAmendment(prior, candidate));
+    }
+    return resolved;
+}
+function answeredDecisionsLine(decisions) {
+    return decisions.length
+        ? `\nAnswered decisions (never re-ask; reuse the recorded answer):\n${decisions.map((decision) => `- ${decision.decisionId}: ${boundedDecisionText(decision.stem, 160)}${decision.affectedSection === undefined ? "" : ` (${decision.affectedSection})`}`).join("\n")}`
+        : "";
+}
 function prompt(request, planDirectory, skillInstructions, focus) {
     const gatheringQuestions = request.stage === "gather-supplies" && request.gatherMode === "questions";
     const availableQuestions = Math.min(MAX_GATHER_QUESTIONS, Math.max(0, MAX_QA - request.priorOwnerQa.length));
     const roleRoutesAnswered = request.priorOwnerQa.some((entry) => entry.question === ROLE_ROUTES_QUESTION);
+    const answeredDecisions = answeredDecisionsLine(deriveOwnerDecisions(request.priorOwnerQa));
     const grilling = gatheringQuestions
-        ? ` Inspect the repository once and return at most ${availableQuestions} unresolved owner questions. Ask only when the answer materially changes scope, architecture, security, authority, or acceptance. Lead each question with **Recommendation:**, then give concise evidence, 2-3 viable options with material tradeoffs, the affected plan-spec section, and the safe default if unanswered; ask the owner to select explicitly. A recommendation is advice, never approval. State safe defaults as assumptions instead of questions when no owner choice is required. Return an empty array when no material owner decision remains.${roleRoutesAnswered ? "" : ` Ask exactly this question verbatim among them: ${JSON.stringify(ROLE_ROUTES_QUESTION)} Offer only ${JSON.stringify(BUILTIN_ROUTES.map((route) => route.id))} as primary or fallback choices, plus ${JSON.stringify(SURVEYOR_FALLBACK_ROUTE)} as an additional allowed fallback for review-general and review-security only; a role may have zero fallbacks. Never ask for credentials.`}`
+        ? ` Inspect the repository once and return at most ${availableQuestions} unresolved owner questions. Ask only when the answer materially changes scope, architecture, security, authority, or acceptance. Lead each question with **Recommendation:**, then give concise evidence, 2-3 viable options with material tradeoffs, the affected plan-spec section, and the safe default if unanswered; ask the owner to select explicitly. A recommendation is advice, never approval. State safe defaults as assumptions instead of questions when no owner choice is required. Return an empty array when no material owner decision remains.${answeredDecisions} Never re-ask a decision already recorded in the Prior owner Q&A; reuse its recorded answer unchanged on every later run, including when its options or safe default changed. Bearing drops any re-asked decision and reuses the recorded answer, and presents a question changed in substance as an explicit amendment of the prior decision.${roleRoutesAnswered ? "" : ` Ask exactly this question verbatim among them: ${JSON.stringify(ROLE_ROUTES_QUESTION)} Offer only ${JSON.stringify(BUILTIN_ROUTES.map((route) => route.id))} as primary or fallback choices, plus ${JSON.stringify(SURVEYOR_FALLBACK_ROUTE)} as an additional allowed fallback for review-general and review-security only; a role may have zero fallbacks. Never ask for credentials.`}`
         : request.stage === "gather-supplies"
-            ? ` All grilling questions are answered. Apply the complete owner Q&A without asking another question; record reasonable assumptions or blockers in the plan specification. Record the owner's exact answer to ${JSON.stringify(ROLE_ROUTES_QUESTION)} as a "## Role routes" section in plan-spec.md, one line per role in this exact format: "- **execution-author** — primary: \`codex\`; fallbacks: \`claude\`" or "- **review-general** — primary: \`claude\`; fallbacks: none". Never substitute the onboarding provider or model selection for a role route the owner did not answer.`
+            ? ` All grilling questions are answered. Apply the complete owner Q&A without asking another question; record reasonable assumptions or blockers in the plan specification. A recorded owner answer always wins over any safe default from the same question; never overwrite a recorded answer with a default or an assumption. Record the owner's exact answer to ${JSON.stringify(ROLE_ROUTES_QUESTION)} as a "## Role routes" section in plan-spec.md, one line per role in this exact format: "- **execution-author** — primary: \`codex\`; fallbacks: \`claude\`" or "- **review-general** — primary: \`claude\`; fallbacks: none". Never substitute the onboarding provider or model selection for a role route the owner did not answer.`
             : " Ask one owner question only when a decision blocks honest progress.";
     const boundary = gatheringQuestions ? "Read and inspect only. Do not create or modify files during question discovery." : STAGE_BOUNDARY[request.stage];
     const reviewCadence = request.stage === "execute-explorer" || request.stage === "execute-expedition" ? ["Read the prior owner Q&A for the recorded Review cadence (each slice, each phase, or end) and enforce that cadence during execution. Use the harness-native reviewer when available and the read-only Surveyor fallback only when no native reviewer is available."] : [];
@@ -600,6 +754,70 @@ async function solePlanSlice(root, planDirectory) {
     const slices = [...parsePlanDocuments({ plan, design, seit, implementation }).slices.keys()];
     return slices.length === 1 ? slices[0] : undefined;
 }
+/**
+ * Resolve the declared prerequisite slices of a slice from the plan documents:
+ * every member of an earlier wave, plus every slice that transitively feeds it
+ * through an explicit dependency edge. Wave membership is itself a declared
+ * sequencing requirement of the plan, so an unvalidated earlier-wave slice
+ * blocks execution exactly like an explicit edge does.
+ */
+export function expeditionSlicePrerequisites(model, currentSlice) {
+    const prerequisites = new Set();
+    const sliceIds = new Set(model.slices.keys());
+    let currentWave;
+    for (const [wave, members] of model.waves) {
+        if (members.has(currentSlice)) {
+            currentWave = wave;
+            break;
+        }
+    }
+    if (currentWave !== undefined) {
+        for (const [wave, members] of model.waves) {
+            if (wave >= currentWave)
+                continue;
+            for (const member of members)
+                if (member !== currentSlice)
+                    prerequisites.add(member);
+        }
+    }
+    const pending = [currentSlice];
+    while (pending.length > 0) {
+        const dependent = pending.pop();
+        for (const [source, targets] of model.dependencies) {
+            if (!targets.has(dependent) || !sliceIds.has(source) || source === currentSlice)
+                continue;
+            if (!prerequisites.has(source)) {
+                prerequisites.add(source);
+                pending.push(source);
+            }
+        }
+    }
+    return [...prerequisites].sort();
+}
+/**
+ * Admission guard for executing a selected Expedition slice: refuse when any
+ * declared prerequisite slice has not yet been validated. The caller responds
+ * with a non-mutating refusal; `undefined` means execution may proceed (no
+ * plan directory, unreadable plan, or all prerequisites already validated).
+ */
+export async function expeditionSliceDependencyRefusal(root, planDirectory, currentSlice, completedSliceIds) {
+    if (planDirectory === undefined)
+        return undefined;
+    const names = await readdir(resolve(root, planDirectory)).catch(() => []);
+    const planName = names.find(isPlanSpecArtifactName);
+    if (!planName)
+        return undefined;
+    const contents = await Promise.all([planName, "design.md", "seit.md", "implementation.md"].map((name) => readPlanningArtifact(root, posix.join(planDirectory, name))));
+    if (!contents.every((content) => content !== undefined))
+        return undefined;
+    const [plan, design, seit, implementation] = contents;
+    const model = parsePlanDocuments({ plan, design, seit, implementation });
+    if (!model.slices.has(currentSlice))
+        return undefined;
+    const prerequisites = expeditionSlicePrerequisites(model, currentSlice);
+    const incomplete = prerequisites.filter((sliceId) => !completedSliceIds.has(sliceId));
+    return incomplete.length === 0 ? undefined : { sliceId: currentSlice, prerequisiteSlices: incomplete };
+}
 export async function currentPlanningVerdict(root, planDirectory) {
     try {
         if (!await containedPath(root, planDirectory, true))
@@ -831,31 +1049,21 @@ async function designReviewArtifacts(root, planDirectory, _repair = false, cance
         return undefined;
     const directory = resolve(root, planDirectory), names = await readdir(directory);
     const planName = names.find(isPlanSpecArtifactName);
-    const reviewName = names.find((name) => name === "review.html" || /^[A-Za-z0-9][A-Za-z0-9._-]*-route-review\.html$/.test(name)) ?? "review.html";
     if (!planName || !names.includes("design.md") || !names.includes("seit.md"))
         return undefined;
+    // Issue 86: the Map Route checkpoint validates and returns only design.md and seit.md. The
+    // deterministic review.html is generated exactly once, after implementation.md validates, by
+    // {@link planningReview} from all four Markdown sources — never here from three.
     const sourceNames = [planName, "design.md", "seit.md"];
     const sourceContents = await Promise.all(sourceNames.map((name) => readPlanningArtifact(root, posix.join(planDirectory, name))));
     if (!sourceContents.every((content) => content !== undefined))
         return undefined;
-    const [plan, design, seit] = sourceContents;
+    const design = sourceContents[1], seit = sourceContents[2];
     if (!artifactComplete(design.trim(), "design", ["Use Cases and Communication Flows", "Interface Option Check", "OOPDSA Implementation Design"]) || !artifactComplete(seit.trim(), "seit", ["Traceability Matrix", "Cross-cutting Checks"]))
         return undefined;
-    const reviewPath = posix.join(planDirectory, reviewName);
-    const sources = sourceNames.map((name, index) => [name, [plan, design, seit][index]]);
-    const completed = renderPlanningReview(sources);
-    if (Buffer.byteLength(completed) > MAX_PLANNING_ARTIFACT)
+    if (cancelled())
         return undefined;
-    const review = names.includes(reviewName) ? await readPlanningArtifact(root, reviewPath, true) : "";
-    if (review === undefined)
-        return undefined;
-    if (completed !== review) {
-        if (cancelled())
-            return undefined;
-        if (!await writePlanningReview(root, reviewPath, completed))
-            return undefined;
-    }
-    return ["design.md", "seit.md", reviewName].map((name) => posix.join(planDirectory, name));
+    return ["design.md", "seit.md"].map((name) => posix.join(planDirectory, name));
 }
 const DESIGN_CHECKPOINT_HEADINGS = ["Use Cases and Communication Flows", "Interface Option Check", "OOPDSA Implementation Design"];
 const SEIT_CHECKPOINT_HEADINGS = ["Traceability Matrix", "Cross-cutting Checks"];
@@ -955,9 +1163,9 @@ async function planningReview(root, planDirectory, selection) {
         return undefined;
     const [plan, design, seit, implementation] = contents;
     if (!artifactComplete(design.trim(), "design", ["Use Cases and Communication Flows", "Interface Option Check", "OOPDSA Implementation Design"]) || !artifactComplete(seit.trim(), "seit", ["Traceability Matrix", "Cross-cutting Checks"]))
-        return undefined;
+        return { status: "implementation_invalid" };
     if (!structurallyValidImplementation(plan, design, seit, implementation))
-        return undefined;
+        return { status: "implementation_invalid" };
     const headings = [...implementation.matchAll(/^###\s+(Slice\b[^\r\n]*)/gmi)];
     const assignments = [];
     for (let index = 0; index < headings.length; index += 1) {
@@ -966,19 +1174,21 @@ async function planningReview(root, planDirectory, selection) {
         const role = field(section, "Implementation role"), model = field(section, "Agent model route"), reasoning = field(section, "Agent reasoning level");
         const ponytail = field(section, "Ponytail mode"), reviewPath = field(section, "Review path");
         if (!role || !model || !reasoning || !reviewPath)
-            return undefined;
+            return { status: "implementation_invalid" };
         const route = planningRoute(model, selection), normalizedReasoning = reasoning.replace(/[.!?]+$/, "").trim();
         const normalizedPonytail = ponytail?.replace(/[.!?]+$/, "").trim();
         if (!route || !route.reasoningLevels.includes(normalizedReasoning.toLowerCase()) || (normalizedPonytail !== undefined && !["full", "off"].includes(normalizedPonytail)))
-            return undefined;
+            return { status: "implementation_invalid" };
         assignments.push({ slice: headings[index][1].trim(), role, model, reasoning: normalizedReasoning });
     }
     const completed = renderPlanningReview(sourceNames.map((name, index) => [name, [plan, design, seit, implementation][index]]));
     if (Buffer.byteLength(completed) > MAX_PLANNING_ARTIFACT)
-        return undefined;
+        return { status: "review_generation_failed" };
     const review = names.includes(reviewName) ? await readPlanningArtifact(root, posix.join(planDirectory, reviewName), true) : "";
-    if (review === undefined || completed !== review && !await writePlanningReview(root, posix.join(planDirectory, reviewName), completed))
-        return undefined;
+    if (review === undefined)
+        return { status: "review_generation_failed" };
+    if (completed !== review && !await writePlanningReview(root, posix.join(planDirectory, reviewName), completed))
+        return { status: "review_generation_failed" };
     const validation = orchestratePlanning({
         currentState: "EXECUTION_PLAN_READY",
         pass: "planning-validator",
@@ -987,8 +1197,9 @@ async function planningReview(root, planDirectory, selection) {
         artifacts: sourceNames.map((name) => posix.join(planDirectory, name)),
     });
     if ("refused" in validation || !validation.planningValidation)
-        return undefined;
+        return { status: "implementation_invalid" };
     return {
+        status: "ok",
         review: {
             phases: [...implementation.matchAll(/^##\s+Phase\s+(?=[A-Za-z0-9.-]*\d)[^\r\n]*$/gmi)].length,
             slices: assignments.length,
@@ -1421,7 +1632,10 @@ export class JourneyService {
             if (request.stage !== "gather-supplies" || request.gatherMode !== "questions")
                 return { status: "failure", code: "result_malformed", tokens };
             const nextStageEstimate = expectedEstimate("gather-supplies");
-            const questions = parsed.questions.filter((question) => question.toLowerCase() !== "anything else?");
+            // Issue 83: drop re-asked decisions (the recorded answer is reused) and
+            // turn changed decisions into explicit amendments before the owner sees
+            // anything; forced options can never replace an accepted free-text answer.
+            const questions = resolveGatherQuestions(parsed.questions.filter((question) => question.toLowerCase() !== "anything else?"), request.priorOwnerQa);
             return { status: "question", ...(questions[0] ? { question: questions[0] } : {}), questions, tokens, ...(nextStageEstimate ? { nextStageEstimate } : {}) };
         }
         if (parsed.kind === "question") {
@@ -1453,8 +1667,12 @@ export class JourneyService {
         const finalReviewValid = executionStage ? await executionReviewValid(repositoryPath, planDirectory).catch(() => false) : true;
         if (this.cancelled.has(request.runId))
             return { status: "failure", code: "cancelled", tokens };
-        if (request.stage === "draft-implementation" && !planned)
-            return { status: "failure", code: "artifact_invalid", tokens };
+        if (request.stage === "draft-implementation" && (planned === undefined || planned.status !== "ok")) {
+            // Issue 86: an invalid implementation stays an artifact failure, while a failure to
+            // generate or write the final review.html is reported distinctly so the owner can tell
+            // an agent-document defect from a Bearing-side review failure.
+            return { status: "failure", code: planned === undefined || planned.status === "implementation_invalid" ? "artifact_invalid" : "review_generation_failed", tokens };
+        }
         if (!finalReviewValid)
             return { status: "failure", code: "artifact_invalid", tokens };
         let verification;
@@ -1479,7 +1697,7 @@ export class JourneyService {
             artifacts,
             tokens,
             ...(parsed.kind === "recon" ? { recon: parsed.recon } : {}),
-            ...(planned ? { planningReview: planned.review, planningValidation: planned.planningValidation } : {}),
+            ...(planned && planned.status === "ok" ? { planningReview: planned.review, planningValidation: planned.planningValidation } : {}),
             ...(verification === undefined ? {} : { verification }),
             ...(nextStageEstimate ? { nextStageEstimate } : {}),
             ...(coordinatedExpedition && productAuthor && focus && mutationStart

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -38,9 +38,9 @@ describe("Bearing plugin contract", () => {
     expect(codexManifest.version).toBe(packageJson.version);
     expect(claudeManifest.version).toBe(packageJson.version);
     expect(packageJson.author).toBe("William Rumph / AlphaZede");
-    expect(packageJson.license).toBe("MIT OR Apache-2.0");
+    expect(packageJson.license).toBe("Apache-2.0");
     expect(packageJson.files).toEqual(expect.arrayContaining([
-      ".mcp.json", ".claude-plugin/", ".codex-plugin/", "plugin-skills/", "skills/", "hooks/", "SECURITY.md", "LICENSE-MIT", "LICENSE-APACHE",
+      ".mcp.json", ".claude-plugin/", ".codex-plugin/", "plugin-skills/", "skills/", "hooks/", "SECURITY.md", "LICENSE-APACHE",
     ]));
     expect(codexManifest.license).toBe(packageJson.license);
     expect(claudeManifest.license).toBe(packageJson.license);
@@ -123,7 +123,7 @@ describe("Bearing plugin contract", () => {
       expect(skillProse).toContain("under the repository's existing `.bearing/focus/` area");
       expect(skillProse).toContain("call the `bearing_focus_begin` MCP tool with `repository` and that exact `requestPath`");
       expect(skillProse).toContain("Keep its returned `focusRunId` and envelope");
-      expect(skillProse).toContain("persist a receipt containing every changed artifact");
+      expect(skillProse).toContain("persist a receipt containing the `runtimeIdentity` value returned verbatim by `bearing_focus_begin`, every changed artifact");
       expect(skillProse).toContain("call the `bearing_focus_validate` MCP tool with `repository`, the kept `focusRunId`, and that exact `receiptPath`");
       expect(skillProse).toContain("is unavailable, return `MCP_SETUP_REQUIRED` and stop.");
       expect(skillProse).toContain("Never silently fall back to a shell command, an executable, or parsed CLI output.");
@@ -136,16 +136,42 @@ describe("Bearing plugin contract", () => {
     const crewmate = prose(await read("../plugin-skills/crewmate/SKILL.md"));
     expect(crewmate).toContain("current owner request explicitly authorizes");
     expect(crewmate).toContain("Never edit Focus state, infer external authority");
+    // The repair-lane identity exception (issue 61) must be stated wherever the
+    // verbatim-begin-identity receipt rule is taught, or the skill contradicts
+    // the guard's declared-repair-slice handling.
+    expect(crewmate).toContain("For a declared Focus-runtime repair slice, bind the receipt to the produced runtime identity of the repaired source instead of the begin value");
   });
 
-  it("keeps Focus hooks silent outside Bearing and advisory inside it", async () => {
+  it("keeps Focus hooks silent outside Bearing and advisory inside it", () => {
     const hook = fileURLToPath(new URL("../hooks/focus-reminder.cjs", import.meta.url));
-    const disabled = await exec(process.execPath, [hook, "UserPromptSubmit"], { env: { PATH: process.env.PATH ?? "" } });
+    const run = (event: string, env: NodeJS.ProcessEnv) => spawnSync(process.execPath, [hook, event], {
+      encoding: "utf8", env, input: JSON.stringify({ prompt: "" }),
+    });
+    const disabled = run("UserPromptSubmit", { PATH: process.env.PATH ?? "" });
     expect(disabled.stdout).toBe("");
-    const claude = await exec(process.execPath, [hook, "UserPromptSubmit"], { env: { PATH: process.env.PATH ?? "", BEARING_FOCUS: "1" } });
+    const claude = run("UserPromptSubmit", { PATH: process.env.PATH ?? "", BEARING_FOCUS: "1" });
     expect(claude.stdout).toContain("Bearing Focus mode is active");
-    const codex = await exec(process.execPath, [hook, "SubagentStart"], { env: { PATH: process.env.PATH ?? "", BEARING_FOCUS: "1", PLUGIN_DATA: "/tmp/bearing-hook-test" } });
+    const codex = run("SubagentStart", { PATH: process.env.PATH ?? "", BEARING_FOCUS: "1", PLUGIN_DATA: "/tmp/bearing-hook-test" });
     expect(JSON.parse(codex.stdout)).toMatchObject({ systemMessage: "BEARING:FOCUS", hookSpecificOutput: { hookEventName: "SubagentStart" } });
+  });
+
+  it("loads the main Bearing entrypoint for role requests on Codex and Claude only", () => {
+    const hook = fileURLToPath(new URL("../hooks/focus-reminder.cjs", import.meta.url));
+    const run = (prompt: string, codex: boolean) => spawnSync(process.execPath, [hook, "UserPromptSubmit"], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "", ...(codex ? { PLUGIN_DATA: "/tmp/bearing-hook-test" } : {}) },
+      input: JSON.stringify({ prompt }),
+    });
+    for (const codex of [true, false]) {
+      const matching = run("Use Bearing Navigator for this repository", codex);
+      expect(matching.status).toBe(0);
+      expect(matching.stdout).toContain("plugin-skills/bearing/SKILL.md");
+      expect(matching.stdout).toContain("guided workflow here, browser UI, or headless CLI");
+      expect(matching.stdout).toContain("grok-safe");
+      const unrelated = run("Fix the navigation spacing in this page", codex);
+      expect(unrelated.status).toBe(0);
+      expect(unrelated.stdout).toBe("");
+    }
   });
 
   it("tracks the built launcher required by fresh Git plugin installs", async () => {

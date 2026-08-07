@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { MAX_BACKGROUND_BRIEF_CHARS } from "../src/adapters/adapters.js";
 import type { ProcessInvocation, ProcessResult, ProcessRunner } from "../src/adapters/adapters.js";
-import { JourneyService, orchestratePlanning, planningCheckpointFields, reconOwnerDecisionQuestion, renderPlanningReview, ROLE_ROUTES_QUESTION, structurallyValidImplementation, type JourneyRequest, type JourneyStage } from "../src/journey/planning-journey.js";
+import { deriveOwnerDecisions, JourneyService, orchestratePlanning, planningCheckpointFields, reconOwnerDecisionQuestion, renderPlanningReview, ROLE_ROUTES_QUESTION, structurallyValidImplementation, type JourneyRequest, type JourneyStage } from "../src/journey/planning-journey.js";
 import type { PlanningState, PlanningValidationRecord } from "../src/journey/planning-state.js";
 import { parseAgentProfile, resolveRun, type ResolvedRun, type Selection } from "../src/profile/profile.js";
 
@@ -978,6 +978,141 @@ describe("JourneyService", () => {
     expect(runner.calls[0].stdin).not.toContain("Ask exactly this question verbatim");
   });
 
+  describe("issue 83: durable owner decisions", () => {
+    const storageQuestion = "Which store should the import use? **Recommendation:** Use PostgreSQL. **Evidence:** Two viable stores. **Options:** A) Postgres B) MySQL C) SQLite. **Affected section:** Data storage. **Safe default:** Postgres.";
+    const acceptedAnswer = "PostgreSQL, because the team already runs it in production";
+    const conflictingOptionsQuestion = "Which store should the import use? **Recommendation:** Use PostgreSQL. **Evidence:** Two viable stores. **Options:** A) SQLite B) MySQL C) DuckDB. **Affected section:** Data storage. **Safe default:** SQLite.";
+    const changedStorageQuestion = "Which warehouse store should we adopt? **Recommendation:** Use DuckDB for the warehouse. **Evidence:** Warehouse volumes grew. **Options:** A) DuckDB B) Snowflake C) BigQuery. **Affected section:** Data storage. **Safe default:** DuckDB.";
+    const newRegionQuestion = "Which region should we deploy to? **Recommendation:** Use us-east-1. **Evidence:** Closest to the existing fleet. **Options:** A) us-east-1 B) eu-west-1 C) ap-south-1. **Affected section:** Deployment. **Safe default:** us-east-1.";
+
+    it("reuses an accepted decision instead of re-asking it with conflicting forced options on a fresh resume", async () => {
+      const runner = new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: [conflictingOptionsQuestion] })}`));
+      const result = await new JourneyService(runner).execute(await request({
+        gatherMode: "questions",
+        priorOwnerQa: [{ question: storageQuestion, answer: acceptedAnswer }],
+      }));
+      expect(result).toEqual({ status: "question", questions: [], tokens: 5 });
+    });
+
+    it("reuses accepted decisions on a failed-run recovery and keeps only genuinely new questions", async () => {
+      const runner = new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: [conflictingOptionsQuestion, newRegionQuestion] })}`));
+      const result = await new JourneyService(runner).execute(await request({
+        gatherMode: "questions",
+        priorOwnerQa: [
+          { question: storageQuestion, answer: acceptedAnswer },
+          { question: "Which CI should we use? **Recommendation:** Use GitHub Actions. **Options:** A) GitHub Actions B) Jenkins. **Affected section:** CI. **Safe default:** GitHub Actions.", answer: "GitHub Actions, no new infrastructure" },
+        ],
+      }));
+      expect(result).toEqual({ status: "question", question: newRegionQuestion, questions: [newRegionQuestion], tokens: 5 });
+    });
+
+    it("keeps the custom free-text answer recorded even when the re-ask offers forced options that exclude it", async () => {
+      const runner = new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: [conflictingOptionsQuestion] })}`));
+      const result = await new JourneyService(runner).execute(await request({
+        gatherMode: "questions",
+        priorOwnerQa: [{ question: storageQuestion, answer: acceptedAnswer }],
+      }));
+      expect(result).toEqual({ status: "question", questions: [], tokens: 5 });
+      expect(runner.calls[0].stdin).toContain("Answered decisions");
+      expect(runner.calls[0].stdin).toMatch(/never re-ask/i);
+      expect(runner.calls[0].stdin).toContain(acceptedAnswer);
+    });
+
+    it("presents a changed question as an explicit amendment with the prior decision and a new decision ID", async () => {
+      const runner = new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: [changedStorageQuestion] })}`));
+      const result = await new JourneyService(runner).execute(await request({
+        gatherMode: "questions",
+        priorOwnerQa: [{ question: storageQuestion, answer: acceptedAnswer }],
+      }));
+      if (result.status !== "question") throw new Error(`expected a question result, got ${result.status}`);
+      const [amendment] = result.questions!;
+      expect(amendment.startsWith(changedStorageQuestion)).toBe(true);
+      expect(amendment).toContain("[Amendment context");
+      expect(amendment).toContain("prior decision");
+      expect(amendment).toContain(acceptedAnswer);
+      expect(amendment).toContain("Which warehouse store should we adopt?");
+      const original = deriveOwnerDecisions([{ question: storageQuestion, answer: acceptedAnswer }]);
+      expect(amendment).toContain(`prior decision ${original[0].decisionId}`);
+      const amended = deriveOwnerDecisions([{ question: storageQuestion, answer: acceptedAnswer }, { question: amendment, answer: "Adopt DuckDB after all" }]);
+      expect(amended[1].decisionId).not.toBe(amended[0].decisionId);
+      expect(amended[1].answer).toBe("Adopt DuckDB after all");
+    });
+
+    it("does not amend when only the option meaning changed; the recorded answer still stands", async () => {
+      const rewordedOptions = "Which store should the import use? **Recommendation:** Use PostgreSQL. **Evidence:** Two viable stores. **Options:** A) PostgreSQL 16 B) MySQL 8 C) DuckDB 1.0. **Affected section:** Data storage. **Safe default:** PostgreSQL 16.";
+      const runner = new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: [rewordedOptions] })}`));
+      const result = await new JourneyService(runner).execute(await request({
+        gatherMode: "questions",
+        priorOwnerQa: [{ question: storageQuestion, answer: acceptedAnswer }],
+      }));
+      expect(result).toEqual({ status: "question", questions: [], tokens: 5 });
+    });
+
+    it("reuses an explicit owner amendment on the next run instead of re-asking", async () => {
+      const service = new JourneyService(new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: [changedStorageQuestion] })}`)));
+      const first = await service.execute(await request({ gatherMode: "questions", priorOwnerQa: [{ question: storageQuestion, answer: acceptedAnswer }] }));
+      if (first.status !== "question") throw new Error(`expected a question result, got ${first.status}`);
+      const amendment = first.questions![0]!;
+      const second = await new JourneyService(new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: [changedStorageQuestion] })}`))).execute(await request({
+        gatherMode: "questions",
+        priorOwnerQa: [
+          { question: storageQuestion, answer: acceptedAnswer },
+          { question: amendment, answer: "Adopt DuckDB after all" },
+        ],
+      }));
+      expect(second).toEqual({ status: "question", questions: [], tokens: 5 });
+    });
+
+    it("still asks a genuinely new question that no prior decision covers", async () => {
+      const runner = new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: [newRegionQuestion] })}`));
+      const result = await new JourneyService(runner).execute(await request({
+        gatherMode: "questions",
+        priorOwnerQa: [{ question: storageQuestion, answer: acceptedAnswer }],
+      }));
+      expect(result).toEqual({ status: "question", question: newRegionQuestion, questions: [newRegionQuestion], tokens: 5 });
+    });
+
+    it("passes questions through unchanged when no decision was answered before", async () => {
+      const runner = new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: [storageQuestion, newRegionQuestion] })}`));
+      const result = await new JourneyService(runner).execute(await request({ gatherMode: "questions", priorOwnerQa: [] }));
+      expect(result).toEqual({ status: "question", question: storageQuestion, questions: [storageQuestion, newRegionQuestion], tokens: 5 });
+      expect(runner.calls[0].stdin).not.toContain("Answered decisions");
+    });
+
+    it("never silently reuses a recorded answer when only the recommendation and evidence differ", async () => {
+      const transactionalDatabase = "Which database should we use? **Recommendation:** Use Postgres for the transactional database. **Evidence:** Transactional workloads dominate. **Options:** A) Postgres B) MySQL C) SQLite. **Affected section:** Data storage. **Safe default:** Postgres.";
+      const analyticalWarehouse = "Which database should we use? **Recommendation:** Use Postgres for the analytical warehouse. **Evidence:** Warehouse query volume grows. **Options:** A) Postgres B) Snowflake C) BigQuery. **Affected section:** Data storage. **Safe default:** Postgres.";
+      const runner = new StubRunner(completed(`BEARING_RESULT ${JSON.stringify({ kind: "questions", questions: [analyticalWarehouse] })}`));
+      const result = await new JourneyService(runner).execute(await request({
+        gatherMode: "questions",
+        priorOwnerQa: [{ question: transactionalDatabase, answer: "Postgres, for the transactional database" }],
+      }));
+      expect(result.status).toBe("question");
+      if (result.status !== "question") throw new Error(`expected a question result, got ${result.status}`);
+      // The collision pair must never silently reuse the wrong answer: it surfaces as an amendment.
+      expect(result.questions).toHaveLength(1);
+      expect(result.questions![0]!.startsWith(analyticalWarehouse)).toBe(true);
+      expect(result.questions![0]).toContain("[Amendment context");
+    });
+
+    it("derives a stable decision record binding ID, fingerprint, answer, artifact, section, and revision", () => {
+      const first = deriveOwnerDecisions([{ question: storageQuestion, answer: acceptedAnswer }]);
+      const second = deriveOwnerDecisions([{ question: storageQuestion, answer: acceptedAnswer }]);
+      expect(first).toHaveLength(1);
+      expect(first[0].decisionId).toMatch(/^decision-[0-9a-f]{16}$/);
+      expect(first[0].decisionId).toBe(second[0].decisionId);
+      expect(first[0].fingerprint).toContain("which store should the import use");
+      expect(first[0].fingerprint).toContain("data storage");
+      expect(first[0].affectedSection).toBe("Data storage");
+      expect(first[0].artifact).toBe("plan-spec.md");
+      expect(first[0].revision).toBe(0);
+      expect(first[0].answer).toBe(acceptedAnswer);
+      const roleRoutes = deriveOwnerDecisions([{ question: ROLE_ROUTES_QUESTION, answer: "execution-author: codex primary, claude fallback" }]);
+      expect(roleRoutes[0].affectedSection).toBe("Role routes");
+      expect(deriveOwnerDecisions([{ question: storageQuestion, answer: acceptedAnswer }, { question: newRegionQuestion, answer: "us-east-1" }])[1].revision).toBe(1);
+    });
+  });
+
   it("accepts a same-stage estimate on the map-route lens question", async () => {
     const input = await request({ stage: "map-route", planDirectory: "docs/plans/import" });
     await mkdir(join(input.repositoryPath, input.planDirectory!), { recursive: true });
@@ -1491,7 +1626,7 @@ describe("JourneyService", () => {
   });
 
   it("issue 93: Expedition coordination is read-only, attributed, and reviewer-separated", async () => {
-    const selection = { provider: "opencode", model: "*", reasoning: "medium" };
+    const selection = { provider: "grok", model: "grok-build", reasoning: "medium" };
     const expedition = await request({ stage: "execute-expedition", selection, run: resolved(selection), planDirectory: "docs/plans/import", currentSlice: "1.1" });
     await writeMultiSlicePlanningPackage(expedition.repositoryPath);
     const reviewPath = join(expedition.repositoryPath, expedition.planDirectory!, "review.html");
@@ -1517,12 +1652,14 @@ describe("JourneyService", () => {
     };
     const result = await new JourneyService(expeditionRunner).execute(expedition);
     expect(calls).toHaveLength(2);
-    expect(calls.map((call) => call.routeId)).toEqual(["opencode", "opencode"]);
-    const permission = (call: ProcessInvocation) => JSON.parse((call.environment as { OPENCODE_PERMISSION: string }).OPENCODE_PERMISSION);
-    // Call 0: the Navigator's read-only coordination handoff, with subagent delegation allowed.
-    expect(permission(calls[0])).toMatchObject({ edit: "deny", bash: "deny", task: "allow" });
-    // Call 1: the Crewmate's actual slice execution, with write access and no further delegation.
-    expect(permission(calls[1])).toMatchObject({ edit: "allow", task: "deny" });
+    expect(calls.map((call) => call.routeId)).toEqual(["grok-build", "grok-build"]);
+    expect(calls[0].args.slice(0, 2)).toEqual(["--allow-subagents", "--"]);
+    expect(calls[0].args).not.toContain("--no-subagents");
+    expect(calls[0].args.join(" ")).not.toMatch(/(?:^|[, ])(?:write|edit|shell|bash)(?:[, ]|$)/i);
+    expect(calls[1].args[0]).toBe("--");
+    expect(calls[1].args).toContain("--no-subagents");
+    expect(calls[1].args).toContain("read,search,write");
+    expect(calls[1].environment).toEqual({ BEARING_FOCUS: "1" });
     expect(calls[1].stdin).toContain('"remainingSlices":["1.1"]');
     expect(calls[1].stdin).toContain('"allowedPaths":["docs/plans/import/review.html","src/import.ts"]');
     expect(calls[1].stdin).toContain("Navigator coordination handoff (read-only; advisory to the product author):\nBEARING_RESULT");
@@ -1542,7 +1679,7 @@ describe("JourneyService", () => {
     });
     expect(calls[0].stdin).toContain("Coordinator identity: bearing/journey:navigator. Product authorship is reserved for bearing/journey:crewmate.");
     expect(calls[0].stdin).toContain("Reviewer identity: bearing/journey:surveyor; the reviewer never implements or coordinates.");
-    expect(calls[0].stdin).toContain('{"provider":"opencode","model":"*","reasoning":"medium"}');
+    expect(calls[0].stdin).toContain('{"provider":"grok","model":"grok-build","reasoning":"medium"}');
     expect(calls[0].stdin).toMatch(/recorded Review cadence \(each slice, each phase, or end\).*enforce that cadence/);
     expect(calls[0].stdin).toMatch(/harness-native reviewer.*Surveyor fallback/);
     expect(calls[0].stdin).toMatch(/Keep parallel lanes until the entire phase is integrated.*Never force-remove/);
@@ -1555,7 +1692,9 @@ describe("JourneyService", () => {
 
     const normalRunner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Any constraints?"}'));
     expect((await new JourneyService(normalRunner).execute(await request({ stage: "gather-supplies", selection, run: resolved(selection) }))).status).toBe("question");
-    expect(permission(normalRunner.calls[0])).toMatchObject({ task: "deny" });
+    expect(normalRunner.calls[0].args[0]).toBe("--");
+    expect(normalRunner.calls[0].args).toContain("--no-subagents");
+    expect(normalRunner.calls[0].args).not.toContain("--allow-subagents");
   });
 
   it("issue 93: fails closed on a typed role-boundary violation when the coordinator mutates the write set before Crewmate dispatch, across path classes, and preserves the unexpected change for quarantine", async () => {
@@ -1857,11 +1996,12 @@ describe("JourneyService", () => {
   });
 
   it("uses the read-only Surveyor fallback for a harness without native review", async () => {
-    const selection = { provider: "opencode", model: "*", reasoning: "medium" };
+    const selection = { provider: "grok", model: "grok-build", reasoning: "medium" };
     const runner = new StubRunner(completed('BEARING_RESULT {"kind":"question","question":"Should this finding block release?"}'));
     expect((await new JourneyService(runner).execute(await request({ stage: "review", selection, run: resolved(selection), reviewPrompt: "Focus on authentication boundaries." }))).status).toBe("question");
-    const permission = JSON.parse((runner.calls[0].environment as { OPENCODE_PERMISSION: string }).OPENCODE_PERMISSION);
-    expect(permission).toMatchObject({ read: "allow", edit: "deny", bash: "deny", webfetch: "deny", websearch: "deny" });
+    expect(runner.calls[0].args).toEqual(expect.arrayContaining(["--tools", "read", "--sandbox", "strict"]));
+    expect(runner.calls[0].args).toContain("--disable-web-search");
+    expect(runner.calls[0].args.join(" ")).not.toMatch(/write|edit/);
     expect(runner.calls[0].stdin).toContain("Focus on authentication boundaries.");
   });
 
@@ -2146,7 +2286,7 @@ describe("JourneyService", () => {
     };
     const receipt = completed('BEARING_RESULT {"kind":"action","summary":"Implementation plan drafted.","artifacts":["docs/plans/import/implementation.md","docs/plans/import/review.html"]}');
 
-    for (const [model, reasoning] of [["Codex agent default", "max"], ["Codex agent default", "ultra"], ["Agy", "thinking"], ["OpenCode", "default"], ["OpenCode", "none"], ["OpenCode", "minimal"], ["Pi", "off"]]) {
+    for (const [model, reasoning] of [["Codex agent default", "max"], ["Codex agent default", "ultra"], ["Agy", "thinking"], ["OpenCode", "default"], ["OpenCode", "none"], ["OpenCode", "minimal"], ["Pi", "off"], ["Grok Build", "high"], ["grok-safe (grok-build)", "high"]]) {
       await writeSlice(model, reasoning, "full");
       expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "action", planningReview: { assignments: [{ model, reasoning }] } });
     }
@@ -2158,13 +2298,13 @@ describe("JourneyService", () => {
     }
     await writeSlice("Codex agent default", "medium", "off — documentation-only slice");
     expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "failure", code: "artifact_invalid" });
-    await writeSlice("Custom Modle", "high", "full");
+    await writeSlice("Gork Build", "high", "full");
     expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "failure", code: "artifact_invalid" });
-    await writeSlice("Custom Model", "ultra", "full");
+    await writeSlice("Grok Build", "ultra", "full");
     expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "failure", code: "artifact_invalid" });
-    await writeSlice("Custom Model", "high", "half");
+    await writeSlice("Grok Build", "high", "half");
     expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "failure", code: "artifact_invalid" });
-    await writeSlice("Custom Model", "high", "partial");
+    await writeSlice("Grok Build", "high", "partial");
     expect(await new JourneyService(new StubRunner(receipt)).execute(input)).toMatchObject({ status: "failure", code: "artifact_invalid" });
   });
 
@@ -2387,15 +2527,52 @@ describe("JourneyService", () => {
     expect(calls).toHaveLength(7);
   });
 
-  it("repairs a summary-only design review before drafting implementation", async () => {
+  it("issue 86: leaves no review.html at the Map Route checkpoint and generates exactly one four-source review only after implementation validates", async () => {
     const input = await request({ stage: "map-route", planDirectory: "docs/plans/import" });
     const directory = join(input.repositoryPath, "docs/plans/import");
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, "plan-spec.md"), planFixture);
-    const runner = new QueueRunner([
-      completed('BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["docs/plans/import/design.md","docs/plans/import/seit.md","docs/plans/import/review.html"]}', 7),
-      completed('BEARING_RESULT {"kind":"question","question":"Approve the implementation route?"}', 11),
-    ]);
+    const calls: ProcessInvocation[] = [];
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      run: async (invocation) => {
+        calls.push(invocation);
+        if (calls.length === 1) {
+          await Promise.all([
+            writeFile(join(directory, "design.md"), designFixture),
+            writeFile(join(directory, "seit.md"), seitFixture),
+          ]);
+          return completed('BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["docs/plans/import/design.md","docs/plans/import/seit.md"]}', 7);
+        }
+        await writeFile(join(directory, "implementation.md"), implementationFixture);
+        return completed('BEARING_RESULT {"kind":"action","summary":"Implementation drafted.","artifacts":["docs/plans/import/implementation.md"]}', 11);
+      },
+    };
+    const service = new JourneyService(runner);
+
+    expect(await service.execute(input)).toMatchObject({ status: "action", summary: "Design complete.", tokens: 7 });
+    expect(await readdir(directory)).not.toContain("review.html");
+
+    expect(await service.execute({ ...input, stage: "draft-implementation" })).toMatchObject({ status: "action", summary: "Implementation drafted.", tokens: 11, planningReview: { phases: 1, slices: 1 } });
+    const review = await readFile(join(directory, "review.html"), "utf8");
+    // The literal "four" is load-bearing: executionReviewValid prefix-matches pages already on disk,
+    // and every previously generated review.html carries this sentence verbatim.
+    expect(review).toContain("This deterministic view is generated from the four current planning sources.");
+    expect(review).toContain('id="bearing-source-artifacts"');
+    expect(review).toContain('id="bearing-source-links"');
+    for (const name of ["plan-spec.md", "design.md", "seit.md", "implementation.md"]) expect(review).toContain(`href="./${name}"`);
+    for (const source of [planFixture, designFixture, seitFixture, implementationFixture]) expect(review).toContain(escapeFixture(source));
+    expect(review.match(/id="bearing-source-artifacts"/g)).toHaveLength(1);
+    expect(review.match(/id="bearing-source-links"/g)).toHaveLength(1);
+  });
+
+  it("issue 86: leaves an agent-written review.html untouched at the Map Route checkpoint", async () => {
+    const input = await request({ stage: "map-route", planDirectory: "docs/plans/import" });
+    const directory = join(input.repositoryPath, "docs/plans/import");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "plan-spec.md"), planFixture);
+    const summary = "<!doctype html><html><body><main><h1>Summary only</h1></main></body></html>";
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["docs/plans/import/design.md","docs/plans/import/seit.md","docs/plans/import/review.html"]}', 7));
     const service = new JourneyService({
       executableAvailable: () => true,
       run: async (invocation) => {
@@ -2403,7 +2580,7 @@ describe("JourneyService", () => {
           await Promise.all([
             writeFile(join(directory, "design.md"), designFixture),
             writeFile(join(directory, "seit.md"), seitFixture),
-            writeFile(join(directory, "review.html"), "<!doctype html><html><body><main><h1>Summary only</h1></main></body></html>"),
+            writeFile(join(directory, "review.html"), summary),
           ]);
         }
         return runner.run(invocation);
@@ -2412,22 +2589,15 @@ describe("JourneyService", () => {
 
     expect(await service.execute(input)).toMatchObject({ status: "action", summary: "Design complete.", tokens: 7 });
     expect(runner.calls).toHaveLength(1);
-    const review = await readFile(join(directory, "review.html"), "utf8");
-    expect(review).toContain('id="bearing-source-artifacts"');
-    expect(review).toContain(escapeFixture(planFixture));
-    expect(review).toContain(escapeFixture(designFixture));
-    expect(review).toContain(escapeFixture(seitFixture));
+    expect(await readFile(join(directory, "review.html"), "utf8")).toBe(summary);
   });
 
-  it("creates a complete review when a low-reasoning route omits the HTML artifact", async () => {
+  it("issue 86: a Map Route receipt that omits the HTML artifact leaves no review.html", async () => {
     const input = await request({ stage: "map-route", planDirectory: "docs/plans/import" });
     const directory = join(input.repositoryPath, "docs/plans/import");
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, "plan-spec.md"), planFixture);
-    const runner = new QueueRunner([
-      completed('BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["docs/plans/import/design.md","docs/plans/import/seit.md"]}', 7),
-      completed('BEARING_RESULT {"kind":"question","question":"Approve the implementation route?"}', 11),
-    ]);
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["docs/plans/import/design.md","docs/plans/import/seit.md"]}', 7));
     const service = new JourneyService({
       executableAvailable: () => true,
       run: async (invocation) => {
@@ -2438,28 +2608,37 @@ describe("JourneyService", () => {
 
     expect(await service.execute(input)).toMatchObject({ status: "action", summary: "Design complete.", tokens: 7 });
     expect(runner.calls).toHaveLength(1);
-    const review = await readFile(join(directory, "review.html"), "utf8");
-    expect(review).toContain("Bearing planning review");
-    expect(review).toContain(escapeFixture(planFixture));
-    expect(review).toContain(escapeFixture(designFixture));
-    expect(review).toContain(escapeFixture(seitFixture));
+    expect(await readdir(directory)).not.toContain("review.html");
   });
 
-  it("regenerates a stale review from a current valid plan before drafting", async () => {
+  it("issue 86: leaves a stale review untouched at Map Route and regenerates it only when drafting", async () => {
     const input = await request({ stage: "map-route", planDirectory: "docs/plans/import" });
     const directory = join(input.repositoryPath, "docs/plans/import");
     await writeDesignPackage(input.repositoryPath);
     const revisedPlan = planFixture.replace("Bounded account data is imported.", "Revised bounded account data is imported.");
     await writeFile(join(directory, "plan-spec.md"), revisedPlan);
-    const runner = new QueueRunner([completed('BEARING_RESULT {"kind":"action","summary":"Design refreshed.","artifacts":["docs/plans/import/design.md","docs/plans/import/seit.md"]}', 11)]);
+    const runner = new QueueRunner([
+      completed('BEARING_RESULT {"kind":"action","summary":"Design refreshed.","artifacts":["docs/plans/import/design.md","docs/plans/import/seit.md"]}', 11),
+      completed('BEARING_RESULT {"kind":"action","summary":"Implementation drafted.","artifacts":["docs/plans/import/implementation.md"]}', 12),
+    ]);
+    const service = new JourneyService({
+      executableAvailable: () => true,
+      run: async (invocation) => {
+        if (runner.calls.length === 1) await writeFile(join(directory, "implementation.md"), implementationFixture);
+        return runner.run(invocation);
+      },
+    });
 
-    expect(await new JourneyService(runner).execute(input)).toMatchObject({ status: "action", summary: "Design refreshed.", tokens: 11 });
+    expect(await service.execute(input)).toMatchObject({ status: "action", summary: "Design refreshed.", tokens: 11 });
     expect(runner.calls).toHaveLength(1);
     expect(runner.calls[0].stdin).toContain("### map-the-route\n---\nname: map-the-route");
+    expect(await readFile(join(directory, "review.html"), "utf8")).toContain(escapeFixture(planFixture));
+    expect(await readFile(join(directory, "review.html"), "utf8")).not.toContain(escapeFixture(revisedPlan));
+    expect(await service.execute({ ...input, stage: "draft-implementation" })).toMatchObject({ status: "action", summary: "Implementation drafted.", tokens: 12 });
     expect(await readFile(join(directory, "review.html"), "utf8")).toContain(escapeFixture(revisedPlan));
   });
 
-  it("rejects a linked review target instead of overwriting it during repair", async () => {
+  it("issue 86: never follows a linked review target at the Map Route checkpoint", async () => {
     const input = await request({ stage: "map-route", planDirectory: "docs/plans/import" });
     const directory = join(input.repositoryPath, "docs/plans/import");
     await mkdir(directory, { recursive: true });
@@ -2472,11 +2651,29 @@ describe("JourneyService", () => {
     await symlink(join(input.repositoryPath, "unrelated.html"), join(directory, "review.html"));
     const runner = new StubRunner(completed('BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["docs/plans/import/design.md","docs/plans/import/seit.md","docs/plans/import/review.html"]}', 7));
 
-    expect(await new JourneyService(runner).execute(input)).toEqual({ status: "failure", code: "artifact_invalid", tokens: 7 });
+    expect(await new JourneyService(runner).execute(input)).toMatchObject({ status: "action", summary: "Design complete.", tokens: 7 });
     expect(await readFile(join(input.repositoryPath, "unrelated.html"), "utf8")).toBe("do not replace");
   });
 
-  it("renders the deterministic design review before a later owner cancellation", async () => {
+  it("issue 86: reports a final review generation failure distinctly from an implementation validation failure", async () => {
+    const input = await request({ stage: "draft-implementation", planDirectory: "docs/plans/import" });
+    const directory = join(input.repositoryPath, "docs/plans/import");
+    await mkdir(directory, { recursive: true });
+    await Promise.all([
+      writeFile(join(directory, "plan-spec.md"), planFixture),
+      writeFile(join(directory, "design.md"), designFixture),
+      writeFile(join(directory, "seit.md"), seitFixture),
+      writeFile(join(directory, "implementation.md"), implementationFixture),
+      writeFile(join(input.repositoryPath, "unrelated.html"), "do not replace"),
+    ]);
+    await symlink(join(input.repositoryPath, "unrelated.html"), join(directory, "review.html"));
+    const runner = new StubRunner(completed('BEARING_RESULT {"kind":"action","summary":"Implementation drafted.","artifacts":["docs/plans/import/implementation.md"]}', 11));
+
+    expect(await new JourneyService(runner).execute(input)).toEqual({ status: "failure", code: "review_generation_failed", tokens: 11 });
+    expect(await readFile(join(input.repositoryPath, "unrelated.html"), "utf8")).toBe("do not replace");
+  });
+
+  it("issue 86: leaves the Map Route review content untouched before a later owner cancellation", async () => {
     const input = await request({ stage: "map-route", planDirectory: "docs/plans/import" });
     const directory = join(input.repositoryPath, "docs/plans/import");
     await mkdir(directory, { recursive: true });
@@ -2489,10 +2686,7 @@ describe("JourneyService", () => {
     ]);
     const designService = new JourneyService(new StubRunner(completed('BEARING_RESULT {"kind":"action","summary":"Design complete.","artifacts":["docs/plans/import/design.md","docs/plans/import/seit.md","docs/plans/import/review.html"]}', 7)));
     expect(await designService.execute(input)).toMatchObject({ status: "action", tokens: 7 });
-    const review = await readFile(join(directory, "review.html"), "utf8");
-    expect(review).not.toBe(summary);
-    expect(review).toContain("Bearing planning review");
-    expect(review).toContain(escapeFixture(planFixture));
+    expect(await readFile(join(directory, "review.html"), "utf8")).toBe(summary);
 
     let service!: JourneyService;
     const runner: ProcessRunner = {
@@ -2505,6 +2699,32 @@ describe("JourneyService", () => {
     service = new JourneyService(runner);
 
     expect(await service.execute({ ...input, stage: "draft-implementation" })).toEqual({ status: "failure", code: "cancelled", tokens: 7 });
+  });
+
+  it("issue 86: rejects a three-source review.html at execution instead of consuming it", async () => {
+    const input = await request({ stage: "execute-explorer", planDirectory: "docs/plans/import" });
+    await writePlanningPackage(input.repositoryPath);
+    const reviewPath = join(input.repositoryPath, input.planDirectory!, "review.html");
+    const pending = '<section id="bearing-final-qa" data-status="pending"><h2>Actual implementation and QA</h2><p>Pending implementation and validation.</p></section>';
+    const complete = '<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: src/import.ts changed exactly as planned.</p><p>Validation evidence: CMD-UNIT passed.</p></section>';
+    const threeSourceReview = renderPlanningReview([
+      ["plan-spec.md", planFixture],
+      ["design.md", designFixture],
+      ["seit.md", seitFixture],
+    ]).replace(pending, complete);
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      run: async () => {
+        await mkdir(join(input.repositoryPath, "src"), { recursive: true });
+        await Promise.all([
+          writeFile(join(input.repositoryPath, "src/import.ts"), "export const imported = true;\n"),
+          writeFile(reviewPath, threeSourceReview),
+        ]);
+        return completed(`BEARING_RESULT ${JSON.stringify({ kind: "action", summary: "Import complete.", artifacts: ["src/import.ts", "docs/plans/import/review.html"], evidence: [{ commandId: "CMD-UNIT", status: "passed", summary: "focused tests passed" }] })}`);
+      },
+    };
+
+    expect(await new JourneyService(runner).execute(input)).toEqual({ status: "failure", code: "artifact_invalid", tokens: 5 });
   });
 
   it("returns a blocking question from the implementation-draft call without rerunning valid design", async () => {

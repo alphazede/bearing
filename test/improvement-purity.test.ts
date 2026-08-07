@@ -120,6 +120,9 @@ const ALLOWED_EXPORTS: Readonly<Record<string, readonly string[]>> = Object.free
     "ProjectOutcomesInput",
     "projectOutcomes",
   ]),
+  "workspace-keyed-digest.ts": Object.freeze([
+    "workspaceKeyedDigest",
+  ]),
 } satisfies Readonly<Record<string, readonly string[]>>);
 
 const ALLOWED_IMPORTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
@@ -145,6 +148,10 @@ const ALLOWED_IMPORTS: Readonly<Record<string, readonly string[]>> = Object.free
     "../execution/execution-mode.js",
     "../profile/profile.js",
     "../profile/reasoning-policy.js",
+  ]),
+  "workspace-keyed-digest.ts": Object.freeze([
+    "node:crypto",
+    "node:path",
   ]),
 } satisfies Readonly<Record<string, readonly string[]>>);
 

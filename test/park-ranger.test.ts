@@ -2,13 +2,20 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { RouteDescriptor } from "../src/adapters/adapters.js";
 import {
+  EMPTY_CONVERGENCE_HISTORY,
   adjudicateClaim,
   clampPriority,
+  findingIdentity,
+  findingSeverityClass,
+  findingSubsystem,
   parseParkRangerReport,
+  recordReviewCycle,
   selectParkRangerRoute,
   synthesizeFindings,
+  type ConvergenceHistory,
   type LensId,
   type LensReport,
+  type NonConvergenceCondition,
   type ParkRangerFinding,
   type ParkRangerReport,
   type Question,
@@ -437,5 +444,218 @@ describe("ensemble synthesis", () => {
       implementerProvider: "codex",
       availableRoutes: [codex],
     })).toEqual({ ok: false, code: "grader_family_unavailable" });
+  });
+});
+
+describe("review-repair convergence guard", () => {
+  const STATE_MACHINE_PATH = "src/state-machine/transitions.ts";
+  const STATE_MACHINE_SUBSYSTEM = "src/state-machine";
+
+  function machineFinding(id: string, line: number, overrides: Partial<ParkRangerFinding> = {}): ParkRangerFinding {
+    return finding({ id, location: { path: STATE_MACHINE_PATH, line }, ...overrides });
+  }
+
+  function runCycles(
+    cycles: readonly (readonly ParkRangerFinding[])[],
+    threshold?: number,
+  ): readonly { readonly history: ConvergenceHistory; readonly condition?: NonConvergenceCondition }[] {
+    let history = EMPTY_CONVERGENCE_HISTORY;
+    return cycles.map((cycleFindings) => {
+      const result = recordReviewCycle(history, cycleFindings, threshold);
+      if (!result.ok) throw new Error(result.reason);
+      history = result.value.history;
+      return result.value;
+    });
+  }
+
+  it("derives a subsystem and severity class provably from finding fields", () => {
+    expect(findingSubsystem(machineFinding("sm-0", 1))).toBe("src/state-machine");
+    expect(findingSubsystem(finding({ location: { path: "index.ts", line: 1 } }))).toBe("index.ts");
+    expect(["P0", "P1", "P2", "P3"].map((priority) => findingSeverityClass(priority as ParkRangerFinding["priority"])))
+      .toEqual(["other", "repair-relevant", "repair-relevant", "other"]);
+  });
+
+  it("emits a typed non_convergence condition after N cycles of related P1 findings", () => {
+    const outcomes = runCycles([
+      [machineFinding("sm-1", 10)],
+      [machineFinding("sm-2", 40)],
+      [machineFinding("sm-3", 70)],
+      [machineFinding("sm-4", 100)],
+    ]);
+
+    expect(outcomes.map(({ condition }) => condition)).toEqual([undefined, undefined, undefined, expect.objectContaining({
+      type: "non_convergence",
+      cycleCount: 3,
+      subsystem: STATE_MACHINE_SUBSYSTEM,
+      action: "consolidate",
+    })]);
+    const condition = outcomes[3].condition;
+    if (condition === undefined) throw new Error("expected a condition on the fourth cycle");
+    expect(condition.findings).toHaveLength(1);
+    expect(condition.findings[0]).toMatchObject({ relation: "related", priority: "P1" });
+    expect(condition.fingerprints).toEqual([findingIdentity(machineFinding("sm-4", 100))]);
+  });
+
+  it("keeps emitting and escalates to a stop action while the chain outgrows N", () => {
+    const outcomes = runCycles([
+      [machineFinding("sm-1", 10)],
+      [machineFinding("sm-2", 40)],
+      [machineFinding("sm-3", 70)],
+      [machineFinding("sm-4", 100)],
+      [machineFinding("sm-5", 130)],
+    ]);
+
+    expect(outcomes[3].condition).toMatchObject({ cycleCount: 3, action: "consolidate" });
+    expect(outcomes[4].condition).toMatchObject({ cycleCount: 4, action: "stop" });
+  });
+
+  it("classifies a same-fingerprint recurrence as repeated and still counts the cycle", () => {
+    const outcomes = runCycles([
+      [machineFinding("sm-1", 10)],
+      [machineFinding("sm-1", 10)],
+      [machineFinding("sm-3", 70)],
+    ]);
+
+    expect(outcomes[1].condition).toBeUndefined();
+    expect(outcomes[1].history.tracked).toHaveLength(2);
+    expect(outcomes[2].history.chain).toBe(2);
+    expect(outcomes[2].condition).toBeUndefined();
+    const secondCycle = outcomes[1].history.tracked[1];
+    expect(secondCycle).toMatchObject({ relation: "repeated", subsystem: STATE_MACHINE_SUBSYSTEM });
+  });
+
+  it("emits nothing while findings keep switching subsystems between cycles", () => {
+    const outcomes = runCycles([
+      [machineFinding("sm-1", 10)],
+      [finding({ id: "other-1", priority: "P1", location: { path: "src/validator/checks.ts", line: 20 } })],
+      [finding({ id: "other-2", priority: "P1", location: { path: "src/validator/checks.ts", line: 80 } })],
+      [machineFinding("sm-2", 40)],
+    ]);
+
+    expect(outcomes.every(({ condition }) => condition === undefined)).toBe(true);
+  });
+
+  it("emits nothing for fewer than N related cycles", () => {
+    const outcomes = runCycles([
+      [machineFinding("sm-1", 10)],
+      [machineFinding("sm-2", 40)],
+      [machineFinding("sm-3", 70)],
+    ]);
+
+    expect(outcomes.every(({ condition }) => condition === undefined)).toBe(true);
+  });
+
+  it("resets the chain on a genuinely new subsystem finding and emits nothing", () => {
+    const outcomes = runCycles([
+      [machineFinding("sm-1", 10)],
+      [machineFinding("sm-2", 40)],
+      [finding({ id: "new-subsystem", priority: "P1", location: { path: "src/grader/rubric.ts", line: 5 } })],
+      [machineFinding("sm-3", 70)],
+    ]);
+
+    expect(outcomes[2].history.chain).toBe(0);
+    expect(outcomes[3].history.chain).toBe(1);
+    expect(outcomes.every(({ condition }) => condition === undefined)).toBe(true);
+  });
+
+  it("resets the chain on a cycle with no P1/P2 findings and keeps the reset clean", () => {
+    const outcomes = runCycles([
+      [machineFinding("sm-1", 10)],
+      [machineFinding("sm-2", 40)],
+      [finding({ id: "minor", priority: "P3" })],
+      [machineFinding("sm-4", 100)],
+    ]);
+
+    expect(outcomes[2].history.chain).toBe(0);
+    expect(outcomes[3].history.chain).toBe(1);
+    expect(outcomes.every(({ condition }) => condition === undefined)).toBe(true);
+  });
+
+  it("ignores P0 and P3 findings and lets a P2 chain count like a P1", () => {
+    const outcomes = runCycles([
+      [machineFinding("sm-1", 10, { priority: "P2" }), finding({ id: "blocking", priority: "P0" })],
+      [machineFinding("sm-2", 40, { priority: "P2" })],
+      [machineFinding("sm-3", 70, { priority: "P2" })],
+      [machineFinding("sm-4", 100, { priority: "P2" })],
+    ]);
+
+    expect(outcomes[0].history.tracked).toHaveLength(1);
+    expect(outcomes[3].condition).toMatchObject({ cycleCount: 3, subsystem: STATE_MACHINE_SUBSYSTEM, action: "consolidate" });
+    if (outcomes[3].condition === undefined) throw new Error("expected a condition");
+    expect(outcomes[3].condition.findings.every(({ relation }) => relation === "related")).toBe(true);
+  });
+
+  it("breaks the chain when a cycle mixes a repeated finding with a genuinely new one", () => {
+    const outcomes = runCycles([
+      [machineFinding("sm-1", 10)],
+      [machineFinding("sm-1", 10)],
+      [machineFinding("sm-2", 40), finding({ id: "elsewhere", priority: "P1", location: { path: "src/validator/checks.ts", line: 5 } })],
+      [machineFinding("sm-3", 70)],
+    ]);
+
+    expect(outcomes[2].history.chain).toBe(0);
+    const thirdCycleEntries = outcomes[2].history.tracked.slice(outcomes[1].history.tracked.length);
+    expect(thirdCycleEntries.map(({ relation }) => relation).sort()).toEqual(["new", "related"]);
+    expect(outcomes.every(({ condition }) => condition === undefined)).toBe(true);
+  });
+
+  it("picks the dominant subsystem and ties break lexicographically", () => {
+    const outcomes = runCycles([
+      [machineFinding("sm-1", 10), finding({ id: "v-1", priority: "P1", location: { path: "src/validator/checks.ts", line: 10 } })],
+      [machineFinding("sm-2", 40), finding({ id: "v-2", priority: "P1", location: { path: "src/validator/checks.ts", line: 40 } })],
+      [machineFinding("sm-3", 70), finding({ id: "v-3", priority: "P1", location: { path: "src/validator/checks.ts", line: 70 } })],
+      [machineFinding("sm-4", 100), finding({ id: "v-4", priority: "P1", location: { path: "src/validator/checks.ts", line: 100 } })],
+    ]);
+
+    expect(outcomes[3].condition).toMatchObject({ cycleCount: 3, subsystem: "src/state-machine" });
+  });
+
+  it("canonicalizes path spellings so the three-form cycle chain increments and triggers at the threshold", () => {
+    const outcomes = runCycles([
+      [finding({ id: "journey-a", location: { path: "src/journey/a.ts", line: 1 } })],
+      [finding({ id: "journey-b", location: { path: "./src/journey/b.ts", line: 1 } })],
+      [finding({ id: "journey-c", location: { path: "src\\journey\\c.ts", line: 1 } })],
+    ], 2);
+
+    expect(findingSubsystem(finding({ location: { path: "src//journey//deep.ts", line: 1 } }))).toBe("src/journey");
+    expect(outcomes.map(({ history }) => history.chain)).toEqual([0, 1, 2]);
+    expect(outcomes[2].condition).toMatchObject({
+      type: "non_convergence",
+      cycleCount: 2,
+      subsystem: "src/journey",
+      action: "consolidate",
+    });
+  });
+
+  it("honors a custom threshold within bounds", () => {
+    const seed = runCycles([[machineFinding("sm-1", 10)]], 1);
+    const firstRelated = runCycles([[machineFinding("sm-1", 10)], [machineFinding("sm-2", 40)]], 1);
+
+    expect(seed[0].condition).toBeUndefined();
+    expect(firstRelated[1].condition).toMatchObject({ cycleCount: 1, action: "consolidate" });
+  });
+
+  it("rejects an out-of-range threshold with a typed failure", () => {
+    expect(recordReviewCycle(EMPTY_CONVERGENCE_HISTORY, [], 0)).toEqual({ ok: false, reason: "convergence_threshold_invalid" });
+    expect(recordReviewCycle(EMPTY_CONVERGENCE_HISTORY, [], 17)).toEqual({ ok: false, reason: "convergence_threshold_invalid" });
+    expect(recordReviewCycle(EMPTY_CONVERGENCE_HISTORY, [], 2.5)).toEqual({ ok: false, reason: "convergence_threshold_invalid" });
+    expect(recordReviewCycle(EMPTY_CONVERGENCE_HISTORY, [], 1)).toEqual({
+      ok: true,
+      value: { history: EMPTY_CONVERGENCE_HISTORY, condition: undefined },
+    });
+  });
+
+  it("returns byte-identical outcomes across two runs over the same cycle sequence", () => {
+    const cycles = [
+      [machineFinding("sm-1", 10)],
+      [machineFinding("sm-2", 40)],
+      [machineFinding("sm-3", 70)],
+      [machineFinding("sm-4", 100)],
+    ];
+
+    const first = JSON.stringify(runCycles(cycles));
+    const second = JSON.stringify(runCycles(cycles));
+    expect(second).toBe(first);
+    expect(JSON.parse(first)[3].condition.type).toBe("non_convergence");
   });
 });

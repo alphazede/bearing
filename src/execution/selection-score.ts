@@ -15,6 +15,8 @@
  * platforms and Node versions.
  */
 
+import { hasExactKeys } from "../contracts/guards.js";
+
 export const RISK_RATINGS = ["low", "medium", "high", "critical"] as const;
 export type RiskRating = (typeof RISK_RATINGS)[number];
 
@@ -61,12 +63,12 @@ export interface SelectionSignals {
   readonly subExplorerCount: number;
 }
 
-export const SELECTION_ALGORITHM_VERSION_2 = 2 as const;
+const SELECTION_ALGORITHM_VERSION_2 = 2 as const;
 /** Guide §5.3 example value; recorded per event so a later default cannot move a recorded run. */
 export const DEFAULT_SELECTION_THRESHOLD = 8;
 export const MIN_PHASE_EXPLORERS = 3;
 
-export const HARD_TRIGGERS_V2 = [
+const HARD_TRIGGERS_V2 = [
   { id: "multi_repository", fires: (signals: HardTriggerSignals) => signals.multiRepository },
   { id: "security_critical_integration", fires: (signals: HardTriggerSignals) => signals.securityCriticalIntegration },
   { id: "data_migration", fires: (signals: HardTriggerSignals) => signals.dataMigration },
@@ -87,11 +89,6 @@ export const MAX_COMPLEXITY_SCORE = BANDED_SIGNALS.reduce(
 
 function isCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
 /** Structural guard shared with the ledger contract, which adds its own upper bounds. */

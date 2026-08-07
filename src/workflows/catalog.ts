@@ -1,15 +1,15 @@
 import type { WorkGraph } from "../execution/execution-scheduler.js";
 
-export const FICTIONAL_B2B_ROOT = "examples/fictional-b2b";
+const FICTIONAL_B2B_ROOT = "examples/fictional-b2b";
 
-export interface WorkflowTask {
+interface WorkflowTask {
   readonly id: string;
   readonly role: "navigator" | "explorer" | "crewmate";
   readonly dependencies: readonly string[];
   readonly expectedArtifactIds: readonly string[];
 }
 
-export interface DecisionStop {
+interface DecisionStop {
   readonly id: string;
   readonly beforeTaskId: string;
   readonly authorityRole: string;
@@ -17,7 +17,7 @@ export interface DecisionStop {
   readonly requires: readonly string[];
 }
 
-export interface IndependentReview {
+interface IndependentReview {
   readonly id: string;
   readonly kind: "survey" | "resurvey";
   readonly role: "surveyor";

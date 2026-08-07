@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1038,5 +1038,172 @@ describe("ledger validation", () => {
     } finally {
       await rm(external, { recursive: true, force: true });
     }
+  });
+});
+
+describe("visible per-plan workspace (issue 56)", () => {
+  function boundCheckpoint(
+    commandId: string,
+    expectedRevision: number,
+    planDirectory: string,
+    status: "running" | "waiting" | "stopped" | "failed" | "complete" = "running",
+  ): CommandEnvelopeV1 {
+    const base = checkpointCommand(commandId, expectedRevision, status, "set-bearings");
+    return {
+      ...base,
+      payload: { ...base.payload, planDirectory },
+    } as CommandEnvelopeV1;
+  }
+
+  it("relocates a plan-bound run's audit trail into the visible per-plan workspace", async () => {
+    const dir = await root();
+    await acceptedCreate(dir);
+    const PLAN = "docs/plans/2026-08-06-migrate-state";
+    const result = await store(dir).apply(boundCheckpoint("checkpoint-1", 1, PLAN));
+    expect(result.ok).toBe(true);
+
+    const visible = join(dir, "bearing-2026-08-06-migrate-state", "runs", RUN);
+    // The visible workspace holds the run's ledger and snapshot...
+    expect(await readdir(visible)).toEqual(expect.arrayContaining(["events.jsonl", "snapshot.json"]));
+    // ...and the run no longer hides under .bearing/runs.
+    expect(await lstat(runPath(dir)).catch(() => undefined)).toBeUndefined();
+  });
+
+  it("returns the run's workspace name and audit-trail path for disclosure when a journey starts", async () => {
+    const dir = await root();
+    await acceptedCreate(dir);
+    const PLAN = "docs/plans/2026-08-06-migrate-state";
+    await store(dir).apply(boundCheckpoint("checkpoint-1", 1, PLAN));
+    // The workspace field is the visible per-plan workspace; the run path is its audit trail.
+    expect(await store(dir).runWorkspaceName(RUN)).toBe("bearing-2026-08-06-migrate-state");
+    expect(await store(dir).runWorkspacePath(RUN))
+      .toBe(`bearing-2026-08-06-migrate-state/runs/${RUN}`);
+    expect(await store(dir).runWorkspaceName("never-created")).toBeUndefined();
+  });
+
+  it("keeps an unbound run fully in the legacy home, readable and resumable", async () => {
+    const dir = await root();
+    await acceptedCreate(dir);
+    await store(dir).apply(checkpointCommand("checkpoint-1", 1, "running", "review"));
+
+    // No plan is bound, so the run must not have migrated.
+    expect(await store(dir).runWorkspacePath(RUN)).toBeUndefined();
+    const legacyDir = join(dir, ".bearing", "runs", RUN);
+    expect(await readdir(legacyDir)).toEqual(expect.arrayContaining(["events.jsonl", "snapshot.json"]));
+    expect(await readdir(join(dir, "bearing-2026-08-06-migrate-state")).catch(() => null)).toBeNull();
+
+    // A fresh store instance resumes the same legacy run and keeps writing there.
+    const durable = store(dir);
+    expect((await durable.load(RUN)).events.at(-1)?.type).toBe("journeyCheckpointRecorded");
+    const resumed = await durable.apply(boundCheckpoint("checkpoint-2", 2, "docs/plans/2026-08-06-migrate-state"));
+    expect(resumed.ok).toBe(true);
+    expect(await durable.runWorkspacePath(RUN))
+      .toBe(`bearing-2026-08-06-migrate-state/runs/${RUN}`);
+    expect(await lstat(runPath(dir)).catch(() => undefined)).toBeUndefined();
+  });
+
+  it("migrates only when the ledger binds a plan, and stays put afterwards", async () => {
+    const dir = await root();
+    await acceptedCreate(dir);
+    const PLAN = "docs/plans/2026-08-06-migrate-state";
+
+    // A checkpoint without a plan directory leaves the run in the legacy home.
+    await store(dir).apply(checkpointCommand("checkpoint-1", 1, "running", "review"));
+    expect(await store(dir).runWorkspacePath(RUN)).toBeUndefined();
+
+    // The first plan-bound checkpoint migrates the audit trail.
+    const migrated = await store(dir).apply(boundCheckpoint("checkpoint-2", 2, PLAN));
+    expect(migrated.ok).toBe(true);
+    const visible = join(dir, "bearing-2026-08-06-migrate-state", "runs", RUN);
+    expect(await readdir(visible)).toEqual(expect.arrayContaining(["events.jsonl", "snapshot.json"]));
+    expect(await lstat(runPath(dir)).catch(() => undefined)).toBeUndefined();
+
+    // Later applies on the same plan resolve the visible home and stay there.
+    const settled = await store(dir).apply(boundCheckpoint("checkpoint-3", 3, PLAN, "complete"));
+    expect(settled.ok).toBe(true);
+    expect(await store(dir).runWorkspacePath(RUN))
+      .toBe(`bearing-2026-08-06-migrate-state/runs/${RUN}`);
+    expect(await lstat(runPath(dir)).catch(() => undefined)).toBeUndefined();
+    expect((await store(dir).load(RUN)).events).toHaveLength(4);
+  });
+
+  it("fails closed with a typed conflict when one run exists in two homes", async () => {
+    const dir = await root();
+    await acceptedCreate(dir);
+    const PLAN = "docs/plans/2026-08-06-migrate-state";
+    await store(dir).apply(boundCheckpoint("checkpoint-1", 1, PLAN));
+    expect(await lstat(runPath(dir)).catch(() => undefined)).toBeUndefined();
+
+    // A second copy appears under the legacy home (e.g. a partial prior migration).
+    await mkdir(runPath(dir), { recursive: true });
+
+    await expect(store(dir).load(RUN)).rejects.toMatchObject({ code: "run_location_conflict" });
+    await expect(store(dir).apply(boundCheckpoint("checkpoint-2", 2, PLAN)))
+      .rejects.toMatchObject({ code: "run_location_conflict" });
+    expect((await store(dir).list()).find((entry) => entry.runId === RUN))
+      .toMatchObject({ unreadable: true, integrityError: "run_location_conflict" });
+  });
+
+  it("merges runs from both homes in list(), one home per run", async () => {
+    const dir = await root();
+    await acceptedCreate(dir);
+    await store(dir).apply(checkpointCommand("checkpoint-1", 1, "running", "review"));
+    // A second run binds a plan and lives in the visible workspace.
+    await store(dir).apply({
+      ...command("create-2", "createWorkRequest", 0),
+      runId: "run-2",
+    });
+    await store(dir).apply({
+      ...boundCheckpoint("checkpoint-1", 1, "docs/plans/2026-08-06-migrate-state"),
+      runId: "run-2",
+    });
+    await store(dir).apply({
+      ...boundCheckpoint("checkpoint-2", 2, "docs/plans/2026-08-06-migrate-state", "complete"),
+      runId: "run-2",
+    });
+
+    const entries = await store(dir).list();
+    expect(entries.map((entry) => entry.runId)).toEqual(["run-2", "run-1"]);
+    expect(await store(dir).runWorkspacePath("run-1")).toBeUndefined();
+    expect(await store(dir).runWorkspacePath("run-2"))
+      .toBe(`bearing-2026-08-06-migrate-state/runs/run-2`);
+  });
+
+  it("degrades a refused visible-workspace migration to a durable success with a typed warning", async () => {
+    const dir = await root();
+    const external = await mkdtemp(join(tmpdir(), "bearing-store-external-"));
+    roots.push(external);
+    await acceptedCreate(dir);
+    const PLAN = "docs/plans/2026-08-06-migrate-state";
+    await symlink(external, join(dir, "bearing-2026-08-06-migrate-state"));
+
+    // The checkpoint is durably committed even though the relocation was refused. Rejecting a
+    // committed command would tell the caller it failed, so a retry at the same expectedRevision
+    // would be refused as an illegal transition — a permanent wedge. The typed warning keeps the
+    // truth (committed, durable) and the next apply retries the move.
+    const result = await store(dir).apply(boundCheckpoint("checkpoint-1", 1, PLAN));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.durable).toBe(true);
+      expect(result.migrationWarning).toMatchObject({
+        code: "run_migration_failed",
+        reason: "workspace_root_changed",
+        workspace: "bearing-2026-08-06-migrate-state",
+      });
+    }
+    // The run stays intact in its legacy home.
+    expect(await readdir(runPath(dir))).toEqual(expect.arrayContaining(["events.jsonl", "snapshot.json"]));
+  });
+
+  it("leaves repo-scoped legacy state in place after a migration", async () => {
+    const dir = await root();
+    await acceptedCreate(dir);
+    const PLAN = "docs/plans/2026-08-06-migrate-state";
+    await store(dir).apply(boundCheckpoint("checkpoint-1", 1, PLAN));
+
+    // .bearing itself and its non-run state survive the move.
+    expect(await readdir(join(dir, ".bearing"))).toContain("runs");
+    expect(await lstat(join(dir, ".bearing")).catch(() => undefined)).toBeDefined();
+    expect(await lstat(runPath(dir)).catch(() => undefined)).toBeUndefined();
   });
 });

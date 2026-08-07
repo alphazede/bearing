@@ -3,8 +3,8 @@ import { writeSetPathIssue } from "./plan-structure.js";
 const MATERIALITY = ["cost", "architecture", "scope", "risk"] as const;
 const RECOMMENDATIONS = ["proceed", "revise", "stop"] as const;
 
-export type ReconMateriality = (typeof MATERIALITY)[number];
-export type ReconRecommendation = (typeof RECOMMENDATIONS)[number];
+type ReconMateriality = (typeof MATERIALITY)[number];
+type ReconRecommendation = (typeof RECOMMENDATIONS)[number];
 
 export interface ReconBrief {
   readonly assumptionId: string;
@@ -17,7 +17,7 @@ export interface ReconBrief {
   readonly timeboxMinutes: number;
 }
 
-export interface ReconMeasurement {
+interface ReconMeasurement {
   readonly name: string;
   readonly value: string;
   readonly method: string;

@@ -17,7 +17,7 @@
     "cli"
   ],
   "author": "William Rumph / AlphaZede",
-  "license": "MIT OR Apache-2.0",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alphazede/bearing.git"
@@ -44,7 +44,6 @@
     "skills/",
     "README.md",
     "SECURITY.md",
-    "LICENSE-MIT",
     "LICENSE-APACHE"
   ],
   "packageManager": "pnpm@10.33.0",

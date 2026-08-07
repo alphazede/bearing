@@ -11,8 +11,8 @@ const own = (value, keys) => typeof value === "object" && value !== null && !Arr
 const string = (value, max = 4096) => typeof value === "string" && value.length > 0 && value.length <= max;
 const isRepositoryOrDescendant = (root, repository) => { const path = relative(repository, root); return path === "" || (!path.startsWith("..") && !isAbsolute(path)); };
 const validOrigin = (value) => value === SKILLSBENCH_EVALUATION_MANIFEST.origin || value === `${SKILLSBENCH_EVALUATION_MANIFEST.origin}.git`;
-export const readOnlyCheckoutInspector = { inspect: (root) => ({ head: execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(), origin: execFileSync("git", ["-C", root, "remote", "get-url", "origin"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(), tag: execFileSync("git", ["-C", root, "rev-parse", `refs/tags/${SKILLSBENCH_EVALUATION_MANIFEST.release}^{commit}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(), clean: execFileSync("git", ["-C", root, "status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...SKILLSBENCH_TASK_IDS.map((id) => `tasks/${id}`)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === "" }) };
-export class EvaluationCliError extends Error {
+const readOnlyCheckoutInspector = { inspect: (root) => ({ head: execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(), origin: execFileSync("git", ["-C", root, "remote", "get-url", "origin"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(), tag: execFileSync("git", ["-C", root, "rev-parse", `refs/tags/${SKILLSBENCH_EVALUATION_MANIFEST.release}^{commit}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(), clean: execFileSync("git", ["-C", root, "status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...SKILLSBENCH_TASK_IDS.map((id) => `tasks/${id}`)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === "" }) };
+class EvaluationCliError extends Error {
     code;
     constructor(code) { super(code); this.code = code; }
 }

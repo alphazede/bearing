@@ -234,3 +234,172 @@ describe("execution scheduler", () => {
     expect(startSchedule({ graph, evidence: approval("explorer"), limits: limits(), nowMs: 0 })).toMatchObject({ state: "blocked", code: "surveyor_not_executor" });
   });
 });
+
+const PREREQUISITE = {
+  id: "runtime-fix-10",
+  resumeAction: "merge the runtime fix and restart Bearing so Focus loads it",
+} as const;
+
+function gated(n: WorkNode): WorkNode {
+  return { ...n, focusGated: true };
+}
+
+function prerequisiteGraph(): WorkGraph {
+  return {
+    ...expeditionGraph([
+      node("navigator", "navigator", null),
+      gated(node("explorer-a", "explorer", "navigator", ["navigator"])),
+      node("crew-a", "crewmate", "explorer-a", ["explorer-a"]),
+      node("explorer-b", "explorer", "navigator", ["navigator"]),
+      node("crew-b", "crewmate", "explorer-b", ["explorer-b"]),
+      gated(node("explorer-c", "explorer", "navigator", ["navigator"])),
+      node("crew-c", "crewmate", "explorer-c", ["explorer-c"]),
+    ]),
+    globalRuntimePrerequisites: [PREREQUISITE],
+  };
+}
+
+describe("global runtime prerequisite gating", () => {
+  it("keeps every Focus-backed lane blocked while a declared prerequisite is merged but not runtime-active", () => {
+    const staleRuntime = { isMet: () => false };
+    let schedule = startSchedule({ graph: prerequisiteGraph(), evidence: approval("expedition"), limits: limits(), nowMs: 0, runtimeCheck: staleRuntime });
+    // Gated lanes are blocked from the first projection, before any launch decision.
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")).toMatchObject({
+      status: "blocked",
+      reason: "runtime_prerequisite",
+      blocker: { prerequisiteId: "runtime-fix-10", resumeAction: PREREQUISITE.resumeAction },
+    });
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-c")).toMatchObject({
+      status: "blocked",
+      reason: "runtime_prerequisite",
+      blocker: { prerequisiteId: "runtime-fix-10", resumeAction: PREREQUISITE.resumeAction },
+    });
+    expect(schedule.nodes.find((entry) => entry.id === "crew-a")?.status).toBe("blocked");
+    expect(schedule.batches[0]?.nodeIds).toEqual(["navigator"]);
+    // Dependency-independent (non-Focus-gated) work proceeds once its shared parent completes.
+    schedule = advanceSchedule(schedule, [{ nodeId: "navigator", outcome: "completed" }], 1);
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-b")?.status).toBe("running");
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")?.status).toBe("blocked");
+    // Still blocked after unrelated work completes while the runtime stays stale.
+    schedule = advanceSchedule(schedule, [{ nodeId: "explorer-b", outcome: "completed" }], 2);
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")?.status).toBe("blocked");
+    expect(schedule.batches.flatMap((batch) => batch.nodeIds)).not.toContain("explorer-a");
+  });
+
+  it("blocks every Focus-backed lane until all declared prerequisites are met", () => {
+    const graph = {
+      ...prerequisiteGraph(),
+      globalRuntimePrerequisites: [PREREQUISITE, { id: "prereq-2", resumeAction: "re-run the validator build" }],
+    };
+    const check = { isMet: (id: string) => id === "runtime-fix-10" };
+    const schedule = startSchedule({ graph, evidence: approval("expedition"), limits: limits(), nowMs: 0, runtimeCheck: check });
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")?.blocker).toEqual({ prerequisiteId: "prereq-2", resumeAction: "re-run the validator build" });
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-c")?.status).toBe("blocked");
+  });
+
+  it("releases gated lanes exactly once when the prerequisite becomes merged and runtime-active, without auto-replay", () => {
+    let active = false;
+    const check = { isMet: () => active };
+    let schedule = startSchedule({ graph: prerequisiteGraph(), evidence: approval("expedition"), limits: limits(), nowMs: 0, runtimeCheck: check });
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")?.status).toBe("blocked");
+    active = true; // the fix merged and the runtime restarted
+    schedule = advanceSchedule(schedule, [{ nodeId: "navigator", outcome: "completed" }, { nodeId: "explorer-b", outcome: "completed" }], 1);
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")?.status).toBe("running");
+    expect(schedule.batches.flatMap((batch) => batch.nodeIds).filter((id) => id === "explorer-a")).toEqual(["explorer-a"]);
+    expect(schedule.transitions).toEqual(expect.arrayContaining([
+      { nodeId: "explorer-a", from: "blocked", to: "pending", reason: "runtime_prerequisite" },
+      { nodeId: "explorer-a", from: "pending", to: "running" },
+    ]));
+    // A completed gated lane is never replayed, even if the runtime regresses.
+    schedule = advanceSchedule(schedule, [{ nodeId: "explorer-a", outcome: "completed" }, { nodeId: "explorer-c", outcome: "completed" }], 2);
+    active = false;
+    schedule = advanceSchedule(schedule, [], 3);
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")?.status).toBe("completed");
+    expect(schedule.batches.flatMap((batch) => batch.nodeIds).filter((id) => id === "explorer-a")).toEqual(["explorer-a"]);
+  });
+
+  it("keeps runtime-blocked lanes releasable after every non-gated node completes", () => {
+    let active = false;
+    const check = { isMet: () => active };
+    let schedule = startSchedule({ graph: prerequisiteGraph(), evidence: approval("expedition"), limits: limits(), nowMs: 0, runtimeCheck: check });
+    // t1–t3: every non-gated lane completes while the prerequisite stays unmet.
+    schedule = advanceSchedule(schedule, [{ nodeId: "navigator", outcome: "completed" }], 1);
+    schedule = advanceSchedule(schedule, [{ nodeId: "explorer-b", outcome: "completed" }], 2);
+    schedule = advanceSchedule(schedule, [{ nodeId: "crew-b", outcome: "completed" }], 3);
+    // All remaining nodes are runtime-blocked lanes: the projection must not be
+    // finished, or the release path would be unreachable.
+    expect(schedule.state).not.toBe("finished");
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")).toMatchObject({ status: "blocked", reason: "runtime_prerequisite" });
+    expect(schedule.nodes.find((entry) => entry.id === "crew-a")?.status).toBe("blocked");
+    // t4: the prerequisite becomes met — a later advance must still release the lanes exactly once.
+    active = true;
+    schedule = advanceSchedule(schedule, [], 4);
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")?.status).toBe("running");
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-c")?.status).toBe("running");
+    expect(schedule.batches.flatMap((batch) => batch.nodeIds).filter((id) => id === "explorer-a")).toEqual(["explorer-a"]);
+    expect(schedule.transitions.filter((transition) => transition.nodeId === "explorer-a" && transition.to === "running")).toHaveLength(1);
+    // t5: the released lane's own dependents launch only after it completes.
+    schedule = advanceSchedule(schedule, [{ nodeId: "explorer-a", outcome: "completed" }], 5);
+    expect(schedule.nodes.find((entry) => entry.id === "crew-a")?.status).toBe("running");
+  });
+
+  it("keeps a lone gated root active instead of finishing before launch", () => {
+    const graph = {
+      ...explorerGraph([gated(node("explorer", "explorer", null)), node("crew-a", "crewmate", "explorer", ["explorer"])]),
+      globalRuntimePrerequisites: [PREREQUISITE],
+    };
+    let schedule = startSchedule({ graph, evidence: approval("explorer"), limits: limits(), nowMs: 0, runtimeCheck: { isMet: () => false } });
+    // The only launchable root is runtime-gated: the projection must not finish
+    // before anything has launched, or a later advance can never release it.
+    expect(schedule.state).not.toBe("finished");
+    expect(schedule.nodes.find((entry) => entry.id === "explorer")).toMatchObject({ status: "blocked", reason: "runtime_prerequisite" });
+    schedule = advanceSchedule(schedule, [], 1);
+    expect(schedule.state).not.toBe("finished");
+  });
+
+  it("releases blocked dependents once the gated lane they depend on launches", () => {
+    let active = false;
+    const check = { isMet: () => active };
+    let schedule = startSchedule({ graph: prerequisiteGraph(), evidence: approval("expedition"), limits: limits(), nowMs: 0, runtimeCheck: check });
+    expect(schedule.nodes.find((entry) => entry.id === "crew-a")?.status).toBe("blocked");
+    active = true;
+    schedule = advanceSchedule(schedule, [{ nodeId: "navigator", outcome: "completed" }, { nodeId: "explorer-b", outcome: "completed" }], 1);
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")?.status).toBe("running");
+    expect(schedule.nodes.find((entry) => entry.id === "crew-a")?.status).toBe("pending");
+    schedule = advanceSchedule(schedule, [{ nodeId: "explorer-a", outcome: "completed" }, { nodeId: "explorer-c", outcome: "completed" }], 2);
+    expect(schedule.nodes.find((entry) => entry.id === "crew-a")?.status).toBe("running");
+    expect(schedule.batches.flatMap((batch) => batch.nodeIds).filter((id) => id === "crew-a")).toEqual(["crew-a"]);
+  });
+
+  it("fails closed with a typed blocker when a prerequisite is declared but no runtime check is provided", () => {
+    const schedule = startSchedule({ graph: prerequisiteGraph(), evidence: approval("expedition"), limits: limits(), nowMs: 0 });
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")).toMatchObject({
+      status: "blocked",
+      reason: "runtime_prerequisite",
+      blocker: { prerequisiteId: "runtime-fix-10", resumeAction: PREREQUISITE.resumeAction },
+    });
+  });
+
+  it("schedules exactly as before when no global prerequisite is declared, even with gated lanes marked", () => {
+    const graph = expeditionGraph([
+      node("navigator", "navigator", null),
+      gated(node("explorer-a", "explorer", "navigator", ["navigator"])),
+      node("crew-a", "crewmate", "explorer-a", ["explorer-a"]),
+      node("explorer-b", "explorer", "navigator", ["navigator"]),
+      node("crew-b", "crewmate", "explorer-b", ["explorer-b"]),
+    ]);
+    let schedule = startSchedule({ graph, evidence: approval("expedition"), limits: limits(), nowMs: 0 });
+    expect(schedule.batches[0]?.nodeIds).toEqual(["navigator"]);
+    schedule = advanceSchedule(schedule, [{ nodeId: "navigator", outcome: "completed" }], 1);
+    expect(schedule.batches[1]?.nodeIds).toEqual(["explorer-a", "explorer-b"]);
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-a")?.status).toBe("running");
+    expect(schedule.nodes.find((entry) => entry.id === "explorer-b")?.status).toBe("running");
+  });
+
+  it("validates the global prerequisite grammar and fails closed on malformed declarations", () => {
+    expect(validateWorkGraph(prerequisiteGraph())).toMatchObject({ ok: true });
+    expect(validateWorkGraph({ ...prerequisiteGraph(), globalRuntimePrerequisites: [{ id: "x" }] })).toMatchObject({ ok: false, code: "graph_invalid" });
+    expect(validateWorkGraph({ ...prerequisiteGraph(), globalRuntimePrerequisites: [PREREQUISITE, PREREQUISITE] })).toMatchObject({ ok: false, code: "graph_invalid" });
+    expect(validateWorkGraph({ ...prerequisiteGraph(), nodes: prerequisiteGraph().nodes.map((entry) => entry.id === "explorer-a" ? { ...entry, focusGated: "yes" } : entry) })).toMatchObject({ ok: false, code: "graph_invalid" });
+  });
+});

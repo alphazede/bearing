@@ -1,6 +1,6 @@
 import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 
-export const SKILL_LIFECYCLE_SCHEMA_VERSION = 1 as const;
+const SKILL_LIFECYCLE_SCHEMA_VERSION = 1 as const;
 
 export const SKILL_NAMES = [
   "repository-fit", "set-bearings", "gather-supplies", "map-the-route", "navigator",
@@ -46,12 +46,12 @@ export const SKILL_CHARACTERIZATION_MANIFEST = {
   schemaVersion: SKILL_LIFECYCLE_SCHEMA_VERSION,
   skills: [
     characterization("repository-fit", "Repository Fit", "Repository and plan-directory confirmation policy.", "Propose a repository fit for owner confirmation.", "Bearing enters Repository Fit.", "Use bounded evidence to return one assumption and question.", "Do not trigger after repository fit is confirmed.", "ca97c3078890baf8ad6b9e403d58e0c0ec8080abe176decec1eea23284c3155a", 52),
-    characterization("set-bearings", "Set Bearings", "Bounded workspace and repository-map policy.", "Start or resume a plan workspace.", "Bearing enters Set Bearings.", "Create only the workspace, stub, and repository map.", "Do not trigger for a tentative planning discussion.", "1476fca2c51157c8f2d1d27b4d8abe3a395967d185db0045d8244696e6620c74", 71),
-    characterization("gather-supplies", "Gather Supplies", "Material-decision and specification policy.", "Harden a plan specification.", "Bearing enters Gather Supplies.", "Resolve only material decisions and write the specification.", "Do not trigger for a request to merely summarize documentation.", "2179cafeeff6e5159fa005768b4685166d578c2d3f5056b2eaafdf25d15a82aa", 77),
-    characterization("map-the-route", "Map the Route", "Design, SEIT, and implementation-route policy.", "Design an approved plan.", "Bearing enters Map the Route.", "Write design and SEIT, then draft implementation after validation.", "Do not trigger for a request to execute an existing route.", "5129f55d3e257d7366d40f71c0fa0f622f3d54c4111e80bb24ec9186d22d707d", 89),
-    characterization("navigator", "Navigator", "Dependent-wave execution and authority policy.", "Run dependent implementation waves.", "The owner selects Expedition.", "Coordinate independent Explorer lanes by wave.", "Do not trigger for one bounded route with no parallel lanes.", "1f0b85cafa4180996e1bd4f0e4f09bd70c473da2dad1c8cfe93dda1d8ea1274d", 111),
+    characterization("set-bearings", "Set Bearings", "Bounded workspace and repository-map policy.", "Start or resume a plan workspace.", "Bearing enters Set Bearings.", "Create only the workspace, stub, and repository map.", "Do not trigger for a tentative planning discussion.", "153699c02da599743211797abe190fe7e24cc69019e8098f2182120ba51c566f", 73),
+    characterization("gather-supplies", "Gather Supplies", "Material-decision and specification policy.", "Harden a plan specification.", "Bearing enters Gather Supplies.", "Resolve only material decisions and write the specification.", "Do not trigger for a request to merely summarize documentation.", "f8c2fb6f38ed6aec056630d795fc42bd88b0625caf91f9d4d076dddc14b04f0a", 93),
+    characterization("map-the-route", "Map the Route", "Design, SEIT, and implementation-route policy.", "Design an approved plan.", "Bearing enters Map the Route.", "Write design and SEIT, then draft implementation after validation.", "Do not trigger for a request to execute an existing route.", "81f8bda939d09134591772d8f741145ede7143f76ba5962b9f686af657e18e18", 199),
+    characterization("navigator", "Navigator", "Dependent-wave execution and authority policy.", "Run dependent implementation waves.", "The owner selects Expedition.", "Coordinate independent Explorer lanes by wave.", "Do not trigger for one bounded route with no parallel lanes.", "16feb18b927d5dd2d0659ed67836fbeef481783b3b742e0b73743cae3dcab4e9", 113),
     characterization("explorer", "Explorer", "Bounded route execution and validation policy.", "Execute one approved route.", "The owner selects Explorer or Navigator delegates a lane.", "Apply Crewmate packets, inspect diffs, and validate.", "Do not trigger for unapproved multi-wave planning.", "0d33e28c08797f4f2e44dd971dd88e78226af22eaf9ab708874cb397f7c239bd", 76),
-    characterization("crewmate", "Crewmate", "Bounded implementation-role and scope policy.", "Make one approved change.", "Explorer or Navigator assigns a settled coding packet.", "Edit only allowed paths and return validation evidence.", "Do not trigger for an unresolved design decision.", "0a6f3cd382d86d82a3155bc00f19beea4f1b2a5c2db64d1834dad86445622faf", 89),
+    characterization("crewmate", "Crewmate", "Bounded implementation-role and scope policy.", "Make one approved change.", "Explorer or Navigator assigns a settled coding packet.", "Edit only allowed paths and return validation evidence.", "Do not trigger for an unresolved design decision.", "3d213f36c73d98cd61fbbbeac4b88d50f94ef0b2b0133bfe2a8fe35ad35dc9ae", 98),
     characterization("validator", "Validator", "Scope-sufficiency verification policy over the deterministic boundary.", "Verify scope sufficiency after per-slice completion.", "Integrated work reaches the verification cadence.", "Wrap FocusCompletion and add the four scope checks, then return a typed verdict.", "Do not trigger to recompute containment or command evidence.", "8d6f8fd8db748d12ed1d859bd9b842c36bf135ccd3e251fe24dccb17a15d7555", 53),
     characterization("grader", "Grader", "Rubric scoring and verdict-arithmetic policy.", "Score a supplied report against the versioned rubric.", "A grader report is submitted for verification.", "Recompute the weighted verdict and reject mismatch or pollution.", "Do not trigger to repair code or decide a transition.", "c90c722109d04ddfa7c6aad73f1b4d990e924bff73cbb2efadb63ebbd06dea29", 53),
     characterization("park-ranger", "Park Ranger", "Reproduction and finding-synthesis policy.", "Adjudicate reproduced findings across lenses.", "Lens reports are ready for synthesis.", "Require reproduction, clamp priority, and synthesize a stable order.", "Do not trigger to promote an unreproduced suspicion.", "566d2aa6fa00a683c0ce915da46574871091dcfa49883e21f1b22fa4a1426691", 53),
@@ -79,12 +79,12 @@ export const NATIVE_SKILL_CHARACTERIZATION_CASES = [
   ...cases("surveyor", "Use Surveyor to review the completed account-export diff.", "Edit the account-export documentation wording.", "does not modify reviewed work"),
 ] as const;
 
-export type LifecycleChange = "rename" | "content-optimization" | "alias-removal" | "retirement";
+type LifecycleChange = "rename" | "content-optimization" | "alias-removal" | "retirement";
 type Arm = "without-skill" | "with-skill";
 const ROUTES = BUILTIN_ROUTES.map(({ id }) => id);
 const ARMS = ["without-skill", "with-skill"] as const;
 
-export interface SkillLifecycleInput {
+interface SkillLifecycleInput {
   readonly schemaVersion: 1;
   readonly change: LifecycleChange;
   readonly ownerApproval: boolean;
@@ -179,5 +179,3 @@ export class SkillLifecycleService {
     return { allowed: false, code: "retirement_unavailable" };
   }
 }
-
-export const evaluateSkillLifecycleChange = (input: unknown): LifecycleDecision => new SkillLifecycleService().evaluateChange(input);

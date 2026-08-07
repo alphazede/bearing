@@ -1,4 +1,5 @@
 import { REASONING_TIERS } from "../profile/reasoning-policy.js";
+import { enumValue, nonNegativeInteger, positiveInteger } from "./guards.js";
 export const MAX_RUNTIME_STATE_JSON = 640 * 1024;
 export const MAX_RUNTIME_STATE_STRING = 4096;
 export const MAX_RUNTIME_STATE_ARRAY = 64;
@@ -45,15 +46,6 @@ function boundedString(value, max = MAX_RUNTIME_STATE_STRING) {
     if (typeof value !== "string" || value.length === 0)
         return "malformed";
     return value.length > max ? "string_too_long" : undefined;
-}
-function positiveInteger(value) {
-    return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
-}
-function nonNegativeInteger(value) {
-    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-function enumValue(value, values) {
-    return typeof value === "string" && values.includes(value);
 }
 function validateActivity(value) {
     if (!object(value))

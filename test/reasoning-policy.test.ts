@@ -149,8 +149,7 @@ describe("reasoning provider mapping", () => {
     for (const tier of REASONING_TIERS) {
       for (const provider of PROVIDERS) {
         const route = BUILTIN_ROUTES.find((candidate) => candidate.provider === provider);
-        if (!route) continue;
-        expect(route.reasoningLevels).toContain(REASONING_PROVIDER_MAP[tier][provider]);
+        expect(route?.reasoningLevels).toContain(REASONING_PROVIDER_MAP[tier][provider]);
       }
     }
   });

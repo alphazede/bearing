@@ -3,6 +3,7 @@ import { lstat, mkdir, open, realpath, rm, stat, type FileHandle } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { isObject } from "../contracts/guards.js";
 
 import {
   assertWorkspaceRoot,
@@ -32,7 +33,7 @@ import {
   type ReviewGateRequest,
 } from "../server/local-session.js";
 
-export type JsonRpcId = string | number | null;
+type JsonRpcId = string | number | null;
 
 const PUBLIC_RETRY_WARRANTS = [
   "new_hypothesis",
@@ -41,13 +42,6 @@ const PUBLIC_RETRY_WARRANTS = [
   "changed_environment",
 ] as const satisfies readonly RetryWarrant[];
 type PublicRetryWarrant = (typeof PUBLIC_RETRY_WARRANTS)[number];
-
-export interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  id?: JsonRpcId;
-  method: string;
-  params?: unknown;
-}
 
 export interface JsonRpcResponse {
   jsonrpc: "2.0";
@@ -280,7 +274,7 @@ const TOOLS = [
   },
   {
     name: "bearing_focus_begin",
-    description: "Open one bounded Focus run from a repository-relative request and return its immutable envelope.",
+    description: "Open one bounded Focus run from a repository-relative request and return its immutable envelope plus the runtimeIdentity the receipt must copy verbatim.",
     inputSchema: FOCUS_BEGIN_SCHEMA,
   },
   {
@@ -358,10 +352,6 @@ export interface McpDeps {
 }
 
 export type McpDispatch = (request: unknown) => Promise<JsonRpcResponse | null>;
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** Validates exactly the constructs the advertised schemas use. Nothing wider. */
 function schemaViolation(rule: Rule, value: unknown, label = "arguments"): string | undefined {
@@ -464,6 +454,8 @@ function continuationBody(read: Extract<DurableRunContinuation, { ok: true }>): 
     ...(projection.summary ? { summary: projection.summary } : {}),
     ...(projection.outcome ? { outcome: projection.outcome } : {}),
     ...(read.planDirectory ? { planDirectory: read.planDirectory } : {}),
+    ...(read.workspace ? { workspace: read.workspace } : {}),
+    ...(read.runPath ? { runPath: read.runPath } : {}),
     ...(read.checkpoint ? { checkpoint: read.checkpoint } : {}),
     ...(read.selection ? { route: read.selection } : {}),
     ...(read.roleRoutes ? { roleRoutes: read.roleRoutes } : {}),
@@ -668,6 +660,9 @@ async function focusBegin(repository: string, requestPath: string): Promise<Reco
       repository: repositoryIdentity(repositoryPath),
       focusRunId: begun.runId,
       envelope: begun.envelope,
+      // The immutable identity of the runtime that will validate this run; the
+      // receipt must be bound to it or validation refuses with runtime_mismatch.
+      runtimeIdentity: begun.runtimeIdentity,
     };
   } catch (error) {
     if (isWorkspaceRootError(error) || (isObject(error) && (error as { code?: string }).code === "workspace_root_changed")) {
@@ -896,9 +891,6 @@ export function createDispatcher(deps: McpDeps = {}): McpDispatch {
     }
   };
 }
-
-/** Preserved default dispatcher: the protocol seam with the real transition engine. */
-export const dispatch: McpDispatch = createDispatcher();
 
 /**
  * Newline-delimited JSON-RPC over stdio. Responses stay in request order, oversized and

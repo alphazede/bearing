@@ -4,6 +4,8 @@ import { planDirectoryValid } from "./plan-directory.js";
 const MAX_DEPTH = 4;
 const MAX_PATHS = 200;
 const OMITTED = new Set([".git", ".bearing", "node_modules", "vendor", "dist", "build", "out", "coverage", ".next", ".cache"]);
+/** Reserved namespace: visible `bearing-<plan>/` per-plan workspaces never enter plan artifacts. */
+const OMITTED_PREFIX = "bearing-";
 const SENSITIVE = /(^|[._-])(env|secret|credential|token|password|private)([._-]|$)/i;
 export function inside(root, path) {
     const relation = relative(root, path);
@@ -43,7 +45,7 @@ export async function inventory(root) {
             return;
         const entries = await readdir(directory, { withFileTypes: true });
         for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-            if (paths.length >= MAX_PATHS || OMITTED.has(entry.name) || SENSITIVE.test(entry.name) || entry.isSymbolicLink())
+            if (paths.length >= MAX_PATHS || OMITTED.has(entry.name) || entry.name.startsWith(OMITTED_PREFIX) || SENSITIVE.test(entry.name) || entry.isSymbolicLink())
                 continue;
             const path = prefix ? `${prefix}/${entry.name}` : entry.name;
             paths.push(entry.isDirectory() ? `${path}/` : path);

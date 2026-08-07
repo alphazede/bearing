@@ -146,7 +146,7 @@ export type DecideResult =
 
 const OWNER_ACTOR = "owner";
 
-export class ReplayError extends Error {
+class ReplayError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ReplayError";

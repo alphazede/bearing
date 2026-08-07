@@ -692,7 +692,7 @@ async function loadImprovementReport(improvement, repositoryRoot) {
             : { ok: false, reason: "configuration_invalid" };
     }
     try {
-        return await buildImprovementReport(improvementStore(improvement, repositoryRoot));
+        return await buildImprovementReport(improvementStore(improvement, repositoryRoot), repositoryRoot);
     }
     catch {
         return { ok: false, reason: "store_read_failed" };
@@ -741,7 +741,7 @@ export function run(args, deps = {}) {
                 exit(1);
                 return Promise.resolve(undefined);
             }
-            return buildImprovementHandoffFacts(store).then((result) => {
+            return buildImprovementHandoffFacts(store, repositoryRoot).then((result) => {
                 if (!result.ok) {
                     stderr.write(`bearing improve: ${result.reason}\n`);
                     exit(1);

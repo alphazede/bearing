@@ -1,6 +1,6 @@
 import { isAbsolute, relative } from "node:path";
 
-export type RepositorySafetyCode =
+type RepositorySafetyCode =
   | "not_git_repository"
   | "repository_nested_in_git"
   | "repository_contains_agent"

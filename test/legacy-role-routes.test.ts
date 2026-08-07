@@ -32,7 +32,7 @@ const DECISION_ID = "decision-legacy-1";
 
 /** The shape the owner approves: one registered route per required role, no fallbacks. */
 const ROUTES: readonly RoleRoute[] = [
-  { role: "execution-author", primary: "opencode", fallbacks: [] },
+  { role: "execution-author", primary: "grok-build", fallbacks: [] },
   { role: "review-general", primary: "codex", fallbacks: [] },
   { role: "review-security", primary: "codex", fallbacks: [] },
 ];
@@ -297,10 +297,10 @@ describe("every binding gate fails closed", () => {
     ["an extra role", [...ROUTES, { role: "review-general", primary: "codex", fallbacks: [] }]],
     ["an unregistered primary route", [{ role: "execution-author", primary: "totally-unknown", fallbacks: [] }, ...ROUTES.slice(1)]],
     ["an unregistered fallback route", [{ role: "review-general", primary: "codex", fallbacks: ["totally-unknown"] }, ROUTES[0], ROUTES[2]]],
-    ["surveyor as the execution-author fallback", [{ role: "execution-author", primary: "opencode", fallbacks: ["surveyor"] }, ...ROUTES.slice(1)]],
-    ["a primary repeated as its own fallback", [{ role: "execution-author", primary: "opencode", fallbacks: ["opencode"] }, ...ROUTES.slice(1)]],
+    ["surveyor as the execution-author fallback", [{ role: "execution-author", primary: "grok-build", fallbacks: ["surveyor"] }, ...ROUTES.slice(1)]],
+    ["a primary repeated as its own fallback", [{ role: "execution-author", primary: "grok-build", fallbacks: ["grok-build"] }, ...ROUTES.slice(1)]],
     ["an unknown role name", [{ role: "implementer", primary: "codex", fallbacks: [] }, ...ROUTES.slice(1)]],
-    ["an extra key on a route", [{ role: "execution-author", primary: "opencode", fallbacks: [], tier: "high" }, ...ROUTES.slice(1)]],
+    ["an extra key on a route", [{ role: "execution-author", primary: "grok-build", fallbacks: [], tier: "high" }, ...ROUTES.slice(1)]],
   ])("refuses %s", (_name, roleRoutes) => {
     const state = pendingRun();
     const result = decide(state, bindCommand({ expectedRevision: state.revision, roleRoutes }), deps());
@@ -507,7 +507,7 @@ function structured(response: JsonRpcResponse | null): Record<string, unknown> {
 }
 
 const PROJECTED_ROUTES = {
-  authorRoute: { primary: "opencode", fallbacks: [] },
+  authorRoute: { primary: "grok-build", fallbacks: [] },
   reviewSlots: { general: { primary: "codex", fallbacks: [] }, security: { primary: "codex", fallbacks: [] } },
 };
 
@@ -529,7 +529,7 @@ describe("durable store round-trip", () => {
     expect(reloaded.revision).toBe(before.revision + 1);
     expect(reloaded.pendingDecision).toEqual(before.pendingDecision);
     expect(reloaded.journeyCheckpoint).toEqual(before.journeyCheckpoint);
-    const snapshot = JSON.parse(await readFile(join(root, ".bearing", "runs", runId, "snapshot.json"), "utf8"));
+    const snapshot = JSON.parse(await readFile(join(root, (await store.runWorkspacePath(runId)) ?? join(".bearing", "runs", runId), "snapshot.json"), "utf8"));
     expect(snapshot.legacyRoleRoutes).toEqual(ROUTES);
   });
 
@@ -537,7 +537,7 @@ describe("durable store round-trip", () => {
     const root = await tempRepo();
     const runId = "durable-2";
     const { store } = await seedPendingRun(root, runId);
-    const path = join(root, ".bearing", "runs", runId, "snapshot.json");
+    const path = join(root, (await store.runWorkspacePath(runId)) ?? join(".bearing", "runs", runId), "snapshot.json");
     const snapshot = JSON.parse(await readFile(path, "utf8"));
     expect(snapshot).not.toHaveProperty("legacyRoleRoutes");
     const loaded = await store.load(runId);

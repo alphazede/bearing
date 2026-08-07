@@ -7,6 +7,8 @@ const MAX_STDOUT = 1024 * 1024;
 const MAX_STDERR = 64 * 1024;
 const MAX_EVENT_TEXT = 512 * 1024;
 const MAX_ACTIVITIES = 1024;
+const GROUP_QUIESCE_GRACE_MS = 200;
+const GROUP_QUIESCE_POLL_MS = 25;
 const SAFE_ACTIVITY_VALUE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 function available(executable) {
     const candidates = executable.includes("/") ? [executable] : (process.env.PATH ?? "").split(delimiter).filter(isAbsolute).map((directory) => join(directory, executable));
@@ -60,12 +62,40 @@ function terminate(child) {
         signal(child, "SIGKILL"); }, 250);
     force.unref();
 }
+/**
+ * True while any process remains in the child's detached process group.
+ * A missing group raises ESRCH; any other failure still counts as alive,
+ * because EPERM means a member exists that we could not signal.
+ */
+function groupAlive(pid) {
+    if (!pid || process.platform === "win32")
+        return false;
+    try {
+        process.kill(-pid, 0);
+        return true;
+    }
+    catch (error) {
+        return error.code !== "ESRCH";
+    }
+}
+/** Bounded wait for group quiescence; resolves true once no member remains. */
+async function groupQuiesce(pid, graceMs, alive) {
+    const deadline = Date.now() + graceMs;
+    for (;;) {
+        if (!alive(pid))
+            return true;
+        if (Date.now() >= deadline)
+            return false;
+        await new Promise((resolve) => setTimeout(resolve, GROUP_QUIESCE_POLL_MS));
+    }
+}
 function tokenUsage(value) {
     if (typeof value !== "object" || value === null)
         return undefined;
     const record = value;
     const part = typeof record.part === "object" && record.part !== null ? record.part : undefined;
-    const usage = typeof part?.tokens === "object" && part.tokens !== null ? part.tokens : typeof record.usage === "object" && record.usage !== null ? record.usage : record;
+    const message = typeof record.message === "object" && record.message !== null ? record.message : undefined;
+    const usage = typeof part?.tokens === "object" && part.tokens !== null ? part.tokens : typeof record.usage === "object" && record.usage !== null ? record.usage : typeof message?.usage === "object" && message.usage !== null ? message.usage : record;
     const direct = usage.tokens ?? usage.total_tokens ?? usage.totalTokens;
     if (Number.isSafeInteger(direct) && direct >= 0)
         return direct;
@@ -166,17 +196,24 @@ export class NodeProcessRunner {
     inspectExecutable;
     resolveExecutable;
     inspectProcess;
+    probeGroup;
+    waitForGroup;
     children = new Map();
     cancelled = new Set();
-    constructor(spawnProcess = spawn, inspectExecutable = available, resolveExecutable = resolveSpawn, inspectProcess = inspectLines) {
+    constructor(spawnProcess = spawn, inspectExecutable = available, resolveExecutable = resolveSpawn, inspectProcess = inspectLines, probeGroup = groupAlive, waitForGroup = groupQuiesce) {
         this.spawnProcess = spawnProcess;
         this.inspectExecutable = inspectExecutable;
         this.resolveExecutable = resolveExecutable;
         this.inspectProcess = inspectProcess;
+        this.probeGroup = probeGroup;
+        this.waitForGroup = waitForGroup;
     }
     executableAvailable(executable) { return this.inspectExecutable(executable); }
     currentSelection(route) {
         try {
+            if (route.id === "deepseek-codex" || route.id === "deepseek-claude") {
+                return { model: route.model, reasoning: "max" };
+            }
             if (route.provider === "codex") {
                 const head = readFileSync(join(homedir(), ".codex", "config.toml"), "utf8").split(/^\[/m, 1)[0] ?? "";
                 return { model: tomlString(head, "model") ?? "*", reasoning: tomlString(head, "model_reasoning_effort") ?? "medium" };
@@ -203,6 +240,9 @@ export class NodeProcessRunner {
     modelOptions(route, repositoryPath = process.cwd()) {
         const current = this.currentSelection(route);
         try {
+            if (route.id === "deepseek-codex" || route.id === "deepseek-claude") {
+                return [{ model: route.model, label: "DeepSeek V4 Flash", reasoningLevels: route.reasoningLevels, defaultReasoning: "max" }];
+            }
             if (route.provider === "codex") {
                 const cache = jsonObject(join(homedir(), ".codex", "models_cache.json"));
                 const models = Array.isArray(cache.models) ? cache.models : [];
@@ -234,6 +274,8 @@ export class NodeProcessRunner {
                     const reasoning = match[2].toLowerCase();
                     return [{ model: line, label: line, reasoningLevels: [reasoning], defaultReasoning: reasoning }];
                 }).slice(0, 64);
+            if (route.provider === "grok")
+                return [{ model: "grok-build", label: "Grok Build", reasoningLevels: route.reasoningLevels, defaultReasoning: route.reasoningLevels.includes(current.reasoning) ? current.reasoning : "medium" }];
             if (route.provider === "opencode")
                 return this.inspectRoute(route, ["models"], repositoryPath).filter((line) => /^[a-z0-9._-]+\/[A-Za-z0-9._:/-]+$/.test(line)).slice(0, 64).map((model) => {
                     const levels = opencodeReasoning(model.split("/", 1)[0] ?? "");
@@ -363,7 +405,7 @@ export class NodeProcessRunner {
                 }
             });
             child.on("error", () => finish({ exitCode: 1 }));
-            child.on("close", (code) => {
+            child.on("close", async (code) => {
                 if (settled)
                     return;
                 flushActivity();
@@ -382,6 +424,29 @@ export class NodeProcessRunner {
                 }
                 const parsed = normalize(body, invocation.routeId);
                 if (!parsed) {
+                    finish({ unknownSideEffect: true });
+                    return;
+                }
+                // The detached group can outlive its leader: a descendant that closed
+                // its inherited pipes no longer holds `close` open, so a clean exit
+                // alone cannot prove nothing is still writing. Bless success only once
+                // the whole group has quiesced; otherwise terminate the group and
+                // refuse the completion.
+                let quiescent = false;
+                try {
+                    quiescent = await this.waitForGroup(child.pid ?? 0, GROUP_QUIESCE_GRACE_MS, this.probeGroup);
+                }
+                catch {
+                    quiescent = false;
+                }
+                if (settled)
+                    return;
+                if (this.cancelled.has(invocation.runId)) {
+                    finish(mayHaveSideEffect(body) ? { unknownSideEffect: true } : { cancelled: true });
+                    return;
+                }
+                if (!quiescent) {
+                    terminate(child);
                     finish({ unknownSideEffect: true });
                     return;
                 }

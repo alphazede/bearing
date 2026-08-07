@@ -9,6 +9,8 @@ const MAX_STDOUT = 1024 * 1024;
 const MAX_STDERR = 64 * 1024;
 const MAX_EVENT_TEXT = 512 * 1024;
 const MAX_ACTIVITIES = 1024;
+const GROUP_QUIESCE_GRACE_MS = 200;
+const GROUP_QUIESCE_POLL_MS = 25;
 const SAFE_ACTIVITY_VALUE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 
 type SpawnPort = (executable: string, args: readonly string[], options: {
@@ -20,6 +22,8 @@ type SpawnPort = (executable: string, args: readonly string[], options: {
 }) => ChildProcessWithoutNullStreams;
 type ResolvePort = (executable: string, cwd: string) => { executable: string; cwd: string } | undefined;
 type InspectPort = (executable: string, args: readonly string[], cwd: string) => string;
+type GroupAlivePort = (pid: number) => boolean;
+type GroupQuiescePort = (pid: number, graceMs: number, alive: GroupAlivePort) => boolean | Promise<boolean>;
 
 function available(executable: string): boolean {
   const candidates = executable.includes("/") ? [executable] : (process.env.PATH ?? "").split(delimiter).filter(isAbsolute).map((directory) => join(directory, executable));
@@ -59,11 +63,32 @@ function terminate(child: ChildProcessWithoutNullStreams): void {
   force.unref();
 }
 
+/**
+ * True while any process remains in the child's detached process group.
+ * A missing group raises ESRCH; any other failure still counts as alive,
+ * because EPERM means a member exists that we could not signal.
+ */
+function groupAlive(pid: number): boolean {
+  if (!pid || process.platform === "win32") return false;
+  try { process.kill(-pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
+
+/** Bounded wait for group quiescence; resolves true once no member remains. */
+async function groupQuiesce(pid: number, graceMs: number, alive: GroupAlivePort): Promise<boolean> {
+  const deadline = Date.now() + graceMs;
+  for (;;) {
+    if (!alive(pid)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, GROUP_QUIESCE_POLL_MS));
+  }
+}
+
 function tokenUsage(value: unknown): number | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const record = value as Record<string, unknown>;
   const part = typeof record.part === "object" && record.part !== null ? record.part as Record<string, unknown> : undefined;
-  const usage = typeof part?.tokens === "object" && part.tokens !== null ? part.tokens as Record<string, unknown> : typeof record.usage === "object" && record.usage !== null ? record.usage as Record<string, unknown> : record;
+  const message = typeof record.message === "object" && record.message !== null ? record.message as Record<string, unknown> : undefined;
+  const usage = typeof part?.tokens === "object" && part.tokens !== null ? part.tokens as Record<string, unknown> : typeof record.usage === "object" && record.usage !== null ? record.usage as Record<string, unknown> : typeof message?.usage === "object" && message.usage !== null ? message.usage as Record<string, unknown> : record;
   const direct = usage.tokens ?? usage.total_tokens ?? usage.totalTokens;
   if (Number.isSafeInteger(direct) && (direct as number) >= 0) return direct as number;
   const parts = [usage.input_tokens, usage.output_tokens, usage.input, usage.output, usage.reasoning].filter((entry): entry is number => Number.isSafeInteger(entry) && (entry as number) >= 0);
@@ -147,12 +172,15 @@ export class NodeProcessRunner implements ProcessRunner {
   private readonly children = new Map<string, ChildProcessWithoutNullStreams>();
   private readonly cancelled = new Set<string>();
 
-  constructor(private readonly spawnProcess: SpawnPort = spawn, private readonly inspectExecutable: (executable: string) => boolean = available, private readonly resolveExecutable: ResolvePort = resolveSpawn, private readonly inspectProcess: InspectPort = inspectLines) {}
+  constructor(private readonly spawnProcess: SpawnPort = spawn, private readonly inspectExecutable: (executable: string) => boolean = available, private readonly resolveExecutable: ResolvePort = resolveSpawn, private readonly inspectProcess: InspectPort = inspectLines, private readonly probeGroup: GroupAlivePort = groupAlive, private readonly waitForGroup: GroupQuiescePort = groupQuiesce) {}
 
   executableAvailable(executable: string): boolean { return this.inspectExecutable(executable); }
 
   currentSelection(route: RouteDescriptor): { model: string; reasoning: string } {
     try {
+      if (route.id === "deepseek-codex" || route.id === "deepseek-claude") {
+        return { model: route.model, reasoning: "max" };
+      }
       if (route.provider === "codex") {
         const head = readFileSync(join(homedir(), ".codex", "config.toml"), "utf8").split(/^\[/m, 1)[0] ?? "";
         return { model: tomlString(head, "model") ?? "*", reasoning: tomlString(head, "model_reasoning_effort") ?? "medium" };
@@ -179,6 +207,9 @@ export class NodeProcessRunner implements ProcessRunner {
   modelOptions(route: RouteDescriptor, repositoryPath = process.cwd()): readonly RouteModelOption[] {
     const current = this.currentSelection(route);
     try {
+      if (route.id === "deepseek-codex" || route.id === "deepseek-claude") {
+        return [{ model: route.model, label: "DeepSeek V4 Flash", reasoningLevels: route.reasoningLevels, defaultReasoning: "max" }];
+      }
       if (route.provider === "codex") {
         const cache = jsonObject(join(homedir(), ".codex", "models_cache.json"));
         const models = Array.isArray(cache.models) ? cache.models : [];
@@ -205,6 +236,7 @@ export class NodeProcessRunner implements ProcessRunner {
         const reasoning = match[2].toLowerCase();
         return [{ model: line, label: line, reasoningLevels: [reasoning], defaultReasoning: reasoning }];
       }).slice(0, 64);
+      if (route.provider === "grok") return [{ model: "grok-build", label: "Grok Build", reasoningLevels: route.reasoningLevels, defaultReasoning: route.reasoningLevels.includes(current.reasoning) ? current.reasoning : "medium" }];
       if (route.provider === "opencode") return this.inspectRoute(route, ["models"], repositoryPath).filter((line) => /^[a-z0-9._-]+\/[A-Za-z0-9._:/-]+$/.test(line)).slice(0, 64).map((model) => {
         const levels = opencodeReasoning(model.split("/", 1)[0] ?? "");
         return { model, label: model, reasoningLevels: levels, defaultReasoning: levels[0] };
@@ -307,7 +339,7 @@ export class NodeProcessRunner implements ProcessRunner {
         if (stderrSize > MAX_STDERR) { overflow = true; terminate(child); }
       });
       child.on("error", () => finish({ exitCode: 1 }));
-      child.on("close", (code) => {
+      child.on("close", async (code) => {
         if (settled) return;
         flushActivity();
         const body = captured();
@@ -316,6 +348,16 @@ export class NodeProcessRunner implements ProcessRunner {
         if (code !== 0) { finish(mayHaveSideEffect(body) ? { unknownSideEffect: true } : { exitCode: code ?? 1 }); return; }
         const parsed = normalize(body, invocation.routeId);
         if (!parsed) { finish({ unknownSideEffect: true }); return; }
+        // The detached group can outlive its leader: a descendant that closed
+        // its inherited pipes no longer holds `close` open, so a clean exit
+        // alone cannot prove nothing is still writing. Bless success only once
+        // the whole group has quiesced; otherwise terminate the group and
+        // refuse the completion.
+        let quiescent = false;
+        try { quiescent = await this.waitForGroup(child.pid ?? 0, GROUP_QUIESCE_GRACE_MS, this.probeGroup); } catch { quiescent = false; }
+        if (settled) return;
+        if (this.cancelled.has(invocation.runId)) { finish(mayHaveSideEffect(body) ? { unknownSideEffect: true } : { cancelled: true }); return; }
+        if (!quiescent) { terminate(child); finish({ unknownSideEffect: true }); return; }
         finish({ exitCode: 0, ...parsed });
       });
       child.stdin.on("error", () => {});

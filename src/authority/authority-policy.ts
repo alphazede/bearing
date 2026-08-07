@@ -5,7 +5,7 @@ import { isDurableOwnerEvidence, type DurableOwnerEvidence } from "../workflow/a
 
 export const AUTHORITY_POLICY_SCHEMA_VERSION = 1 as const;
 
-export type AuthorityAction = "recommend" | "execute" | "certify";
+type AuthorityAction = "recommend" | "execute" | "certify";
 export type AuthorityDenialCode =
   | "authority_facts_invalid"
   | "authority_role_denied"
@@ -13,6 +13,7 @@ export type AuthorityDenialCode =
   | "authority_approval_missing"
   | "authority_approval_invalid"
   | "authority_execution_mode_denied"
+  | "authority_orchestration_only"
   | "authority_surveyor_ancestry_denied"
   | "authority_surveyor_not_executor"
   | "authority_self_certification";
@@ -83,15 +84,15 @@ export class AuthorityPolicy {
     if (input.action === "execute") {
       if (!input.evidence) return deny("authority_approval_missing");
       if (input.role === "trail-boss" && input.executionMode === "explorer") return deny("authority_execution_mode_denied");
+      // Issue 120: Trail Boss is orchestration-only. Even inside an approved expedition it must
+      // never execute implementation tools; the same /write|edit|shell|bash/i pattern defines
+      // the read-only verification projections.
+      if (input.role === "trail-boss" && /write|edit|shell|bash/i.test(input.tool)) return deny("authority_orchestration_only");
       if (!input.executionMode || input.evidence.selectedMode !== input.executionMode) return deny("authority_execution_mode_denied");
       return { allowed: true };
     }
     return { allowed: true };
   }
-}
-
-export function evaluateAuthority(input: unknown): AuthorityDecision {
-  return new AuthorityPolicy().evaluate(input);
 }
 
 function deny(code: AuthorityDenialCode): AuthorityDecision {

@@ -718,6 +718,10 @@ describe("headless journey commands", () => {
       summary: "Repository fit confirmed for docs/plans/headless-decision.",
       outcome: { type: "waiting" },
       allowedActions: ["status", "resume", "progress"],
+      stateLocation: "bearing-headless-decision/runs/headless_decision_1",
+      events: expect.arrayContaining([
+        expect.objectContaining({ sequence: 1, type: "workRequestCreated", recordedAt: expect.any(String) }),
+      ]),
     });
     expect(after.revision).toBe(before.revision + 6);
     expect(after.pendingDecision).toBeNull();
@@ -1187,6 +1191,59 @@ describe("headless journey commands", () => {
     }
   });
 
+  it("identifies the run state location and inspection in the status receipt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bearing-headless-inspection-"));
+    roots.push(root);
+    await mkdir(join(root, ".git"));
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async () => ({ exitCode: 0, events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }], usage: { tokens: 1 } }),
+    };
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "inspect_1" } as const;
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Inspect the run state." }, { processRunner: runner })).ok).toBe(true);
+    const store = new BearingStore(root);
+    const before = await store.load(base.runId);
+    const recorded = await store.apply({
+      schemaVersion: 1, commandId: "inspect-checkpoint", correlationId: "inspect-checkpoint", runId: base.runId, expectedRevision: before.revision,
+      session: { sessionId: "bearing", actor: "bearing" }, type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "review", status: "complete", artifacts: [],
+        lastResultJson: JSON.stringify({ status: "action", summary: "Complete.", artifacts: [], tokens: 1 }),
+        qaJson: "[]", selectionProvider: "codex", selectionModel: "gpt-5.6-terra", selectionReasoning: "medium",
+      },
+    });
+    expect(recorded.ok).toBe(true);
+
+    const receipt = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner });
+    const homePath = await store.runWorkspacePath(base.runId);
+    expect(receipt).toMatchObject({ ok: true, stateLocation: homePath ?? `.bearing/runs/${base.runId}` });
+    expect(Array.isArray(receipt.events) && receipt.events.length > 0).toBe(true);
+    expect(receipt.events).toContainEqual(expect.objectContaining({ type: "workRequestCreated", sequence: 1, recordedAt: expect.any(String) }));
+    // No planning validation or verification was recorded, so the projection stays silent.
+    expect(receipt.validation).toBeUndefined();
+  });
+
+  it("reports the planning validation verdict and state location of a plan-bound run", async () => {
+    const root = await disposableGitRepository("bearing-headless-inspection-validation-");
+    const runner: ProcessRunner = {
+      executableAvailable: () => true,
+      verify: async () => true,
+      run: async () => ({ exitCode: 0, events: [{ type: "completed", data: { content: 'BEARING_RESULT {"kind":"action","summary":"Ready.","artifacts":[]}' } }], usage: { tokens: 1 } }),
+    };
+    const base = { repository: root, provider: "codex", model: "gpt-5.6-terra", reasoning: "medium", runId: "inspect_validation_1" } as const;
+    expect((await executeHeadlessJourney({ action: "create", ...base, goal: "Inspect the plan-bound validation." }, { processRunner: runner })).ok).toBe(true);
+    await seedPlanReviewBoundary(root, base.runId, "docs/plans/inspection-validation");
+
+    const receipt = await executeHeadlessJourney({ action: "status", ...base }, { processRunner: runner });
+
+    expect(receipt).toMatchObject({
+      ok: true,
+      stateLocation: "bearing-inspection-validation/runs/inspect_validation_1",
+      validation: { planVerdict: "PASS" },
+    });
+  });
+
   it("recovers one Expedition adapter failure across guided MCP and headless boundaries and rejects missing, incompatible, wrong-stage, and replayed requests", async () => {
     const root = await disposableGitRepository("bearing-headless-expedition-retry-");
     const readinessResult = { exitCode: 0, events: [{ type: "completed" as const, data: { content: "ready" } }], usage: { tokens: 1 } };
@@ -1330,20 +1387,20 @@ describe("headless journey commands", () => {
           stage: "execute-expedition",
           retryWarrant: "changed_strategy",
           provider: "codex",
-          model: "gpt-5.6-sol",
+          model: "deepseek-v4-flash",
           reasoning: "max",
         },
       },
     });
     const retried = (retryMcp?.result as { structuredContent?: HeadlessJourneyReceipt } | undefined)?.structuredContent;
-    expect(retried, JSON.stringify(retried)).toMatchObject({ stage: "execute-expedition", status: "failed", outcome: { type: "failed", code: "result_missing" }, route: { provider: "codex", model: "gpt-5.6-sol", reasoning: "max" } });
+    expect(retried, JSON.stringify(retried)).toMatchObject({ stage: "execute-expedition", status: "failed", outcome: { type: "failed", code: "result_missing" }, route: { provider: "codex", model: "deepseek-v4-flash", reasoning: "max" } });
     expect(retried).not.toHaveProperty("code");
     expect(recoveryStageCalls).toBe(1);
     expect(retried?.revision).toBeGreaterThan(failedRevision);
     expect(recoveryInvocations.filter((invocation) => !invocation.stdin.includes("confirming readiness")))
-      .toEqual(expect.arrayContaining([expect.objectContaining({ routeId: "codex", executable: "codex" })]));
+      .toEqual(expect.arrayContaining([expect.objectContaining({ routeId: "deepseek-codex", executable: "codex-deepseek" })]));
     const after = await store.load(base.runId);
-    expect(after.journeyCheckpoint).toMatchObject({ selectionProvider: "codex", selectionModel: "gpt-5.6-sol", selectionReasoning: "max" });
+    expect(after.journeyCheckpoint).toMatchObject({ selectionProvider: "codex", selectionModel: "deepseek-v4-flash", selectionReasoning: "max" });
     expect(JSON.parse(after.journeyCheckpoint?.runtimeStateJson ?? "{}").retry).toEqual(expect.arrayContaining([
       expect.objectContaining({ warrant: "changed_strategy", outcome: "admitted" }),
     ]));
@@ -1663,6 +1720,9 @@ describe("headless journey commands", () => {
     expect(ordinary.ok).toBe(true);
 
     const before = await store.load(runId);
+    // Slice-1 relocation: the binding migrated this run to its visible workspace,
+    // so the ledger is read from the run's actual home, not the legacy path.
+    const ledgerPath = join(root, (await store.runWorkspacePath(runId)) ?? join(".bearing", "runs", runId), "events.jsonl");
     const stageCallsBeforeProgress = stageCalls.length;
     let concurrentState: Awaited<ReturnType<BearingStore["load"]>> | undefined;
     let concurrentLedger: string | undefined;
@@ -1695,7 +1755,7 @@ describe("headless journey commands", () => {
           });
           expect(concurrent.ok).toBe(true);
           concurrentState = await store.load(runId);
-          concurrentLedger = await readFile(join(root, ".bearing", "runs", runId, "events.jsonl"), "utf8");
+          concurrentLedger = await readFile(ledgerPath, "utf8");
         },
       },
     );
@@ -1704,7 +1764,7 @@ describe("headless journey commands", () => {
     expect(progressed).toEqual({ ok: false, code: "illegal_transition", runId, revision: concurrentState?.revision });
     expect(concurrentState?.revision).toBe(before.revision + 1);
     expect(stageCalls).toHaveLength(stageCallsBeforeProgress);
-    expect(await readFile(join(root, ".bearing", "runs", runId, "events.jsonl"), "utf8")).toBe(concurrentLedger);
+    expect(await readFile(ledgerPath, "utf8")).toBe(concurrentLedger);
     expect(await store.load(runId)).toEqual(concurrentState);
   });
 
@@ -2700,12 +2760,9 @@ describe("headless journey commands", () => {
         reviewCadences: ["slice", "phase", "end"],
       },
     });
-    // Characterisation, not endorsement: the multi-slice fixture declares 1.1 before 1.2, yet this
-    // selects 1.2 first and still reaches terminal review success. Issue #129 tracks both halves —
-    // the picker offering a dependency-blocked slice, and review accepting a plan whose other slices
-    // were never implemented. Update this assertion to the corrected contract when #129 lands.
+    // Multi-slice plans require executing prerequisite slice 1.1 before slice 1.2 (issue #129 dependency admission gate)
     const executed = await executeHeadlessJourney(
-      { action: "select-execution", ...base, executionMode, reviewCadence, ...(multiSlice ? { currentSlice: "1.2" } : {}) },
+      { action: "select-execution", ...base, executionMode, reviewCadence, ...(multiSlice ? { currentSlice: "1.1" } : {}) },
       { processRunner: replacementRunner },
     );
     expect(executed).toMatchObject({
@@ -2715,7 +2772,7 @@ describe("headless journey commands", () => {
       status: "waiting",
       summary: `${executionMode === "explorer" ? "Explorer" : "Expedition"} execution complete.`,
       allowedActions: ["status", "resume", "progress"],
-      ...(multiSlice ? { selectedScope: { currentSlice: "1.2", remainingSlices: ["1.2"], allowedPaths: [`${planDirectory}/review.html`, "src/export.ts"], seitCommandIds: ["CMD-UNIT"] } } : {}),
+      ...(multiSlice ? { selectedScope: { currentSlice: "1.1", remainingSlices: ["1.1"], allowedPaths: [`${planDirectory}/review.html`, "src/import.ts"], seitCommandIds: ["CMD-UNIT"] } } : {}),
     });
 
     const afterExecution = await store.load(base.runId);
@@ -2741,7 +2798,7 @@ describe("headless journey commands", () => {
       stage: "review",
       status: "complete",
       summary: "Review passed with final evidence.",
-      artifacts: expect.arrayContaining([multiSlice ? "src/export.ts" : "src/import.ts", `${planDirectory}/review.html`]),
+      artifacts: expect.arrayContaining(["src/import.ts", `${planDirectory}/review.html`]),
       outcome: { type: "complete" },
       allowedActions: ["status"],
     });
@@ -3462,7 +3519,11 @@ describe("workspace commands", () => {
     await mkdir(join(root, ".git"));
     await mkdir(join(root, ".bearing"));
     await writeFile(join(root, ".bearing", "state.json"), "state");
-    await writeFile(join(root, ".gitignore"), ".bearing/\n");
+    // The audit trail spans the hidden .bearing tree and every visible bearing-<plan>/ workspace;
+    // the byte count must cover both, or it understates what Bearing writes.
+    await mkdir(join(root, "bearing-2026-08-06-status"));
+    await writeFile(join(root, "bearing-2026-08-06-status", "state.json"), "visible");
+    await writeFile(join(root, ".gitignore"), ".bearing/\n/bearing-*/\n");
     const ctx = newCtx();
 
     expect(await run(["workspace", "status", "--repo", root], {
@@ -3473,7 +3534,7 @@ describe("workspace commands", () => {
     const output = ctx.out.join("");
     expect(output).toContain(`Resolved repository: ${root}`);
     expect(output).toContain(`Bearing workspace: ${join(root, ".bearing")}`);
-    expect(output).toContain("Workspace bytes: 5 bytes");
+    expect(output).toContain("Workspace bytes: 12 bytes");
     expect(output).toContain("Gitignore: ignored");
     expect(output).toContain("Safety verdict: safe");
     expect(ctx.getExitCode()).toBeUndefined();
@@ -3484,7 +3545,7 @@ describe("workspace commands", () => {
       const root = await mkdtemp(join(tmpdir(), "bearing-status-ignore-"));
       roots.push(root);
       await mkdir(join(root, ".git"));
-      await writeFile(join(root, ".gitignore"), `dist/\n${line}\n`);
+      await writeFile(join(root, ".gitignore"), `dist/\n${line}\nbearing-*/\n`);
       const ctx = newCtx();
 
       await run(["workspace", "status", "--repo", root], {
@@ -3499,7 +3560,7 @@ describe("workspace commands", () => {
       const root = await mkdtemp(join(tmpdir(), "bearing-status-unignored-"));
       roots.push(root);
       await mkdir(join(root, ".git"));
-      await writeFile(join(root, ".gitignore"), `dist/\n${line}\n`);
+      await writeFile(join(root, ".gitignore"), `dist/\n${line}\nbearing-*/\n`);
       const ctx = newCtx();
 
       await run(["workspace", "status", "--repo", root], {

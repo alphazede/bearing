@@ -1,13 +1,110 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { createServer, request as sendRequest } from "node:http";
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseCrewmatePacketOutcome } from "../contracts/execution-contract.js";
+import { isFocusRuntimeIdentity } from "../contracts/run.js";
 import { createFocusContext, validateFocusCompletion } from "./focus-mode.js";
 import { executionReviewValid } from "./planning-journey.js";
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_REQUEST_BYTES = 16 * 1024;
 const FOCUS_GUARD_LIFETIME_MS = 60 * 60 * 1000;
+/**
+ * Effective guard lifetime in milliseconds. `BEARING_FOCUS_GUARD_LIFETIME_MS`
+ * overrides the default when it parses to a positive safe integer; anything
+ * else falls back so an unset or malformed variable can never disable the
+ * lifetime bound.
+ */
+function focusGuardLifetimeMs() {
+    const value = process.env.BEARING_FOCUS_GUARD_LIFETIME_MS;
+    if (value === undefined)
+        return FOCUS_GUARD_LIFETIME_MS;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : FOCUS_GUARD_LIFETIME_MS;
+}
+/**
+ * The modules whose semantics the guard executes, in the order the guard's
+ * validation path loads them: the guard controller and receipt checks, the
+ * Focus context and completion validation, and the review gate completion
+ * depends on. A change to any of them is a change in Focus validation
+ * behavior, so all of them feed the identity.
+ */
+const FOCUS_VALIDATION_MODULES = ["standalone-focus", "focus-mode", "planning-journey"];
+/** The identity modules' own sources; repairing one of these changes Focus validation semantics. */
+const FOCUS_RUNTIME_MODULE_PATHS = FOCUS_VALIDATION_MODULES.map((name) => `src/journey/${name}.ts`);
+/**
+ * Repository-relative paths a slice may declare when it repairs the Focus
+ * runtime itself: the identity modules' sources and the Focus tests. A write
+ * set that reaches any other path is an ordinary product slice, which may
+ * never bind a receipt to a runtime this guard did not execute.
+ */
+const FOCUS_RUNTIME_REPAIR_PATHS = [
+    ...FOCUS_RUNTIME_MODULE_PATHS,
+    "test/focus-mode.test.ts",
+    "test/planning-journey.test.ts",
+];
+async function loadedModuleBytes(name) {
+    // The loaded module always sits next to this one; probe the compiled
+    // extension first (dist), then the source extension (vitest/tsx).
+    for (const extension of [".js", ".ts"]) {
+        const candidate = fileURLToPath(new URL(`./${name}${extension}`, import.meta.url));
+        try {
+            return await readFile(candidate);
+        }
+        catch {
+            // try the next extension
+        }
+    }
+    throw new Error(`Focus runtime identity: module ${name} is not readable`);
+}
+/**
+ * Deterministic identity of this loaded runtime: a sha256 over the bytes of
+ * the Focus validation modules, each prefixed with its name and length so the
+ * concatenation stays unambiguous. It changes whenever Focus validation
+ * semantics change — no hand-maintained version constant to forget, and no git
+ * state read. A source build and a dist build of the same code hash
+ * differently, so a receipt begun by one is refused by the other.
+ */
+export async function defaultRuntimeIdentity() {
+    const hash = createHash("sha256");
+    for (const name of FOCUS_VALIDATION_MODULES) {
+        const bytes = await loadedModuleBytes(name);
+        hash.update(`${name}:${bytes.length}:`).update(bytes);
+    }
+    return hash.digest("hex");
+}
+/**
+ * Identity of the Focus runtime as it exists in the repository working tree:
+ * the same framing as `defaultRuntimeIdentity` over the identity modules'
+ * source files, read from the run's canonical root with the same containment
+ * and symlink rules as every other repository read. A repair slice changes
+ * those files, so the value recomputed at validation time is the digest of
+ * exactly the runtime the slice produced. Unreadable or uncontained sources
+ * yield undefined and fail the repair lane closed.
+ */
+export async function sourceRuntimeIdentity(root) {
+    const hash = createHash("sha256");
+    for (const name of FOCUS_VALIDATION_MODULES) {
+        const content = await sourceText(root, `src/journey/${name}.ts`);
+        if (content === undefined)
+            return undefined;
+        const bytes = Buffer.from(content, "utf8");
+        hash.update(`${name}:${bytes.length}:`).update(bytes);
+    }
+    return hash.digest("hex");
+}
+/**
+ * True when the run's write set (minus the canonical review) stays inside the
+ * Focus runtime paths AND reaches at least one runtime module source. A write
+ * set touching only Focus tests changes no validation semantics, so it may
+ * never bind a receipt to a runtime this guard did not execute.
+ */
+function isDeclaredRuntimeRepair(context) {
+    const writeSet = context.envelope.allowedPaths.filter((path) => path !== context.reviewPath);
+    return writeSet.every((path) => FOCUS_RUNTIME_REPAIR_PATHS.includes(path)) && writeSet.some((path) => FOCUS_RUNTIME_MODULE_PATHS.includes(path));
+}
 function boundedDiagnostic(value, max) {
     if (!value)
         return undefined;
@@ -29,7 +126,7 @@ function standaloneDiagnostic(failure) {
 function safeRelative(value) {
     return value.length > 0 && value.length <= 4096 && !isAbsolute(value) && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value) && !/(?:^|\/)\.\.(?:\/|$)/.test(value);
 }
-async function readJson(root, path) {
+async function sourceText(root, path) {
     if (!safeRelative(path))
         return undefined;
     const candidate = resolve(root, path);
@@ -43,13 +140,25 @@ async function readJson(root, path) {
         const linked = await lstat(candidate);
         if (!stat.isFile() || linked.isSymbolicLink() || stat.size > MAX_FILE_BYTES || stat.dev !== linked.dev || stat.ino !== linked.ino)
             return undefined;
-        return JSON.parse(await handle.readFile("utf8"));
+        const content = await handle.readFile("utf8");
+        return Buffer.byteLength(content) <= MAX_FILE_BYTES ? content : undefined;
     }
     catch {
         return undefined;
     }
     finally {
         await handle?.close();
+    }
+}
+async function readJson(root, path) {
+    const text = await sourceText(root, path);
+    if (text === undefined)
+        return undefined;
+    try {
+        return JSON.parse(text);
+    }
+    catch {
+        return undefined;
     }
 }
 export function focusRequest(value) {
@@ -66,12 +175,30 @@ function focusReceipt(value) {
     if (typeof value !== "object" || value === null || Array.isArray(value))
         return false;
     const item = value;
-    return Object.keys(item).every((key) => ["artifacts", "evidence", "githubIssueMutation"].includes(key)) && Array.isArray(item.artifacts) && item.artifacts.length > 0 && item.artifacts.length <= 128 && item.artifacts.every((path) => typeof path === "string" && safeRelative(path)) && new Set(item.artifacts).size === item.artifacts.length && Array.isArray(item.evidence) && (item.githubIssueMutation === undefined || typeof item.githubIssueMutation === "boolean");
+    return Object.keys(item).every((key) => ["runtimeIdentity", "artifacts", "evidence", "githubIssueMutation", "taskOutcome"].includes(key)) && isFocusRuntimeIdentity(item.runtimeIdentity) && Array.isArray(item.artifacts) && item.artifacts.length > 0 && item.artifacts.length <= 128 && item.artifacts.every((path) => typeof path === "string" && safeRelative(path)) && new Set(item.artifacts).size === item.artifacts.length && Array.isArray(item.evidence) && (item.githubIssueMutation === undefined || typeof item.githubIssueMutation === "boolean") && (item.taskOutcome === undefined || parseCrewmatePacketOutcome(item.taskOutcome).ok);
 }
-async function validateStored(context, root, issueAuthorized, receiptPath) {
+async function validateStored(context, root, issueAuthorized, receiptPath, runtimeIdentity) {
     const receipt = await readJson(root, receiptPath);
     if (!focusReceipt(receipt))
         return { ok: false, reason: "receipt_invalid" };
+    // CONTRACT-05: a receipt begun under any other runtime never validates here.
+    // The receipt's identity is the one the begin response returned; a mismatch
+    // means the receipt came from a different guard build or was rewritten, and
+    // certifying it would bless semantics this guard never executed.
+    // CONTRACT-08 (issue 61): the one exception is a declared Focus-runtime
+    // repair slice. Its receipt may be bound to the candidate runtime instead of
+    // the guard's, but only when that candidate is exactly the runtime now on
+    // disk — the identity recomputed from the repaired source matches the
+    // receipt, so the bytes certified are precisely what the slice produced, not
+    // a swapped or foreign validator. The original context, baseline, and
+    // authority rules stay untouched, and any other mismatch remains refused.
+    if (receipt.runtimeIdentity !== runtimeIdentity) {
+        if (!isDeclaredRuntimeRepair(context))
+            return { ok: false, reason: "runtime_mismatch" };
+        const produced = await sourceRuntimeIdentity(root);
+        if (produced === undefined || produced !== receipt.runtimeIdentity)
+            return { ok: false, reason: "runtime_mismatch" };
+    }
     // CONTRACT-04: for execution stages (standalone Focus crewmate path), the final-QA review
     // artifact must be declared in the receipt. Omission fails closed with artifact_missing
     // even when a pre-completed review hides under a gitignored .bearing/ plan dir.
@@ -87,17 +214,24 @@ async function validateStored(context, root, issueAuthorized, receiptPath) {
         return { ok: false, reason: "review_invalid" };
     return completion;
 }
+/**
+ * Socket-level errors that mean the guard's loopback listener could not be
+ * opened: port exhaustion, OS/sandbox permission refusal, or a missing
+ * loopback interface. All are environment problems — none is a state
+ * conflict, and the caller must be able to tell them apart.
+ */
+const GUARD_BIND_FAILURE_CODES = new Set(["EADDRINUSE", "EACCES", "EADDRNOTAVAIL"]);
 async function listen(server) {
     return new Promise((resolveListen) => {
-        server.once("error", () => resolveListen(undefined));
+        server.once("error", (error) => resolveListen({ ok: false, code: error?.code }));
         server.listen({ host: "127.0.0.1", port: 0 }, () => {
             const address = server.address();
-            resolveListen(typeof address === "object" && address ? address.port : undefined);
+            resolveListen(typeof address === "object" && address ? { ok: true, port: address.port } : { ok: false });
         });
     });
 }
 /** Start a loopback guard whose authoritative snapshot remains only in this process. */
-export async function beginStandaloneFocus(root, requestPath) {
+export async function beginStandaloneFocus(root, requestPath, runtimeIdentitySource = defaultRuntimeIdentity) {
     const canonicalRoot = await realpath(root).catch(() => undefined);
     if (!canonicalRoot)
         return { ok: false, reason: "request_invalid" };
@@ -108,9 +242,34 @@ export async function beginStandaloneFocus(root, requestPath) {
     if (!parsed.ok)
         return standaloneDiagnostic(parsed);
     const context = parsed.value;
+    // The guard's runtime identity is fixed at begin and immutable for its whole
+    // life: this process can never acquire new validation semantics, and any
+    // receipt not bound to this identity must be refused, not certified.
+    let runtimeIdentity;
+    try {
+        runtimeIdentity = await runtimeIdentitySource();
+    }
+    catch {
+        return { ok: false, reason: "state_invalid" };
+    }
+    if (!isFocusRuntimeIdentity(runtimeIdentity))
+        return { ok: false, reason: "state_invalid" };
     const capability = randomBytes(32).toString("hex");
     const issueAuthorized = request.githubIssueMutationAuthorized === true;
+    const guardLifetimeMs = focusGuardLifetimeMs();
     let server;
+    // The lifetime bounds how long the guard may stay open, but every
+    // non-terminal response resets it: a Navigator phase that keeps validating
+    // past one hour is still correcting against this same baseline, so a fixed
+    // timer must not close the guard under it. Terminal responses consume the
+    // guard, and the close handler clears whatever timer is outstanding.
+    let lifetimeHandle;
+    const resetLifetime = () => {
+        if (lifetimeHandle)
+            clearTimeout(lifetimeHandle);
+        lifetimeHandle = setTimeout(() => server.close(), guardLifetimeMs);
+        lifetimeHandle.unref();
+    };
     server = createServer((incoming, response) => {
         const chunks = [];
         let length = 0;
@@ -121,6 +280,10 @@ export async function beginStandaloneFocus(root, requestPath) {
             finished = true;
             response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
             response.end(JSON.stringify(result), consume ? () => server.close() : undefined);
+            // The guard stays open for correction: restart the lifetime so a long
+            // Navigator phase is bounded by inactivity, not by wall clock from begin.
+            if (!consume)
+                resetLifetime();
         };
         if (incoming.method !== "POST" || incoming.url !== `/validate/${capability}`)
             return finish(404, { ok: false, reason: "state_invalid" }, false);
@@ -147,7 +310,7 @@ export async function beginStandaloneFocus(root, requestPath) {
                     // leaves the immutable guard intact — same rule as 404 and 413 above.
                     if (body.root !== canonicalRoot || typeof body.receiptPath !== "string")
                         return finish(400, { ok: false, reason: "state_invalid" }, false);
-                    const result = await validateStored(context, canonicalRoot, issueAuthorized, body.receiptPath);
+                    const result = await validateStored(context, canonicalRoot, issueAuthorized, body.receiptPath, runtimeIdentity);
                     // Correctable receipt, evidence, review, and containment failures retain
                     // this exact baseline and capability. Success and terminal authority
                     // rejection consume it; the lifetime timer still bounds all correction.
@@ -162,15 +325,20 @@ export async function beginStandaloneFocus(root, requestPath) {
             })();
         });
     });
-    const port = await listen(server);
-    if (!port)
-        return { ok: false, reason: "state_invalid" };
-    const lifetime = setTimeout(() => server.close(), FOCUS_GUARD_LIFETIME_MS);
-    lifetime.unref();
-    server.once("close", () => clearTimeout(lifetime));
-    return { ok: true, runId: `v1.${port}.${capability}`, envelope: context.envelope };
+    const bound = await listen(server);
+    if (!bound.ok) {
+        // A bind error is an environment problem, not a state conflict: surface it
+        // distinctly so the caller can tell "the guard could not open its
+        // loopback listener" from "the plan state is inconsistent". Unknown codes
+        // still fail closed as state_invalid.
+        return { ok: false, reason: bound.code !== undefined && GUARD_BIND_FAILURE_CODES.has(bound.code) ? "guard_bind_failed" : "state_invalid" };
+    }
+    resetLifetime();
+    server.once("close", () => { if (lifetimeHandle)
+        clearTimeout(lifetimeHandle); });
+    return { ok: true, runId: `v1.${bound.port}.${capability}`, envelope: context.envelope, runtimeIdentity };
 }
-export async function validateStandaloneFocus(root, runId, receiptPath, timeoutMs = 10_000) {
+export async function validateStandaloneFocus(root, runId, receiptPath, timeoutMs = 10_000, runtimeIdentitySource = defaultRuntimeIdentity) {
     const match = /^v1\.([1-9][0-9]{0,4})\.([0-9a-f]{64})$/.exec(runId);
     const port = match ? Number(match[1]) : 0;
     if (!match || port > 65_535 || !safeRelative(receiptPath))
@@ -178,6 +346,34 @@ export async function validateStandaloneFocus(root, runId, receiptPath, timeoutM
     const canonicalRoot = await realpath(root).catch(() => undefined);
     if (!canonicalRoot)
         return { ok: false, reason: "state_invalid" };
+    // Client-side provenance gate: a receipt bound to any runtime other than the
+    // one this process loaded must not proceed. The guard's own gate still
+    // refuses a mismatched receipt from a direct HTTP client; this one catches a
+    // run begun under a stale or different guard before any request is sent.
+    // Unreadable receipts are left to the guard, which answers receipt_invalid
+    // exactly as it always has. The exception mirrors the guard: a receipt bound
+    // to the candidate runtime a declared repair slice produced is forwarded
+    // when the candidate recomputes to the exact runtime on disk — the guard
+    // still applies its declared-repair-slice rules before certifying anything.
+    let currentIdentity;
+    try {
+        currentIdentity = await runtimeIdentitySource();
+    }
+    catch {
+        return { ok: false, reason: "state_invalid" };
+    }
+    if (!isFocusRuntimeIdentity(currentIdentity))
+        return { ok: false, reason: "state_invalid" };
+    const storedReceipt = await readJson(canonicalRoot, receiptPath);
+    const recordedIdentity = typeof storedReceipt === "object" && storedReceipt !== null
+        ? storedReceipt.runtimeIdentity
+        : undefined;
+    if (typeof recordedIdentity === "string" && recordedIdentity !== currentIdentity) {
+        const produced = await sourceRuntimeIdentity(canonicalRoot);
+        if (produced === undefined || produced !== recordedIdentity) {
+            return { ok: false, reason: "runtime_mismatch" };
+        }
+    }
     const body = JSON.stringify({ root: canonicalRoot, receiptPath });
     return new Promise((resolveResult) => {
         let settled = false;

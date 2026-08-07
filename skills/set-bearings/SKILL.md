@@ -13,7 +13,9 @@ Create or resume only the bounded plan workspace, `plan-spec.md` stub, and
 repository map requested by Bearing. Use the confirmed resolved plan directory
 verbatim. Never derive, slug, or suffix a plan directory. Do not ask planning
 questions, design, draft implementation, or edit product code. Never delete an
-existing plan or `.bearing` state.
+existing plan or `.bearing` state, and never remove, alter, or create a
+`## Risk Profile` section in the stub: the risk profile is owner and Gather
+Supplies content, not a stub concern.
 
 Bearing normally performs this stage deterministically. Treat its supplied
 stage boundary, repository root, and artifact paths as authoritative.

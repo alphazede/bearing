@@ -1,6 +1,6 @@
 import type { ContextMode, RoleProjection } from "../profile/profile.js";
 
-export interface ContextSource {
+interface ContextSource {
   readonly id: string;
   readonly title: string;
   readonly excerpt?: string;

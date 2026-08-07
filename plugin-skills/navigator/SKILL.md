@@ -44,7 +44,8 @@ commit the verified verdict. Its result carries `reviewRoute` — the primary
 and fallbacks for the requested review class only — under the same rule: walk
 it in order, never substitute, and stop on `requiredOwnerAction`.
 
-After integration, persist a receipt containing every changed artifact and
+After integration, persist a receipt containing the `runtimeIdentity` value
+returned verbatim by `bearing_focus_begin`, every changed artifact, and
 one truthful result for every required command ID as a repository-relative
 JSON file under the same `.bearing/focus/` area (for example
 `.bearing/focus/receipt.json`), then call the `bearing_focus_validate` MCP

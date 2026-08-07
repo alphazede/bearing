@@ -20,7 +20,7 @@ describe("workspace-root authority", () => {
     try {
       const pinned = await pinWorkspaceRoot(repo);
       expect(pinned.repositoryPath).toBe(await realpath(repo));
-      expect(pinned.bearingPath).toBe(bearing);
+      expect(pinned.workspacePath).toBe(bearing);
       expect(pinned.dev).toBeGreaterThan(0);
       expect(pinned.ino).toBeGreaterThan(0);
 

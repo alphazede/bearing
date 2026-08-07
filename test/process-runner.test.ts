@@ -64,6 +64,9 @@ describe("production process runner", () => {
   it("builds exact provider argv and keeps prompt on stdin", async () => {
     const codex = await execute({ provider: "codex", model: "gpt-5.6-sol", reasoning: "medium" });
     expect(codex.calls[0]).toMatchObject({ executable: "codex", args: ["exec", "--json", "-m", "gpt-5.6-sol", "-c", 'model_reasoning_effort="medium"', "-c", 'approval_policy="never"', "-C", repositoryPath, "-s", "workspace-write", "--ephemeral", "-"], options: { cwd: repositoryPath, shell: false, detached: true, stdio: ["pipe", "pipe", "pipe"] }, stdin: "private source password=hunter2" });
+    const grok = await execute({ provider: "grok", model: "grok-build", reasoning: "medium" });
+    expect(grok.calls[0].executable).toBe("grok-safe");
+    expect(grok.calls[0].args).toEqual(["--", "--output-format", "streaming-json", "--prompt-file", "/dev/stdin", "--cwd", repositoryPath, "--model", "grok-build", "--reasoning-effort", "medium", "--max-turns", "2", "--tools", "read,write", "--disallowed-tools", "external-action", "--sandbox", "strict", "--permission-mode", "dontAsk", "--no-memory", "--no-subagents", "--disable-web-search"]);
     const claude = await execute({ provider: "claude", model: "sonnet", reasoning: "high" });
     expect(claude.calls[0]).toMatchObject({ executable: "claude", args: ["--print", "--output-format", "stream-json", "--verbose", "--model", "sonnet", "--effort", "high", "--permission-mode", "dontAsk", "--allowedTools", "Read,Edit,Write", "--no-session-persistence"], stdin: "private source password=hunter2" });
     const pi = await execute({ provider: "pi", model: "zai/glm-5.2", reasoning: "medium" }, {}, { noSession: true });
@@ -77,7 +80,7 @@ describe("production process runner", () => {
     const opencode = await execute({ provider: "opencode", model: "openai/gpt-5", reasoning: "high" });
     expect(opencode.calls[0]).toMatchObject({ executable: "opencode", stdin: "", args: expect.arrayContaining(["run", "--format", "json", "--dir", repositoryPath, "--model", "openai/gpt-5", "--variant", "high", "--file"]) });
     expect(JSON.parse((opencode.calls[0].options as { env: Record<string, string> }).env.OPENCODE_PERMISSION)).toMatchObject({ "*": "deny", read: "allow", edit: "allow", bash: "deny", task: "deny", webfetch: "deny", websearch: "deny", external_directory: "deny" });
-    for (const result of [codex, claude, agy, opencode, pi, piV4]) {
+    for (const result of [codex, grok, claude, agy, opencode, pi, piV4]) {
       expect(result.calls[0].args.join(" ")).not.toMatch(/hunter2|private source/);
       expect(JSON.stringify(result.receipt)).not.toMatch(/hunter2|private source/);
     }
@@ -88,6 +91,9 @@ describe("production process runner", () => {
     expect(codex.calls).toHaveLength(0);
     expect(codex.receipt).toMatchObject({ status: "blocked", failure: "unsupported_policy", warningCodes: expect.arrayContaining(["codex_network_policy_unsupported"]) });
     const readOnly = { authority: { read: true, write: false, network: false, workspace: true, externalAction: false } };
+    const grok = await execute({ provider: "grok", model: "grok-build", reasoning: "medium" }, readOnly);
+    expect(grok.calls[0].args).toEqual(expect.arrayContaining(["--tools", "read", "--disallowed-tools", "external-action", "--sandbox", "strict"]));
+    expect(grok.receipt.warningCodes).not.toContain("tools_narrowed");
     const pi = await execute({ provider: "pi", model: "zai/glm-5.2", reasoning: "medium" }, readOnly);
     expect(pi.calls[0].args).toEqual(expect.arrayContaining(["--tools", "read", "--exclude-tools", "external-action"]));
     expect(pi.receipt.warningCodes).not.toContain("tools_narrowed");
@@ -133,7 +139,7 @@ describe("production process runner", () => {
     expect(result).toMatchObject({ exitCode: 0, usage: { tokens: 5 }, events: [{ type: "message", data: { content: "ok" } }, { type: "complete" }] });
   });
 
-  it("parses compact single-result output with final content and exact usage", async () => {
+  it("parses compact DeepSeek Claude results with final content and exact usage", async () => {
     const output = JSON.stringify({
       type: "result",
       subtype: "success",
@@ -141,13 +147,13 @@ describe("production process runner", () => {
       usage: { input_tokens: 40_210, output_tokens: 2_259 },
     });
     const parsed = await harness(output).runner.run({
-      routeId: "claude",
-      executable: "claude",
+      routeId: "deepseek-claude",
+      executable: "claude-deepseek",
       args: [],
       stdin: "bounded prompt",
       cwd: repositoryPath,
       timeoutMs: 50,
-      runId: "claude-compact-json",
+      runId: "deepseek-claude-json",
     });
 
     expect(parsed).toEqual({
@@ -182,6 +188,11 @@ describe("production process runner", () => {
   it("parses OpenCode step-finish token usage", async () => {
     const h = harness('{"type":"text","part":{"text":"BEARING_RESULT {\\"kind\\":\\"action\\",\\"summary\\":\\"done\\",\\"artifacts\\":[]}"}}\n{"type":"step_finish","part":{"tokens":{"input":2,"output":3,"reasoning":1}}}\n{"type":"step_finish","part":{"tokens":{"input":4,"output":2,"reasoning":0}}}\n');
     expect(await h.runner.run({ routeId: "opencode", executable: "opencode", args: [], stdin: "x", cwd: repositoryPath, timeoutMs: 50, runId: "opencode-usage" })).toMatchObject({ exitCode: 0, usage: { tokens: 12 }, events: [{ type: "text", data: { content: expect.stringContaining("BEARING_RESULT") } }, { type: "step_finish" }, { type: "step_finish" }] });
+  });
+
+  it("parses Pi 0.82.1 usage nested in message.usage", async () => {
+    const h = harness('{"type":"message_start","message":{"id":"msg_1","role":"user","content":[],"usage":{"input_tokens":41,"output_tokens":17}}}\n{"type":"message_stop"}\n');
+    expect(await h.runner.run({ routeId: "pi", executable: "pi", args: [], stdin: "x", cwd: repositoryPath, timeoutMs: 50, runId: "pi-usage" })).toMatchObject({ exitCode: 0, usage: { tokens: 58 }, events: [{ type: "message_start", data: { id: "msg_1", content: [] } }, { type: "message_stop" }] });
   });
 
   it("resolves discovery commands through the safe executable boundary", () => {
@@ -317,6 +328,30 @@ describe("production process runner", () => {
     expect(kill).toHaveBeenCalledTimes(1);
     expect(kill).toHaveBeenCalledWith(-4321, "SIGTERM");
     kill.mockRestore();
+  });
+
+  it("does not resolve success while the process group survives the leader's close", async () => {
+    const child = fakeChild('{"type":"complete","usage":{"total_tokens":2}}\n');
+    Object.assign(child, { pid: 4321 });
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    try {
+      const runner = new NodeProcessRunner(() => child, () => true, (executable, cwd) => ({ executable, cwd }), undefined, () => true, async () => false);
+      const result = await runner.run({ routeId: "codex", executable: "codex", args: [], stdin: "x", cwd: repositoryPath, timeoutMs: 50, runId: "survivor" });
+      expect(result).toEqual({ unknownSideEffect: true });
+      expect(kill).toHaveBeenCalledWith(-4321, "SIGTERM");
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it("resolves success once the process group has quiesced", async () => {
+    const child = fakeChild('{"type":"complete","usage":{"total_tokens":2}}\n');
+    Object.assign(child, { pid: 4321 });
+    const wait = vi.fn(async (_pid: number, _graceMs: number, probe: (pid: number) => boolean) => !probe(4321));
+    const runner = new NodeProcessRunner(() => child, () => true, (executable, cwd) => ({ executable, cwd }), undefined, () => false, wait);
+    const result = await runner.run({ routeId: "codex", executable: "codex", args: [], stdin: "x", cwd: repositoryPath, timeoutMs: 50, runId: "quiescent" });
+    expect(result).toMatchObject({ exitCode: 0, usage: { tokens: 2 } });
+    expect(wait).toHaveBeenCalledWith(4321, expect.any(Number), expect.any(Function));
   });
 
   it("refuses an unresolved executable before spawning", async () => {

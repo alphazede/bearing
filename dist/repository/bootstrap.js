@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 import { resolveExecutable } from "./executable-path.js";
 import { assessRepositorySafety } from "./safety.js";
+import { isVisibleWorkspaceName } from "./workspace-location.js";
 import { assertContained, assertWorkspaceRoot, isWorkspaceRootError, pinWorkspaceRoot } from "./workspace-root.js";
 const WORKSPACE_SCHEMA_VERSION = 1;
 const BEARING_DIR = ".bearing";
@@ -14,6 +15,7 @@ const TEMP_PREFIX = ".bearing.tmp-";
 const OWNER_FILE = "owner.json";
 const OWNER_TEMP_PREFIX = ".owner.tmp-";
 const BEARING_IGNORE_LINES = [".bearing", ".bearing/", "/.bearing", "/.bearing/"];
+const VISIBLE_WORKSPACE_IGNORE_LINES = ["bearing-*", "bearing-*/", "/bearing-*", "/bearing-*/"];
 export class RepositoryBootstrap {
     async choose(inputPath, opts) {
         const validated = await this.validateRepositoryPath(inputPath);
@@ -42,6 +44,14 @@ export class RepositoryBootstrap {
         }
         if (!safety.ok && safety.code === "repository_nested_in_git") {
             return { ok: false, reason: "repository_nested_in_git", containingRepositoryPath: containingGitRoot };
+        }
+        // A top-level directory that only looks like a visible per-plan workspace (no runs/) is an
+        // owner-owned placeholder, not a Bearing workspace. Once Bearing ignores `bearing-*/` and
+        // enumerates these names, it would be misreported as a plan workspace and could swallow a
+        // future migration, so fail closed with a typed reason until the owner removes or renames it.
+        const placeholder = await findVisibleWorkspacePlaceholder(repositoryPath);
+        if (placeholder !== undefined) {
+            return { ok: false, reason: "visible_workspace_placeholder" };
         }
         const bearingPath = join(repositoryPath, BEARING_DIR);
         let existing = await this.validateExistingBearing(bearingPath, repositoryPath);
@@ -212,6 +222,44 @@ export class RepositoryBootstrap {
         }
     }
 }
+/**
+ * The first top-level directory that matches the visible per-plan workspace
+ * namespace but holds no run audit trail (`runs/`), or undefined when none.
+ * Only real non-symlink directories count: a symlink or file is never a
+ * workspace and does not trigger the placeholder blocker.
+ */
+async function findVisibleWorkspacePlaceholder(repositoryPath) {
+    let entries;
+    try {
+        entries = await readdir(repositoryPath);
+    }
+    catch (error) {
+        // The path was validated readable moments ago; an ENOENT race just means
+        // there is nothing to scan, anything else is a real failure.
+        if (isNodeError(error, "ENOENT"))
+            return undefined;
+        throw error;
+    }
+    for (const name of entries) {
+        if (!isVisibleWorkspaceName(name))
+            continue;
+        const path = join(repositoryPath, name);
+        try {
+            const entry = await lstat(path);
+            if (entry.isSymbolicLink() || !entry.isDirectory())
+                continue;
+            const hasRuns = await lstat(join(path, "runs"))
+                .then((runs) => runs.isDirectory())
+                .catch(() => false);
+            if (!hasRuns)
+                return name;
+        }
+        catch {
+            continue;
+        }
+    }
+    return undefined;
+}
 async function findContainingGitRoot(candidate) {
     let current = dirname(candidate);
     while (true) {
@@ -277,12 +325,26 @@ export function ignoresBearingDirectory(gitignoreBody) {
         .split(/\r?\n/)
         .some((line) => BEARING_IGNORE_LINES.includes(line.trim()));
 }
+/** Recognizes every spelling that covers the visible `bearing-<plan>/` per-plan workspaces. */
+export function ignoresBearingWorkspaces(gitignoreBody) {
+    return gitignoreBody
+        .split(/\r?\n/)
+        .some((line) => VISIBLE_WORKSPACE_IGNORE_LINES.includes(line.trim()));
+}
 /**
- * Distinguishes "a .gitignore exists but does not ignore .bearing/" from "there is
- * no .gitignore at all". Only the first case can be repaired by the consent
- * endpoint, which appends to an existing regular file and never creates one, so
- * only the first sets `gitignoreMissing`. Reporting the absent case as missing
- * would offer the owner an add action that always fails.
+ * True only when a .gitignore body covers BOTH the hidden `.bearing/` and every
+ * visible `bearing-<plan>/` workspace. Bearing never reports the repository as
+ * safe to commit while either audit-trail location could be tracked.
+ */
+export function gitignoreCoversBearingState(gitignoreBody) {
+    return ignoresBearingDirectory(gitignoreBody) && ignoresBearingWorkspaces(gitignoreBody);
+}
+/**
+ * Distinguishes "a .gitignore exists but does not ignore Bearing's state" from
+ * "there is no .gitignore at all". Only the first case can be repaired by the
+ * consent endpoint, which appends to an existing regular file and never creates
+ * one, so only the first sets `gitignoreMissing`. Reporting the absent case as
+ * missing would offer the owner an add action that always fails.
  */
 async function gitignoreState(repositoryPath, isGitRoot) {
     if (!isGitRoot)
@@ -290,7 +352,7 @@ async function gitignoreState(repositoryPath, isGitRoot) {
     const gitignore = await readRegularFileNoFollow(join(repositoryPath, ".gitignore"));
     if (!gitignore.ok)
         return { missing: false, absent: true };
-    return { missing: !ignoresBearingDirectory(gitignore.body), absent: false };
+    return { missing: !gitignoreCoversBearingState(gitignore.body), absent: false };
 }
 function normalizeOwnerName(value) {
     const name = value.trim();

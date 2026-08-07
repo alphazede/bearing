@@ -4,7 +4,8 @@ import { createReadStream } from "node:fs";
 import { lstat, readFile, readlink, realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import { classifyWriteSetClause } from "./plan-structure.js";
+import { classifyWriteSetClause, parsePlanDocuments } from "./plan-structure.js";
+import { isVisibleWorkspaceName } from "../repository/workspace-location.js";
 
 const exec = promisify(execFile);
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
@@ -13,6 +14,12 @@ const MAX_TEXT = 4096;
 const SAFE_ID = /^(?:CMD|PROC)-[A-Z0-9][A-Z0-9.-]*$/;
 const SLICE = /^###\s+Slice\s+(?<id>[A-Za-z]+\d+|\d+(?:\.\d+)+)\b.*$/gm;
 const MANIFEST = /^###\s+(?<id>[A-Za-z]+\d+|\d+(?:\.\d+)+)\s+execution manifest\s*$/gmi;
+// A lane is a sub-division of one slice's execution manifest: a `#### Lane <dotted-id>`
+// block inside the manifest section that declares a bounded partition of the manifest's
+// write set and command set. Dotted sub-identifiers match the closed id grammar's
+// `\d+(?:\.\d+)+` form, so a lane is selectable through the same currentSlice channel
+// that already accepts dotted slice ids.
+const LANE = /^####\s+Lane\s+(?<id>\d+(?:\.\d+)+)\b.*$/gmi;
 
 export type FocusRole = "explorer" | "navigator" | "crewmate";
 
@@ -51,6 +58,9 @@ export type FocusRejection =
   | "slice_structure_invalid"
   | "duplicate_slice_id"
   | "duplicate_manifest_id"
+  | "duplicate_lane_id"
+  | "lane_write_set_escape"
+  | "lane_command_escape"
   | "slice_not_found"
   | "field_missing"
   | "field_invalid"
@@ -83,6 +93,7 @@ interface GitSnapshot {
   readonly head: string | null;
   readonly paths: ReadonlyMap<string, string>;
   readonly committedPaths: ReadonlySet<string>;
+  readonly untrackedPaths: ReadonlySet<string>;
 }
 
 export type FocusCompletion =
@@ -94,7 +105,13 @@ function boundedText(value: string, max = MAX_TEXT): boolean {
 }
 
 function safePath(value: string): boolean {
-  return boundedText(value) && !isAbsolute(value) && posix.normalize(value) === value && !/[*<>\\]/.test(value) && value.split("/").every((part) => part && part !== "." && part !== "..");
+  if (!value || typeof value !== "string") return false;
+  // A single trailing slash marks a directory write-set entry ("guest/odi-harness/"); it is kept
+  // verbatim in the envelope and normalized when allowed-path prefixes are built. posix.normalize
+  // preserves one trailing slash, so the equality below still passes; the segment check runs on the
+  // slash-stripped form, so "..", ".", absolute paths, and doubled slashes all still fail.
+  const canonical = value.endsWith("/") ? value.slice(0, -1) : value;
+  return boundedText(value) && !isAbsolute(value) && posix.normalize(value) === value && !/[*<>\\]/.test(value) && canonical.split("/").every((part) => part && part !== "." && part !== "..");
 }
 
 function field(section: string, name: string): string | undefined {
@@ -114,6 +131,24 @@ function sections(content: string, pattern: RegExp, duplicateReason: "duplicate_
     if (!id) return reject("slice_structure_invalid");
     if (result.has(id)) return reject(duplicateReason, { sliceId: id });
     result.set(id, content.slice(matches[index].index ?? 0, matches[index + 1]?.index ?? content.length));
+  }
+  return { ok: true, value: result };
+}
+
+/** Extract every `#### Lane <dotted-id>` block declared inside an execution manifest
+ * section. A lane id is selectable as currentSlice and must be declared exactly once
+ * across the whole plan; each lane keeps its own section text so its fields are read
+ * from the lane block, never from the parent manifest. */
+function laneSections(manifests: ReadonlyMap<string, string>): { readonly ok: true; readonly value: Map<string, { readonly sliceId: string; readonly section: string }> } | FocusFailure {
+  const result = new Map<string, { readonly sliceId: string; readonly section: string }>();
+  for (const [sliceId, section] of manifests) {
+    const matches = [...section.matchAll(LANE)];
+    for (let index = 0; index < matches.length; index += 1) {
+      const id = matches[index].groups?.id;
+      if (!id) return reject("slice_structure_invalid");
+      if (result.has(id)) return reject("duplicate_lane_id", { sliceId, field: "Lane", detail: id });
+      result.set(id, { sliceId, section: section.slice(matches[index].index ?? 0, matches[index + 1]?.index ?? section.length) });
+    }
   }
   return { ok: true, value: result };
 }
@@ -159,8 +194,28 @@ function parseContract(plan: string, implementation: string, seit: string, curre
   if (!manifests.ok) return manifests;
   if (!sliceSections.value.size || sliceSections.value.size !== manifests.value.size) return reject("slice_structure_invalid");
   if (sliceSections.value.size > MAX_ITEMS) return reject("contract_limit_exceeded", { field: "Slices" });
-  if (currentSlice && (!sliceSections.value.has(currentSlice) || !manifests.value.has(currentSlice))) return reject("slice_not_found", { field: "currentSlice" });
-  const selectedSlices = currentSlice ? new Map([[currentSlice, sliceSections.value.get(currentSlice)!]]) : sliceSections.value;
+
+  const lanes = laneSections(manifests.value);
+  if (!lanes.ok) return lanes;
+
+  let selectedSlices: Map<string, string>;
+  let selectedLaneId: string | undefined;
+
+  if (currentSlice) {
+    if (sliceSections.value.has(currentSlice) && manifests.value.has(currentSlice)) {
+      selectedSlices = new Map([[currentSlice, sliceSections.value.get(currentSlice)!]]);
+    } else if (lanes.value.has(currentSlice)) {
+      const laneInfo = lanes.value.get(currentSlice)!;
+      if (!sliceSections.value.has(laneInfo.sliceId)) return reject("slice_not_found", { field: "currentSlice" });
+      selectedSlices = new Map([[laneInfo.sliceId, sliceSections.value.get(laneInfo.sliceId)!]]);
+      selectedLaneId = currentSlice;
+    } else {
+      return reject("slice_not_found", { field: "currentSlice" });
+    }
+  } else {
+    selectedSlices = sliceSections.value;
+  }
+
   const allowedPaths: string[] = [];
   const commands: string[] = [];
   const requirements: string[] = [];
@@ -169,8 +224,18 @@ function parseContract(plan: string, implementation: string, seit: string, curre
     if (!manifest) return reject("slice_structure_invalid", { sliceId: id, field: "execution manifest" });
     const goal = field(slice, "Goal");
     const requirementField = field(slice, "Requirement IDs");
-    const writeSet = field(manifest, "Write set");
-    const commandField = field(manifest, "Command IDs");
+
+    let writeSet: string | undefined;
+    let commandField: string | undefined;
+
+    const laneInfo = selectedLaneId ? lanes.value.get(selectedLaneId) : undefined;
+    if (laneInfo) {
+      writeSet = field(laneInfo.section, "Write set");
+      commandField = field(laneInfo.section, "Command IDs");
+    } else {
+      writeSet = field(manifest, "Write set");
+      commandField = field(manifest, "Command IDs");
+    }
     if (!goal) return reject("field_missing", { sliceId: id, field: "Goal" });
     if (!requirementField) return reject("field_missing", { sliceId: id, field: "Requirement IDs" });
     if (!writeSet) return reject("field_missing", { sliceId: id, field: "Write set" });
@@ -203,9 +268,53 @@ function parseContract(plan: string, implementation: string, seit: string, curre
     if (!ids.length || ids.some((command) => !SAFE_ID.test(command))) return reject("command_id_invalid", { sliceId: id, field: "Command IDs" });
     const unmapped = ids.find((command) => !new RegExp(`\\b${command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(seit));
     if (unmapped) return reject("command_id_unmapped", { sliceId: id, field: "Command IDs", detail: unmapped });
+    if (laneInfo) {
+      // A lane is a bounded partition of its parent slice's execution contract: every path and
+      // command it declares must already be authorized by the slice, or the lane would widen the
+      // write set and evidence surface beyond what the plan approved. The parent's own fields are
+      // read from the manifest text BEFORE the first lane block, so a lane can never stand in for
+      // its parent's authority; when the manifest declares no fields of its own, the lanes
+      // jointly define the slice, so the union of every lane's declarations is the authority.
+      const parentPortion = manifest.slice(0, [...manifest.matchAll(LANE)][0]?.index ?? manifest.length);
+      const siblingLanes = [...lanes.value.values()].filter((lane) => lane.sliceId === id);
+      const siblingWriteSets = siblingLanes.map((lane) => field(lane.section, "Write set")).filter((value): value is string => value !== undefined);
+      const siblingCommandFields = siblingLanes.map((lane) => field(lane.section, "Command IDs")).filter((value): value is string => value !== undefined);
+      const parentWriteSet = field(parentPortion, "Write set") ?? siblingWriteSets.join("\n");
+      const parentCommandField = field(parentPortion, "Command IDs") ?? siblingCommandFields.join("\n");
+      const parentAllowed = createAllowedPathMatcher([...parentWriteSet.matchAll(/`([^`]+)`/g)].map((match) => match[1]));
+      const escapingPath = paths.find((path) => !parentAllowed(path));
+      if (escapingPath) return reject("lane_write_set_escape", { sliceId: id, field: "Write set", detail: escapingPath });
+      const parentCommands = new Set(commandIds(parentCommandField));
+      const escapingCommand = ids.find((command) => !parentCommands.has(command));
+      if (escapingCommand) return reject("lane_command_escape", { sliceId: id, field: "Command IDs", detail: escapingCommand });
+    }
     allowedPaths.push(...paths);
     commands.push(...ids);
     requirements.push(...requirementIds);
+  }
+  if (currentSlice) {
+    // A wave-level shared prelude is a same-wave slice the selected slice declares
+    // as a prerequisite in the dependency graph. Its write-set paths are approved
+    // plan content (package manifests, lockfiles, guard/config), so they join the
+    // envelope instead of being narrowed away with the unselected slices. A lane
+    // run inherits the PARENT slice's wave position and dependency closure: the
+    // lane is a sub-division of the slice, not a node of its own in the wave graph.
+    const model = parsePlanDocuments({ plan, design: "", seit, implementation });
+    const scopeId = selectedLaneId ? lanes.value.get(selectedLaneId)!.sliceId : currentSlice;
+    const waveNumber = [...model.waves.entries()].find(([, ids]) => ids.has(scopeId))?.[0];
+    if (waveNumber !== undefined) {
+      const waveSliceIds = model.waves.get(waveNumber)!;
+      const prerequisites = new Set<string>();
+      for (const [source, targets] of model.dependencies) {
+        if (targets.has(scopeId) && waveSliceIds.has(source)) prerequisites.add(source);
+      }
+      for (const prerequisite of prerequisites) {
+        const paths = model.manifests.get(prerequisite)?.writeSetPaths ?? [];
+        const unsafe = paths.find((path) => !safePath(path));
+        if (unsafe) return reject("write_set_path_invalid", { sliceId: prerequisite, field: "Write set", detail: unsafe });
+        allowedPaths.push(...paths);
+      }
+    }
   }
   const uniquePaths = [...new Set(allowedPaths)].sort();
   const uniqueCommands = [...new Set(commands)].sort();
@@ -219,7 +328,7 @@ function parseContract(plan: string, implementation: string, seit: string, curre
     allowedPaths: uniquePaths,
     requiredEvidence: uniqueCommands.map((id) => `${id}: passing command evidence`),
     seitCommandIds: uniqueCommands,
-    remainingSlices: [...selectedSlices.keys()],
+    remainingSlices: selectedLaneId ? [selectedLaneId] : [...selectedSlices.keys()],
   } };
 }
 
@@ -281,6 +390,7 @@ export async function snapshotGitState(root: string, beforeHead?: string | null)
     const { stdout } = await exec("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd: canonicalRoot, encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
     const records = Buffer.from(stdout).toString("utf8").split("\0").filter(Boolean);
     const paths: string[] = [];
+    const untracked = new Set<string>();
     for (let index = 0; index < records.length; index += 1) {
       const record = records[index];
       if (record.length < 4) return undefined;
@@ -290,7 +400,14 @@ export async function snapshotGitState(root: string, beforeHead?: string | null)
       // content to snapshot, so skip it rather than failing the whole snapshot closed.
       if (status === "??" && path.endsWith("/")) continue;
       if (!safePath(path)) return undefined;
-      if (!(status === "??" && path.startsWith(".bearing/"))) paths.push(path);
+      // The hidden `.bearing/` tree and the visible `bearing-<plan>/` per-plan workspaces are both
+      // Bearing-owned, so their untracked churn (ledgers, snapshots, checkpoints) stays invisible to
+      // the completion diffs. Tracked content inside either still counts and fails closed.
+      const visibleSegment = path.includes("/") ? path.slice(0, path.indexOf("/")) : "";
+      if (!(status === "??" && (path.startsWith(".bearing/") || isVisibleWorkspaceName(visibleSegment)))) {
+        paths.push(path);
+        if (status === "??") untracked.add(path);
+      }
       if (/[RC]/.test(status)) {
         const prior = records[++index];
         if (!prior || !safePath(prior)) return undefined;
@@ -302,6 +419,7 @@ export async function snapshotGitState(root: string, beforeHead?: string | null)
       head,
       paths: new Map(await Promise.all(unique.map(async (path) => [path, await fingerprint(canonicalRoot, path)] as const))),
       committedPaths: committed,
+      untrackedPaths: untracked,
     };
   } catch {
     return undefined;
@@ -366,7 +484,89 @@ function validEvidence(required: readonly string[], evidence: readonly CommandEv
   return required.every((id) => seen.has(id));
 }
 
-export async function validateFocusCompletion(context: FocusContext, root: string, artifacts: readonly string[], evidence: readonly CommandEvidence[]): Promise<FocusCompletion> {
+function createAllowedPathMatcher(allowedPaths: readonly string[]): (path: string) => boolean {
+  // A directory write-set entry ("guest/odi-harness") authorizes its descendants, but only on a
+  // segment boundary: the prefix must end in "/", so a sibling ("guest/odi-harness-evil") never
+  // matches. An entry written with a trailing slash ("guest/odi-harness/") is normalized when the
+  // prefixes are built, so it authorizes both the directory path itself and its descendants.
+  // Traversal segments are refused even when a prefix would otherwise match, so a declared path
+  // like "guest/odi-harness/../escape.ts" cannot escape through the directory entry.
+  const normalizedEntries = allowedPaths.map((entry) => entry.endsWith("/") ? entry.slice(0, -1) : entry);
+  const exact = new Set([...allowedPaths, ...normalizedEntries]);
+  const prefixes = normalizedEntries.map((entry) => `${entry}/`);
+  return (path) => {
+    if (path.split("/").includes("..")) return false;
+    if (exact.has(path)) return true;
+    return prefixes.some((prefix) => path.startsWith(prefix));
+  };
+}
+
+/** Untracked paths under these top-level directories are treated as disposable command output
+ * (e.g. `dist/**` emitted by a required `pnpm build`), never as authored changes. The list is
+ * deliberately small and fixed: filtering is a containment relaxation, so only well-established
+ * generated-output roots qualify. */
+const GENERATED_OUTPUT_ROOTS = ["dist", "build", "coverage"] as const;
+
+/** Whether an untracked path is a disposable build artifact: strictly under a known generated-output
+ * root, outside the write set, and a regular file. Tracked files, committed paths, symlinks, and any
+ * other untracked path fail closed exactly as before. */
+async function disposableBuildOutput(root: string, after: GitSnapshot, allowed: (path: string) => boolean, path: string): Promise<boolean> {
+  if (allowed(path)) return false;
+  if (after.committedPaths.has(path) || !after.untrackedPaths.has(path)) return false;
+  if (!GENERATED_OUTPUT_ROOTS.some((generatedRoot) => path.startsWith(`${generatedRoot}/`))) return false;
+  // Builds emit regular files, never symlinks: an untracked symlink under a generated root is a
+  // repository-containment signal and must fail closed like any other symlink.
+  try {
+    return !(await lstat(resolve(root, path))).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Paths a Focus run's execution was observed to touch, recorded by
+ * `recordFocusCheckpoint` and keyed by context identity. The guard and the
+ * journey hold one immutable `FocusContext` object for the whole run, so a
+ * WeakMap ties the audit to that object without extending the context's
+ * serialized shape, and drops it when the run ends.
+ */
+const focusMutationAudit = new WeakMap<FocusContext, ReadonlySet<string>>();
+
+export type FocusCheckpointResult =
+  | { readonly ok: true; readonly observed: readonly string[] }
+  | { readonly ok: false; readonly reason: "git_state" };
+
+/**
+ * Issue 119: record one intermediate point of a Focus run's execution against
+ * the exact base the envelope was built from (`context.beforeHead` /
+ * `context.before`) — the same base `validateFocusCompletion` diffs against at
+ * the end of the run. The final completion diff cannot see a path that was
+ * created or modified during execution and restored before the run returned:
+ * the file is gone, so the final snapshot is clean. Recording the base diff at
+ * checkpoints keeps those transient paths observable, and
+ * `validateFocusCompletion` fails any recorded path that sits outside the
+ * write set. Disposable build output is filtered exactly as the final
+ * validation filters it, so a required `pnpm build` never poisons the audit.
+ * Use the same context object the run will validate with: the audit is keyed
+ * by that object's identity.
+ */
+export async function recordFocusCheckpoint(context: FocusContext, root: string): Promise<FocusCheckpointResult> {
+  const after = await snapshotGitState(root, context.beforeHead);
+  if (!after || (after.head !== context.beforeHead && after.committedPaths.size === 0)) return { ok: false, reason: "git_state" };
+  const allowed = createAllowedPathMatcher([...context.envelope.allowedPaths, context.reviewPath]);
+  const observed: string[] = [];
+  for (const path of [...new Set([...context.before.keys(), ...after.paths.keys(), ...after.committedPaths])]) {
+    if (after.committedPaths.has(path) || context.before.get(path) !== after.paths.get(path)) {
+      if (!(await disposableBuildOutput(root, after, allowed, path))) observed.push(path);
+    }
+  }
+  const audit = new Set(focusMutationAudit.get(context));
+  for (const path of observed) audit.add(path);
+  focusMutationAudit.set(context, audit);
+  return { ok: true, observed: [...observed].sort() };
+}
+
+export async function validateFocusCompletion(context: FocusContext, root: string, artifacts: readonly string[], evidence: readonly CommandEvidence[], siblingAllowedPaths: readonly string[] = []): Promise<FocusCompletion> {
   const [after, reviewAfter] = await Promise.all([
     snapshotGitState(root, context.beforeHead),
     fingerprint(root, context.reviewPath),
@@ -378,16 +578,45 @@ export async function validateFocusCompletion(context: FocusContext, root: strin
       .filter((path) => after.committedPaths.has(path) || context.before.get(path) !== after.paths.get(path)),
     ...(reviewAfter !== context.reviewBefore ? [context.reviewPath] : []),
   ])].sort();
-  const allowed = new Set([...context.envelope.allowedPaths, context.reviewPath]);
-  if (artifacts.some((path) => !allowed.has(path))) return { ok: false, reason: "path_outside_write_set" };
-  if (changed.some((path) => !allowed.has(path))) return { ok: false, reason: "path_outside_write_set" };
-  if (changed.some((path) => !artifacts.includes(path))) return { ok: false, reason: "artifact_missing" };
+  const allowedPaths = [...context.envelope.allowedPaths, context.reviewPath];
+  const allowed = createAllowedPathMatcher(allowedPaths);
+  // Issue 115: a parallel selected-slice Focus lane running in the same worktree is Git-visible
+  // to this lane as a change, even though its write set is authorized and disjoint. A changed
+  // path that matches a DECLARED sibling envelope and is outside this lane's own write set is
+  // attributed to the sibling lane: it never fails path_outside_write_set, and it never counts
+  // as this lane's authored change (so it cannot satisfy artifact or no_product_change checks).
+  // Only paths this lane is not allowed to write can be attributed — a shared-prelude path that
+  // both envelopes contain stays with the lane. Matching is a containment relaxation, so sibling
+  // entries failing safePath are inert and grant nothing rather than broadening the exclusion.
+  const siblingEntries = siblingAllowedPaths.filter(safePath);
+  const siblingMatcher = siblingEntries.length > 0 ? createAllowedPathMatcher(siblingEntries) : undefined;
+  const attributedToSibling = (path: string): boolean => siblingMatcher !== undefined && siblingMatcher(path) && !allowed(path);
+  if (artifacts.some((path) => !allowed(path))) return { ok: false, reason: "path_outside_write_set" };
+  // Untracked build output (e.g. `dist/**` from a required `tsc`/`pnpm build`) is disposable
+  // command output, not an authored change: a source-only packet can run its required commands
+  // and still validate. Only paths that are untracked, uncommitted, outside the write set, under
+  // a known generated-output root, and regular files are filtered — anything else in `changed`
+  // fails the write-set checks below exactly as before.
+  const authoredChanged: string[] = [];
+  for (const path of changed) {
+    if (attributedToSibling(path)) continue;
+    if (!(await disposableBuildOutput(root, after, allowed, path))) authoredChanged.push(path);
+  }
+  if (authoredChanged.some((path) => !allowed(path))) return { ok: false, reason: "path_outside_write_set" };
+  // Issue 119: a path recorded by a mid-execution checkpoint that no longer differs at the
+  // final snapshot was still created or modified during the run. Creating a scratch file
+  // outside the write set and deleting it before returning is still a write-set breach, and
+  // the clean final diff must not hide it. Paths still present in the final diff are covered
+  // by the checks above; this one exists only for what the final snapshot can no longer see.
+  const observed = focusMutationAudit.get(context);
+  if (observed && [...observed].some((path) => !allowed(path))) return { ok: false, reason: "path_outside_write_set" };
+  if (authoredChanged.some((path) => !artifacts.includes(path))) return { ok: false, reason: "artifact_missing" };
   // The receipt's artifact list and the paths that actually changed must be the SAME set, not merely
   // overlapping. Enforcing only `changed ⊆ artifacts` lets an agent declare a production file it never
   // touched: declare src/thing.ts plus its test, change only the test, and every other check still
   // passes — there is a product change, and nothing changed outside the write set. That is the exact
   // shape of a fabricated fix, and it is the failure this boundary exists to refuse.
-  if (artifacts.some((path) => !changed.includes(path))) return { ok: false, reason: "artifact_unchanged" };
+  if (artifacts.some((path) => !authoredChanged.includes(path))) return { ok: false, reason: "artifact_unchanged" };
   // A declared command that ran and FAILED is a regression signal, not a gap in the evidence. Folding
   // both into evidence_invalid gave a broken build the same soft verdict as a missing summary, so the
   // one outcome that means "previously-working behaviour stopped working" was the easiest to overlook.
@@ -395,6 +624,6 @@ export async function validateFocusCompletion(context: FocusContext, root: strin
     return { ok: false, reason: "command_regressed" };
   }
   if (!validEvidence(context.envelope.seitCommandIds, evidence)) return { ok: false, reason: "evidence_invalid" };
-  if (!changed.some((path) => path !== context.reviewPath)) return { ok: false, reason: "no_product_change" };
-  return { ok: true, changedPaths: changed };
+  if (!authoredChanged.some((path) => path !== context.reviewPath)) return { ok: false, reason: "no_product_change" };
+  return { ok: true, changedPaths: authoredChanged };
 }

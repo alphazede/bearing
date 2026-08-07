@@ -105,6 +105,44 @@ describe("improvement proposal", () => {
     expect(proposal(overrides).proposalHash).not.toBe(proposal().proposalHash);
   });
 
+  it("hashes the proposed change, not the workspace-keyed evidence references", () => {
+    // Issue #14: recordRefs (and the openedAtRef derived from them) are digest
+    // output that changes with the workspace keying, so identical evidence
+    // produced a different proposalHash after a keying upgrade and orphaned
+    // owner applications recorded under the previous keying. The hash must
+    // identify the change: two proposals with identical shape but different
+    // opaque refs are the same proposal.
+    const rekeyed = proposal({
+      evidence: {
+        recordRefs: ["zz-record-1", "zz-record-2", "zz-record-3", "zz-record-4", "zz-record-5"],
+        occurrences: 5,
+        distinctRuns: 3,
+      },
+      trial: {
+        minOccurrences: 5,
+        minDistinctRuns: 3,
+        maxAgeDays: 90,
+        openedAtRef: "zz-record-1",
+      },
+    });
+
+    expect(rekeyed.proposalHash).toBe(proposal().proposalHash);
+  });
+
+  it("keeps genuinely distinct proposals distinct in the keying-independent hash", () => {
+    // The excluded refs are the only digest-derived fields; a change in any
+    // hashed field must still alter the hash.
+    const differentCounts = proposal({
+      evidence: {
+        recordRefs: ["record-a", "record-b", "record-c", "record-d", "record-e"],
+        occurrences: 6,
+        distinctRuns: 4,
+      },
+    });
+
+    expect(differentCounts.proposalHash).not.toBe(proposal().proposalHash);
+  });
+
   it("rejects a revert descriptor that is not the exact prior typed value", () => {
     const result = buildProposal(recommendation({
       revert: {

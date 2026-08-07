@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
   artifactComplete,
@@ -772,5 +773,360 @@ describe("plan structure", () => {
 
     expect(model.dependencies.get("S1")).toEqual(new Set(["S2"]));
     expect(model.dependencies.get("S2")).toEqual(new Set(["S3", "S4"]));
+  });
+});
+
+describe("map-the-route contract conformance", () => {
+  const fixture = (async () => {
+    const read = (name: string) => readFile(new URL(`./fixtures/map-the-route-contract/${name}`, import.meta.url), "utf8");
+    const [plan, design, seit, implementation] = await Promise.all(["plan-spec.md", "design.md", "seit.md", "implementation.md"].map(read));
+    return { plan, design, seit, implementation };
+  })();
+  const verdict = async (documents: PlanDocuments) => validatePlan({ documents, planDirectory: "docs/plans/contract" });
+
+  it("proves a document following the stated Map the Route contract passes bearing plan validate", async () => {
+    const documents = await fixture;
+    expect(structuralFindings(parsePlanDocuments(documents))).toEqual([]);
+    expect((await verdict(documents)).verdict).toBe("PASS");
+  });
+
+  it("rejects blocked or draft lifecycle values with the typed frontmatter finding", async () => {
+    const documents = await fixture;
+    const blocked = await verdict({ ...documents, plan: documents.plan.replace("status: complete", "status: blocked") });
+    expect(blocked.findings).toContainEqual(expect.objectContaining({
+      code: "artifact_frontmatter_invalid",
+      artifact: "plan-spec.md",
+      required: "type: plan-spec and status: complete or amended",
+    }));
+    const draft = await verdict({ ...documents, implementation: documents.implementation.replace("status: complete", "status: draft") });
+    expect(draft.findings).toContainEqual(expect.objectContaining({
+      code: "artifact_frontmatter_invalid",
+      artifact: "implementation.md",
+    }));
+  });
+
+  it("rejects a non-AC/RISK requirement id with a typed id_unknown naming the requirement namespace", async () => {
+    const documents = await fixture;
+    const renamed = await verdict({
+      ...documents,
+      implementation: documents.implementation.replace("**Requirement IDs.** AC-1, AC-2", "**Requirement IDs.** REQ-1"),
+    });
+    expect(renamed.findings).toContainEqual(expect.objectContaining({
+      code: "id_unknown",
+      sliceId: "S1",
+      required: "Requirement IDs must contain at least one defined AC or RISK id",
+    }));
+    expect(renamed.findings).not.toContainEqual(expect.objectContaining({ code: "id_format_invalid" }));
+  });
+
+  it("rejects a six-column traceability matrix with the typed eight-column finding", async () => {
+    const documents = await fixture;
+    const sixColumn = {
+      ...documents,
+      seit: documents.seit
+        .replace(
+          "| SEIT row ID | Acceptance/risk ID | Design/contract ID | Boundary/test layer | Positive case | Negative/failure case | Command/procedure ID | Evidence |",
+          "| SEIT row ID | Acceptance/risk ID | Design/contract ID | Boundary/test layer | Positive case | Negative/failure case |",
+        )
+        .replaceAll("| CMD-UNIT | unit test report |", " |")
+        .replaceAll("| PROC-IMPORT | focused drift report |", " |")
+        .replaceAll("| PROC-REVIEW | procedure review report |", " |"),
+    };
+    const result = await verdict(sixColumn);
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: "trace_header_invalid",
+      artifact: "seit.md",
+      required: "the matrix must contain exactly the 8 required columns",
+    }));
+  });
+
+  it("rejects a nested table inside the matrix section with a typed width finding", async () => {
+    const documents = await fixture;
+    const nested = {
+      ...documents,
+      seit: documents.seit.replace(
+        "## Cross-cutting Checks",
+        "| Component | Decision |\n| --- | --- |\n| Import boundary | Reuse |\n\n## Cross-cutting Checks",
+      ),
+    };
+    const result = await verdict(nested);
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: "trace_header_invalid",
+      artifact: "seit.md",
+      observed: "| Component | Decision |",
+      required: "trace row width must match the header width",
+    }));
+  });
+
+  it("rejects hyphenated slice and manifest ids with a typed id_format_invalid naming the id", async () => {
+    const documents = await fixture;
+    const hyphenated = {
+      ...documents,
+      implementation: documents.implementation
+        .replace("### Slice S1 — Import", "### Slice S1-2 — Import")
+        .replace("### S1 execution manifest", "### S1-2 execution manifest"),
+    };
+    const result = await verdict(hyphenated);
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: "id_format_invalid",
+      artifact: "implementation.md",
+      observed: "S1-2",
+      required: expect.stringContaining("hyphen"),
+    }));
+    expect(result.verdict).toBe("NEEDS_AMENDMENT");
+  });
+
+  it("rejects slice ids truncated by slash or colon separators with a typed id_format_invalid naming the full token", async () => {
+    const documents = await fixture;
+    for (const separator of ["/", ":"]) {
+      const truncated = {
+        ...documents,
+        implementation: documents.implementation.replace("### Slice S1 — Import", `### Slice S1${separator}2 — Import`),
+      };
+      const result = await verdict(truncated);
+      expect(result.findings).toContainEqual(expect.objectContaining({
+        code: "id_format_invalid",
+        artifact: "implementation.md",
+        observed: `S1${separator}2`,
+        required: expect.stringContaining("hyphen"),
+      }));
+      expect(result.verdict).toBe("NEEDS_AMENDMENT");
+    }
+  });
+
+  it("rejects manifest ids truncated by slash or colon separators with a typed id_format_invalid naming the full token", async () => {
+    const documents = await fixture;
+    for (const separator of ["/", ":"]) {
+      const truncated = {
+        ...documents,
+        implementation: documents.implementation.replace("### S1 execution manifest", `### S1${separator}2 execution manifest`),
+      };
+      const result = await verdict(truncated);
+      expect(result.findings).toContainEqual(expect.objectContaining({
+        code: "id_format_invalid",
+        artifact: "implementation.md",
+        observed: `S1${separator}2`,
+        required: expect.stringContaining("hyphen"),
+      }));
+      expect(result.verdict).toBe("NEEDS_AMENDMENT");
+    }
+  });
+
+  it("rejects a drifted procedure narrative with a typed procedure_mismatch naming the row", async () => {
+    const documents = await fixture;
+    const drifted = {
+      ...documents,
+      seit: documents.seit.replace("**Evidence.** procedure review report.", "**Evidence.** stale evidence text."),
+    };
+    const result = await verdict(drifted);
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: "procedure_mismatch",
+      artifact: "seit.md",
+      observed: expect.stringContaining("SEIT-3"),
+    }));
+  });
+
+  it("states the enforced artifact grammar in the Map the Route skill contract", async () => {
+    const contract = await readFile(new URL("../skills/map-the-route/SKILL.md", import.meta.url), "utf8");
+    expect(contract).toContain("status: complete` or `status: amended");
+    expect(contract).toContain("`AC-*` and `RISK-*`");
+    expect(contract).toContain("`### Slice <id>`");
+    expect(contract).toContain("`### <id> execution manifest`");
+    expect(contract).toContain("never contain hyphens");
+    expect(contract).toContain("SEIT row ID | Acceptance/risk ID | Design/contract ID |");
+    expect(contract).toContain("Boundary/test layer | Positive case | Negative/failure case |");
+    expect(contract).toContain("Command/procedure ID | Evidence.");
+    expect(contract).toContain("exactly one typed SEIT row id");
+    expect(contract).toContain("OOPDSA Implementation Design");
+    expect(contract).toContain("`Write only `");
+    expect(contract).toContain("Prohibitions inside a write set");
+    expect(contract).toContain("Procedure narratives are an opt-in convention");
+    expect(contract).toContain("`Wave <n>: <ids>`");
+    expect(contract).toContain("`S1 --> S2`");
+    expect(contract).toContain("at most 128");
+    expect(contract).toContain("`## System Catalog`");
+    expect(contract).toContain("`SYS-<id>`");
+    expect(contract).toContain("System ID, System, and Responsibility columns");
+    expect(contract).toContain("Data ownership, Invariants, Trust boundary,");
+    expect(contract).toContain("Failure modes, and Observability fields");
+    expect(contract).toContain("Requirement ID, System ID, Contract ID, SEIT row ID,");
+    expect(contract).toContain("every SYS- reference in design.md must name a catalog entry");
+    expect(contract).toContain("every traced path must be covered by a slice write set");
+  });
+});
+
+describe("system catalog grammar", () => {
+  const systemDocuments = async (): Promise<PlanDocuments> => {
+    const read = (name: string) => readFile(new URL("./fixtures/focus-plan-corpus/system-catalog-incomplete/" + name, import.meta.url), "utf8");
+    const [plan, design, seit, implementation] = await Promise.all(["plan-spec.md", "design.md", "seit.md", "implementation.md"].map(read));
+    return { plan, design, seit, implementation };
+  };
+
+  it("parses catalog entries, per-system specifications, and trace rows from a catalog-declaring design", async () => {
+    const model = parsePlanDocuments(await systemDocuments());
+
+    expect(model.systemCatalogAdopted).toBe(true);
+    expect([...model.systemCatalog.keys()]).toEqual(["SYS-1", "SYS-2"]);
+    expect([...model.systemSpecs.keys()]).toEqual(["SYS-1"]);
+    expect(model.systemSpecs.get("SYS-1")?.fields.get("Ownership")).toBe("Backend Engineering.");
+    expect(model.systemSpecs.get("SYS-1")?.fields.get("Data ownership")).toBe("Plan artifacts.");
+    expect(model.systemTraceRows).toHaveLength(1);
+    expect([...model.systemTraceRows[0].requirements]).toEqual(["AC-1", "RISK-1"]);
+    expect([...model.systemTraceRows[0].systems]).toEqual(["SYS-1", "SYS-2"]);
+    expect([...model.systemTraceRows[0].contracts]).toEqual(["CONTRACT-1"]);
+    expect([...model.systemTraceRows[0].slices]).toEqual(["S1"]);
+    expect(model.systemTraceRows[0].paths).toEqual(["src/notifier.ts"]);
+    expect([...model.sysReferences]).toEqual(["SYS-1", "SYS-2"]);
+  });
+
+  it("treats a design without the System Catalog heading as not adopted", async () => {
+    const documents = await systemDocuments();
+    const model = parsePlanDocuments({
+      ...documents,
+      design: documents.design
+        .replace("## System Catalog", "## Background")
+        .replace(/^\| SYS-\d \|.*\|.*\|$/gm, "")
+        .replace(/^### SYS-1 — Focus boundary$[\s\S]*?(?=^## )/m, "")
+        .replace("## Requirement Trace", "## Notes"),
+    });
+
+    expect(model.systemCatalogAdopted).toBe(false);
+    expect(model.systemCatalog.size).toBe(0);
+    expect(model.systemSpecs.size).toBe(0);
+    expect(model.systemTraceRows).toEqual([]);
+    expect(structuralFindings(model)).toEqual([]);
+  });
+
+  it("rejects an empty System Catalog section", async () => {
+    const documents = await systemDocuments();
+    const model = parsePlanDocuments({
+      ...documents,
+      design: documents.design
+        .replace(/^\|.*\|.*\|.*\|$/gm, "no table")
+        .replace(/^### SYS-1 — Focus boundary$[\s\S]*?(?=^## )/m, ""),
+    });
+
+    expect(structuralFindings(model)).toContainEqual(expect.objectContaining({
+      code: "system_map_malformed",
+      artifact: "design.md",
+      observed: "System Catalog section is empty",
+    }));
+  });
+
+  it("rejects a catalog table missing a required column", async () => {
+    const documents = await systemDocuments();
+    const model = parsePlanDocuments({
+      ...documents,
+      design: documents.design
+        .replace("| System ID | System | Responsibility |", "| System ID | System |")
+        .replace("| SYS-1 | Focus boundary | Keep the Focus boundary bounded |", "| SYS-1 | Focus boundary |"),
+    });
+
+    expect(structuralFindings(model)).toContainEqual(expect.objectContaining({
+      code: "system_map_malformed",
+      observed: expect.stringContaining("System Catalog table is missing a required column"),
+    }));
+  });
+
+  it("reads the system id from the System ID column in any column order", async () => {
+    const documents = await systemDocuments();
+    const model = parsePlanDocuments({
+      ...documents,
+      design: documents.design
+        .replace("| System ID | System | Responsibility |", "| System | Responsibility | System ID |")
+        .replace("| SYS-1 | Focus boundary | Keep the Focus boundary bounded |", "| Focus boundary | Keep the Focus boundary bounded | SYS-1 |")
+        .replace("| SYS-2 | Import boundary | Import bounded data |", "| Import boundary | Import bounded data | SYS-2 |"),
+    });
+
+    expect([...model.systemCatalog.keys()]).toEqual(["SYS-1", "SYS-2"]);
+    expect(structuralFindings(model)).not.toContainEqual(expect.objectContaining({
+      code: "system_map_malformed",
+      observed: expect.stringContaining("System Catalog rows must contain exactly one typed SYS- id"),
+    }));
+  });
+
+  it("rejects a catalog row without exactly one typed SYS- id", async () => {
+    const documents = await systemDocuments();
+    const model = parsePlanDocuments({
+      ...documents,
+      design: documents.design.replace("| SYS-1 | Focus boundary |", "| Focus boundary | Keep bounded |"),
+    });
+
+    expect(structuralFindings(model)).toContainEqual(expect.objectContaining({
+      code: "system_map_malformed",
+      observed: expect.stringContaining("System Catalog rows must contain exactly one typed SYS- id"),
+    }));
+  });
+
+  it("ignores spec-body tables when parsing the catalog table", async () => {
+    const documents = await systemDocuments();
+    const model = parsePlanDocuments({
+      ...documents,
+      design: documents.design.replace(
+        "**APIs.** createFocusContext.",
+        "**APIs.**\n\n| API | Purpose |\n| --- | --- |\n| createFocusContext | Build the slice context |",
+      ),
+    });
+
+    expect([...model.systemCatalog.keys()]).toEqual(["SYS-1", "SYS-2"]);
+    expect(structuralFindings(model)).not.toContainEqual(expect.objectContaining({
+      code: "system_map_malformed",
+      observed: expect.stringContaining("row width does not match"),
+    }));
+  });
+
+  it("does not register a spec-body table row whose first cell is a SYS- id as a catalog entry", async () => {
+    const documents = await systemDocuments();
+    const model = parsePlanDocuments({
+      ...documents,
+      design: documents.design.replace(
+        "**Invariants.** Focus boundaries never widen.",
+        "**Invariants.** SYS-9 always stays closed.\n\n| SYS-9 | Foo | Bar |",
+      ),
+    });
+
+    expect([...model.systemCatalog.keys()]).toEqual(["SYS-1", "SYS-2"]);
+  });
+
+  it("rejects duplicate catalog ids", async () => {
+    const documents = await systemDocuments();
+    const model = parsePlanDocuments({
+      ...documents,
+      design: documents.design.replace("| SYS-2 | Import boundary |", "| SYS-1 | Import boundary |"),
+    });
+
+    expect(structuralFindings(model)).toContainEqual(expect.objectContaining({
+      code: "system_map_malformed",
+      observed: "System Catalog ids must be unique: SYS-1",
+    }));
+  });
+
+  it("rejects duplicate per-system specification headings", async () => {
+    const documents = await systemDocuments();
+    const model = parsePlanDocuments({
+      ...documents,
+      design: documents.design.replace(
+        "### SYS-1 — Focus boundary",
+        "### SYS-1 — Focus boundary\n\n### SYS-1 — Duplicate boundary",
+      ),
+    });
+
+    expect(structuralFindings(model)).toContainEqual(expect.objectContaining({
+      code: "system_map_malformed",
+      observed: "per-system specifications must be unique: SYS-1",
+    }));
+  });
+
+  it("rejects a Requirement Trace row without typed requirement and system ids", async () => {
+    const documents = await systemDocuments();
+    const model = parsePlanDocuments({
+      ...documents,
+      design: documents.design.replace("| AC-1, RISK-1 | SYS-1, SYS-2 |", "| — | — |"),
+    });
+
+    expect(structuralFindings(model)).toContainEqual(expect.objectContaining({
+      code: "system_map_malformed",
+      observed: expect.stringContaining("Requirement Trace rows must contain typed requirement and system ids"),
+    }));
   });
 });

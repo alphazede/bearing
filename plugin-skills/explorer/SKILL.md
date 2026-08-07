@@ -20,7 +20,8 @@ MCP tool with `repository` and that exact `requestPath`. Keep its returned
 `focusRunId` and envelope, then follow `../../skills/explorer/SKILL.md` and
 pass the relevant envelope subset to any Crewmate.
 
-After work, persist a receipt containing every changed artifact and one
+After work, persist a receipt containing the `runtimeIdentity` value returned
+verbatim by `bearing_focus_begin`, every changed artifact, and one
 truthful result for every required command ID as a repository-relative JSON
 file under the same `.bearing/focus/` area (for example
 `.bearing/focus/receipt.json`), then call the `bearing_focus_validate` MCP

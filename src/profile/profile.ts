@@ -7,6 +7,7 @@ import {
   type ReasoningPolicy,
   type ReasoningTier,
 } from "./reasoning-policy.js";
+import { enumValue } from "../contracts/guards.js";
 
 export const PROFILE_SCHEMA_VERSION = 2 as const;
 
@@ -89,7 +90,7 @@ export interface ResolvedRun {
   readonly receipt: RunReceipt;
 }
 
-export interface RunReceipt {
+interface RunReceipt {
   readonly requested: Readonly<Record<string, unknown>>;
   readonly effective: Readonly<Record<string, unknown>>;
   readonly blockingCodes: readonly string[];
@@ -115,8 +116,6 @@ function text(v: unknown): v is string { return typeof v === "string" && v.lengt
 function list(v: unknown): v is readonly string[] { return Array.isArray(v) && v.length <= MAX_ARRAY && v.every(text) && new Set(v).size === v.length; }
 function positive(v: unknown): v is number { return typeof v === "number" && Number.isSafeInteger(v) && v > 0; }
 function nonNegative(v: unknown): v is number { return typeof v === "number" && Number.isSafeInteger(v) && v >= 0; }
-function enumValue<T extends string>(v: unknown, values: readonly T[]): v is T { return typeof v === "string" && (values as readonly string[]).includes(v); }
-
 export function parseAgentProfile(input: unknown): ProfileResult {
   const migrated = migrateAgentProfile(input);
   return migrated.ok ? { ok: true, value: migrated.value } : migrated;

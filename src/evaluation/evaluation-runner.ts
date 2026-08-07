@@ -1,7 +1,7 @@
 import { BUILTIN_ROUTES } from "../adapters/adapters.js";
 
-export const EVALUATION_SCHEMA_VERSION = 1 as const;
-export const EVALUATION_ROUTES = Object.freeze(BUILTIN_ROUTES.map(({ id }) => id));
+const EVALUATION_SCHEMA_VERSION = 1 as const;
+const EVALUATION_ROUTES = Object.freeze(BUILTIN_ROUTES.map(({ id }) => id));
 export const SKILLSBENCH_V1_1_TASK_IDS = [
   "fix-build-agentops", "react-performance-debugging", "spring-boot-jakarta-migration", "data-to-d3",
   "sec-financial-report", "enterprise-information-search", "software-dependency-audit", "citation-check",
@@ -10,9 +10,9 @@ const TRIALS = [1, 2, 3] as const;
 const MAX_CASES = 128;
 const MAX_RESULTS = MAX_CASES * 2 * EVALUATION_ROUTES.length * TRIALS.length;
 
-export type EvaluationVerdict = "passed" | "failed" | "incomplete";
-export type EvaluationKind = "native" | "skillsbench";
-export type EvaluationSource = "verified-provider" | "synthetic";
+type EvaluationVerdict = "passed" | "failed" | "incomplete";
+type EvaluationKind = "native" | "skillsbench";
+type EvaluationSource = "verified-provider" | "synthetic";
 
 export interface EvaluationSuiteDefinition {
   readonly schemaVersion: 1;
@@ -23,7 +23,7 @@ export interface EvaluationSuiteDefinition {
   readonly arms: { readonly control: string; readonly treatment: string };
 }
 
-export interface EvaluationFailure {
+interface EvaluationFailure {
   readonly code: string;
   readonly message: string;
 }
@@ -50,7 +50,7 @@ export interface EvaluationCell {
   readonly failure?: EvaluationFailure;
 }
 
-export interface RouteEvaluationVerdict {
+interface RouteEvaluationVerdict {
   readonly route: string;
   readonly verdict: EvaluationVerdict;
   readonly controlAverage: number | null;
@@ -61,7 +61,7 @@ export interface RouteEvaluationVerdict {
   readonly issues: readonly string[];
 }
 
-export interface RetainedEvaluationFailure extends EvaluationFailure {
+interface RetainedEvaluationFailure extends EvaluationFailure {
   readonly key: string;
 }
 

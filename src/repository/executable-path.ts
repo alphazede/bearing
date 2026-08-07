@@ -27,7 +27,7 @@ export interface BearingCliIdentity {
   readonly version: string;
 }
 
-export type BearingCliResolutionReason =
+type BearingCliResolutionReason =
   | "path_unavailable"
   | "path_provenance_unverified"
   | "runtime_version_mismatch"

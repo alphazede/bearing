@@ -13,6 +13,7 @@ import {
 } from "../src/mcp/server.js";
 import { BearingStore } from "../src/store/bearing-store.js";
 import { SyntheticRunner, type ProcessInvocation, type ProcessResult, type ProcessRunner } from "../src/adapters/adapters.js";
+import { visibleWorkspaces } from "../src/repository/workspace-location.js";
 import { RepositoryBootstrap } from "../src/repository/bootstrap.js";
 import { executeHeadlessJourney, type HeadlessJourneyReceipt, type HeadlessJourneyRequest } from "../src/server/local-session.js";
 import { hashExecutionContractBody, type ExecutionContractBody, type RoleRoute } from "../src/contracts/execution-contract.js";
@@ -355,7 +356,9 @@ function structured(response: JsonRpcResponse | null): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-/** Byte-level durable fingerprint: proves a call mutated nothing at all. */
+/** Byte-level durable fingerprint: proves a call mutated nothing at all. Covers the legacy
+ * hidden `.bearing/` tree and every visible `bearing-<plan>/` per-plan workspace, because a
+ * plan-bound run migrates its ledger into the visible workspace. */
 async function durableFingerprint(root: string): Promise<string> {
   const walk = async (path: string, prefix: string): Promise<string[]> => {
     let entries;
@@ -373,7 +376,9 @@ async function durableFingerprint(root: string): Promise<string> {
     }
     return lines;
   };
-  return (await walk(join(root, ".bearing"), ".bearing")).join("\n");
+  const lines = [...await walk(join(root, ".bearing"), ".bearing")];
+  for (const workspace of await visibleWorkspaces(root)) lines.push(...await walk(join(root, workspace), workspace));
+  return lines.join("\n");
 }
 
 // method x policy class x enforcement point x the negative case that proves it.
@@ -919,6 +924,9 @@ describe("Bearing guided MCP server", () => {
       schemaVersion: 1,
       runId: "valid-run",
       revision: 2,
+      // workspace is the visible per-plan workspace; runPath is the run's audit trail inside it.
+      workspace: "bearing-valid-run",
+      runPath: "bearing-valid-run/runs/valid-run",
     });
 
     // Control 3: Valid legacy durable run (events.jsonl present, workspace.json absent) remains attachable

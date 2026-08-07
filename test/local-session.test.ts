@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
@@ -83,6 +84,45 @@ function call(
       },
     );
     req.on("error", reject);
+    if (opts.body) req.write(opts.body);
+    req.end();
+  });
+}
+
+/**
+ * Bounded variant of `call` for assertions on the server's fault behavior: a
+ * handler that drops the response (an orphaned promise) must fail the test
+ * fast and destroy the client socket, so the afterEach server.close() is not
+ * wedged by an open connection.
+ */
+function callBounded(port: number | string, opts: { method: string; path: string; headers?: Record<string, string>; body?: string }, timeoutMs: number): Promise<Resp> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        method: opts.method,
+        path: opts.path,
+        headers: opts.headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    req.on("error", reject);
+    const timer = setTimeout(() => {
+      req.destroy();
+      reject(new Error(`response timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref();
     if (opts.body) req.write(opts.body);
     req.end();
   });
@@ -556,6 +596,7 @@ function parkRangerReport(options: {
   sessionId?: string;
   priority?: "P0" | "P1";
   code?: string;
+  location?: { path: string; line: number };
   adjudications?: readonly unknown[];
 } = {}) {
   const lens = options.lens ?? "correctness";
@@ -567,7 +608,7 @@ function parkRangerReport(options: {
       ...(options.code ? { code: options.code } : {}),
       priority: options.priority ?? "P1",
       summary: "The verification report requires a bounded authenticated ingestion path",
-      location: { path: "src/server/local-session.ts", line: 1 },
+      location: options.location ?? { path: "src/server/local-session.ts", line: 1 },
       reproduction: {
         inputs: "POST a validated Park Ranger report",
         observedFailure: "No checkpoint exists without the ingestion handler",
@@ -731,15 +772,16 @@ class GuidedMultiSliceRunner extends CheckpointRunner {
     if (!planDirectory) throw new Error("plan directory missing");
     const reviewPath = join(invocation.cwd, planDirectory, "review.html");
     const review = await readFile(reviewPath, "utf8");
+    const writtenFile = invocation.stdin.includes("1.1") ? "src/work.ts" : "src/follow-up.ts";
     await mkdir(join(invocation.cwd, "src"), { recursive: true });
     await Promise.all([
-      writeFile(join(invocation.cwd, "src/follow-up.ts"), "export const followUp = true;\n"),
+      writeFile(join(invocation.cwd, writtenFile), `export const ${writtenFile.includes("work") ? "work" : "followUp"} = true;\n`),
       writeFile(reviewPath, review.replace(
         '<section id="bearing-final-qa" data-status="pending"><h2>Actual implementation and QA</h2><p>Pending implementation and validation.</p></section>',
-        '<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: src/follow-up.ts changed exactly as planned.</p><p>Validation evidence: CMD-UNIT passed.</p></section>',
+        `<section id="bearing-final-qa" data-status="complete"><h2>Actual implementation and QA</h2><p>Planned versus actual: ${writtenFile} changed exactly as planned.</p><p>Validation evidence: CMD-UNIT passed.</p></section>`,
       )),
     ]);
-    const content = `BEARING_RESULT ${JSON.stringify({ kind: "action", summary: "Selected guided slice complete.", artifacts: ["src/follow-up.ts", `${planDirectory}/review.html`], evidence: [{ commandId: "CMD-UNIT", status: "passed", summary: "focused tests passed" }] })}`;
+    const content = `BEARING_RESULT ${JSON.stringify({ kind: "action", summary: "Selected guided slice complete.", artifacts: [writtenFile, `${planDirectory}/review.html`], evidence: [{ commandId: "CMD-UNIT", status: "passed", summary: "focused tests passed" }] })}`;
     return { exitCode: 0, events: [{ type: "item.completed", data: { content } }], usage: { tokens: 1 } };
   }
 }
@@ -773,6 +815,21 @@ class MissingResultRunner implements ProcessRunner {
     this.calls.push(invocation);
     invocation.onActivity?.({ sequence: 1, kind: "tool.completed", status: "token=unscrubbed-value", tool: "shell" });
     return { exitCode: 0, events: [], usage: { tokens: 1 } };
+  }
+}
+
+/** Fails the first draft-implementation dispatch (initial attempt plus both automatic repairs),
+ * then succeeds — the shape of an agent that produced invalid planning artifacts once. */
+class MissOnceDraftRunner extends CheckpointRunner {
+  private draftFailuresRemaining = 3;
+  override async run(invocation: ProcessInvocation): Promise<ProcessResult> {
+    if (invocation.stdin.includes("Stage: draft-implementation") && this.draftFailuresRemaining > 0) {
+      this.draftFailuresRemaining -= 1;
+      this.calls.push(invocation);
+      const planDirectory = /Validated plan directory: "([^"]+)"/.exec(invocation.stdin)?.[1] ?? "docs/plans/checkpoint";
+      return { exitCode: 0, events: [{ type: "item.completed", data: { content: `BEARING_RESULT {"kind":"action","summary":"Invalid artifact.","artifacts":["${planDirectory}/missing.md"]}` } }], usage: { tokens: 1 } };
+    }
+    return super.run(invocation);
   }
 }
 
@@ -1122,28 +1179,29 @@ describe("GET /api/v1/improvement/report", () => {
       costPerAcceptedCriterion: { sufficient: false, value: null },
     });
 
-    const direct = await buildImprovementReport(store);
+    const direct = await buildImprovementReport(store, root);
     expect(direct.ok).toBe(true);
 
     const emptyRoot = await tempRepo();
     const emptyStore = new BearingStore(emptyRoot);
     // An empty workspace reports an empty evidence position; only runs that exist and cannot be
     // read are a store failure. The corrupt case below still fails, which is what separates them.
-    await expect(buildImprovementReport(emptyStore)).resolves.toMatchObject({
+    await expect(buildImprovementReport(emptyStore, emptyRoot)).resolves.toMatchObject({
       ok: true,
       value: { listedRuns: 0, readableRuns: 0, settledRuns: 0 },
     });
 
     const corruptRoot = await tempRepo();
     await seedRun(corruptRoot, "unreadable-improvement-run", "docs/plans/improvement");
-    await writeFile(join(corruptRoot, ".bearing/runs/unreadable-improvement-run/events.jsonl"), "not-json\n", "utf8");
-    await expect(buildImprovementReport(new BearingStore(corruptRoot))).resolves.toEqual({ ok: false, reason: "store_read_failed" });
+    // The plan-bound seeded run lives in the visible per-plan workspace.
+    await writeFile(join(corruptRoot, "bearing-improvement/runs/unreadable-improvement-run/events.jsonl"), "not-json\n", "utf8");
+    await expect(buildImprovementReport(new BearingStore(corruptRoot), corruptRoot)).resolves.toEqual({ ok: false, reason: "store_read_failed" });
   });
 
   it("production report with absent evidence yields empty verdicts; with matching owner evidence produces hash-bound verdict (seeded case yields empty until data)", async () => {
     const root = await tempRepo();
     const store = new BearingStore(root);
-    const res = await buildImprovementReport(store);
+    const res = await buildImprovementReport(store, root);
     expect(res.ok).toBe(true);
     if (res.ok) {
       expect(res.value.trialVerdicts).toEqual([]);
@@ -1166,9 +1224,89 @@ describe("GET /api/v1/improvement/report", () => {
       correlationId: "nonowner-cp",
     });
     if (!rec.ok) throw new Error("seed fail");
-    const res = await buildImprovementReport(store);
+    const res = await buildImprovementReport(store, root);
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.value.trialVerdicts).toEqual([]);
+  });
+
+  it("keys outcome references per workspace: identical runs in different repositories produce different refs (issue 14)", async () => {
+    const firstRoot = await tempRepo();
+    const secondRoot = await tempRepo();
+    const settleRun = async (store: BearingStore, runId: string): Promise<void> => {
+      let durable = await store.load(runId);
+      const verified = await store.apply({
+        schemaVersion: 1,
+        commandId: `${runId}-verified`,
+        runId,
+        expectedRevision: durable.revision,
+        type: "recordJourneyCheckpoint",
+        payload: {
+          stage: "execute-explorer",
+          status: "complete",
+          artifacts: [],
+          verification: {
+            layer: "validator",
+            verdict: "PASS",
+            findingCount: 0,
+            completedSlices: [{ sliceId: "1.1", requirementIds: ["AC-1"] }],
+          },
+        },
+        session: { sessionId: "test-bearing", actor: "bearing" },
+        correlationId: `${runId}-verified`,
+      });
+      if (!verified.ok) throw new Error(verified.reason);
+      durable = await store.load(runId);
+      const completed = await store.apply({
+        schemaVersion: 1,
+        commandId: `${runId}-complete`,
+        runId,
+        expectedRevision: durable.revision,
+        type: "recordJourneyCheckpoint",
+        payload: { stage: "review", status: "complete", artifacts: [] },
+        session: { sessionId: "test-bearing", actor: "bearing" },
+        correlationId: `${runId}-complete`,
+      });
+      if (!completed.ok) throw new Error(completed.reason);
+    };
+    const firstStore = await seedRun(firstRoot, "issue-14-collision", "docs/plans/improvement");
+    await settleRun(firstStore, "issue-14-collision");
+    const secondStore = await seedRun(secondRoot, "issue-14-collision", "docs/plans/improvement");
+    await settleRun(secondStore, "issue-14-collision");
+    const refsOf = (value: {
+      readonly records: readonly OutcomeRecord[];
+      readonly proposals?: readonly { readonly proposalHash: string }[];
+    }): string[] => {
+      const refs: string[] = [];
+      for (const record of value.records) {
+        const loose = record as unknown as Record<string, unknown>;
+        for (const key of ["runRef", "sliceRef", "fingerprintRef", "findingRef"]) {
+          if (typeof loose[key] === "string") refs.push(loose[key] as string);
+        }
+        if (Array.isArray(loose.pathRefs)) refs.push(...(loose.pathRefs as string[]));
+      }
+      for (const proposal of value.proposals ?? []) refs.push(proposal.proposalHash);
+      return refs;
+    };
+    const first = await buildImprovementReport(firstStore, firstRoot);
+    const second = await buildImprovementReport(secondStore, secondRoot);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    const firstRefs = refsOf(first.value);
+    const secondRefs = refsOf(second.value);
+    expect(firstRefs.length).toBeGreaterThan(0);
+    expect(secondRefs.length).toBeGreaterThan(0);
+    expect(firstRefs).not.toEqual(secondRefs);
+    // Negative control: the same repository path stays stable across calls.
+    const again = await buildImprovementReport(firstStore, firstRoot);
+    expect(again.ok).toBe(true);
+    if (again.ok) expect(refsOf(again.value)).toEqual(firstRefs);
+    // No absolute path, no key material, and no plaintext-recomputable reference in the output.
+    const serialized = JSON.stringify({ first: first.value, second: second.value });
+    expect(serialized).not.toContain(firstRoot);
+    expect(serialized).not.toContain(secondRoot);
+    expect(serialized).not.toContain(createHash("sha256").update(firstRoot).digest("hex"));
+    expect(serialized).not.toContain(createHash("sha256").update("issue-14-collision").digest("hex"));
   });
 
   it("returns truthy typed service failures and exposes no mutating counterpart", async () => {
@@ -1380,7 +1518,7 @@ describe("GET /api/v1/improvement/handoff", () => {
     });
     if (!applied.ok) throw new Error(applied.reason);
 
-    const built = await buildImprovementHandoffFacts(store);
+    const built = await buildImprovementHandoffFacts(store, root);
     expect(built).toMatchObject({
       ok: true,
       value: { verifiedCompleteStages: ["map-route"], itemInFlight: null },
@@ -1441,7 +1579,7 @@ describe("GET /api/v1/improvement/handoff", () => {
     });
     if (!inFlight.ok) throw new Error(inFlight.reason);
 
-    const built = await buildImprovementHandoffFacts(store);
+    const built = await buildImprovementHandoffFacts(store, root);
     expect(built).toMatchObject({
       ok: true,
       value: {
@@ -1604,6 +1742,7 @@ describe("GET / native page and fragment secrecy", () => {
     expect(r.body).toContain('Codex CLI');
     expect(r.body).toContain('Claude Code');
     expect(r.body).toContain('Agy');
+    expect(r.body).toContain('Grok Build');
     expect(r.body).toContain('OpenCode');
     expect(r.body).toContain('"pi": "Pi"');
     expect(r.body).toContain('statusText.textContent = route.detected ? "Agent detected" : "Agent unavailable"');
@@ -2773,6 +2912,91 @@ describe("POST run verification report ingestion", () => {
     }
   });
 
+  it("surfaces a typed non_convergence condition after three related Park Ranger cycles and stays silent for unrelated ones", async () => {
+    const { port, cap } = await launch();
+    const cookie = await exchangeCookie(port, cap);
+    const cookieValue = cookie.split("=")[1];
+    const root = await tempRepo();
+    await selectRepository(port, cookie, root);
+    const store = await seedRun(root, "run-1", "docs/plans/approved");
+    await mkdir(join(root, "docs/plans/approved"), { recursive: true });
+    const approved = await recordContractApproval(store, approvedContract("run-1"));
+    await advanceJourneyStage(store, "run-1", "draft-implementation", "waiting");
+    await writeFile(join(root, "docs/plans/approved/execution-contract.json"), JSON.stringify(approved));
+
+    const post = (report: unknown) => call(port, {
+      method: "POST",
+      path: pathFor("run-1", "park-ranger"),
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify(report),
+    });
+    const cycleReport = (code: string, sessionId: string, location?: { path: string; line: number }) =>
+      parkRangerReport({ code, sessionId, ...(location === undefined ? {} : { location }) });
+
+    const first = await post(cycleReport("convergence-cycle-a", "park-ranger-cycle-a"));
+    const second = await post(cycleReport("convergence-cycle-b", "park-ranger-cycle-b"));
+    const third = await post(cycleReport("convergence-cycle-c", "park-ranger-cycle-c"));
+    const fourth = await post(cycleReport("convergence-cycle-d", "park-ranger-cycle-d"));
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(third.status).toBe(200);
+    expect(fourth.status).toBe(200);
+    // The first cycle is genuinely new (chain 0); the next three are related,
+    // so the chain reaches the threshold on the fourth cycle.
+    expect(JSON.parse(first.body).verification.convergence.history.chain).toBe(0);
+    expect(JSON.parse(second.body).verification.convergence.history.chain).toBe(1);
+    expect(JSON.parse(third.body).verification.convergence.history.chain).toBe(2);
+    expect(JSON.parse(first.body).verification.convergence.condition).toBeUndefined();
+    expect(JSON.parse(second.body).verification.convergence.condition).toBeUndefined();
+    expect(JSON.parse(third.body).verification.convergence.condition).toBeUndefined();
+    const fourthCondition = JSON.parse(fourth.body).verification.convergence.condition;
+    expect(fourthCondition).toMatchObject({
+      type: "non_convergence",
+      cycleCount: 3,
+      subsystem: "src/server",
+      action: "consolidate",
+    });
+    expect(fourthCondition.fingerprints).toHaveLength(1);
+    expect(fourthCondition.findings).toEqual([expect.objectContaining({
+      priority: "P1",
+      severityClass: "repair-relevant",
+      subsystem: "src/server",
+      relation: "related",
+    })]);
+
+    // A cycle in a different subsystem is progress: the chain resets and nothing surfaces.
+    const unrelated = await post(cycleReport("convergence-cycle-other", "park-ranger-cycle-other", { path: "src/verification/checks.ts", line: 1 }));
+    expect(unrelated.status).toBe(200);
+    const unrelatedConvergence = JSON.parse(unrelated.body).verification.convergence;
+    expect(unrelatedConvergence.condition).toBeUndefined();
+    expect(unrelatedConvergence.history.chain).toBe(0);
+
+    // The report surface carries the same typed condition per cycle entry.
+    const projection = await call(port, {
+      method: "GET",
+      path: pathFor("run-1", "park-ranger"),
+      headers: { cookie },
+    });
+    expect(projection.status).toBe(200);
+    const entries = JSON.parse(projection.body).entries;
+    expect(entries).toHaveLength(5);
+    expect(entries[0].convergence.condition).toBeUndefined();
+    expect(entries[1].convergence.condition).toBeUndefined();
+    expect(entries[2].convergence.condition).toBeUndefined();
+    expect(entries[3].convergence.condition).toMatchObject({
+      type: "non_convergence",
+      cycleCount: 3,
+      subsystem: "src/server",
+      action: "consolidate",
+    });
+    expect(entries[4].convergence.condition).toBeUndefined();
+    for (const response of [first, second, third, fourth, unrelated, projection]) {
+      expect(response.body).not.toContain(cap);
+      expect(response.body).not.toContain(cookieValue);
+      expect(response.body).not.toContain(root);
+    }
+  });
+
   it("keeps a reachable P0 blocker when two independent lens reports confirm it", async () => {
     const { port, cap } = await launch();
     const cookie = await exchangeCookie(port, cap);
@@ -3230,7 +3454,7 @@ describe("GET run verification projections and review cadence", () => {
         workGoal: "Complete the approved work",
         executionMode: "expedition",
         reviewCadence: "slice",
-        currentSlice: "1.2",
+        currentSlice: "1.1",
       }),
     });
 
@@ -3239,22 +3463,22 @@ describe("GET run verification projections and review cadence", () => {
       status: "action",
       summary: "Selected guided slice complete.",
       selectedScope: {
-        currentSlice: "1.2",
-        remainingSlices: ["1.2"],
-        allowedPaths: [`${planDirectory}/review.html`, "src/follow-up.ts"],
+        currentSlice: "1.1",
+        remainingSlices: ["1.1"],
+        allowedPaths: [`${planDirectory}/review.html`, "src/work.ts"],
         seitCommandIds: ["CMD-UNIT"],
       },
     });
     const executionCalls = runner.calls.filter((invocation) => invocation.stdin.includes("Stage: execute-expedition"));
     expect(executionCalls).toHaveLength(2);
-    expect(executionCalls.every((invocation) => invocation.stdin.includes('"remainingSlices":["1.2"]'))).toBe(true);
+    expect(executionCalls.every((invocation) => invocation.stdin.includes('"remainingSlices":["1.1"]'))).toBe(true);
     expect(executionCalls[0]?.args).toContain("read-only");
     expect(executionCalls[0]?.args).not.toContain("workspace-write");
     expect(executionCalls[1]?.args).toContain("workspace-write");
     expect(executionCalls[1]?.stdin).toContain("Navigator coordination handoff (read-only; advisory to the product author)");
 
     const status = await call(port, { method: "GET", path: `/api/v1/journey/${runId}/status`, headers: { cookie } });
-    expect(JSON.parse(status.body).run).toMatchObject({ currentSlice: "1.2", lastResult: { selectedScope: { currentSlice: "1.2" } } });
+    expect(JSON.parse(status.body).run).toMatchObject({ currentSlice: "1.1", lastResult: { selectedScope: { currentSlice: "1.1" } } });
   });
 
   it("admits a different explicit Expedition slice after a retained Focus failure", async () => {
@@ -3331,17 +3555,17 @@ describe("GET run verification projections and review cadence", () => {
       reasoning: "medium",
       runId,
       stage: "execute-expedition",
-      currentSlice: "1.2",
+      currentSlice: "1.1",
     }, { processRunner: headlessRunner });
     expect(recovered.ok, JSON.stringify(recovered)).toBe(true);
     expect(recovered).toMatchObject({
       ok: true,
       status: "waiting",
-      selectedScope: { currentSlice: "1.2" },
+      selectedScope: { currentSlice: "1.1" },
     });
     const durable = await store.load(runId);
-    expect(JSON.parse(durable.journeyCheckpoint?.qaJson ?? "[]")).toContainEqual({ question: "Current slice", answer: "1.2" });
-    expect(JSON.parse(durable.journeyCheckpoint?.lastResultJson ?? "null")).toMatchObject({ selectedScope: { currentSlice: "1.2" } });
+    expect(JSON.parse(durable.journeyCheckpoint?.qaJson ?? "[]")).toContainEqual({ question: "Current slice", answer: "1.1" });
+    expect(JSON.parse(durable.journeyCheckpoint?.lastResultJson ?? "null")).toMatchObject({ selectedScope: { currentSlice: "1.1" } });
   });
 
   it("routes a role-boundary violation through the same owner-confirmation retry gate as a Focus amendment, with its own prompt", async () => {
@@ -3618,6 +3842,72 @@ describe("Phase 5 local runtime wiring", () => {
       retryRefusal: "retry_requires_warrant",
     });
     expect(runner.calls).toHaveLength(3);
+  });
+
+  it("issue 136: editing a gitignored plan document changes the planning-stage retry fingerprint and admits the retry", async () => {
+    const root = await tempRepo();
+    // Plan documents are gitignored in product repositories, so fixing MISSING_VALIDATION
+    // findings never shows up in `git status` — the fingerprint must see the plan content itself.
+    // `.bearing/` is deliberately NOT gitignored here: Bearing writes checkpoint state into it
+    // between attempts, and the planning-stage fingerprint must ignore that git noise too, or the
+    // unwarranted retry below would be admitted on the checkpoint writes alone.
+    await writeFile(join(root, ".gitignore"), "docs/plans/\n");
+    const runner = new MissOnceDraftRunner();
+    const { port, cookie } = await readyJourneyHandler(root, runner);
+    const runId = "plan-content-retry";
+    const planDirectory = `docs/plans/${runId}`;
+    const store = await seedRun(root, runId);
+    const dispatch = (stage: "set-bearings" | "gather-supplies" | "map-route" | "recon" | "draft-implementation") => ({
+      method: "POST" as const,
+      path: "/api/v1/journey",
+      headers: sessionHeaders(port, { cookie }),
+      body: JSON.stringify({ runId, stage, workGoal: "Complete the approved work" }),
+    });
+    for (const stage of ["set-bearings", "gather-supplies", "map-route", "recon"] as const) {
+      const response = await call(port, dispatch(stage));
+      expect(response.status, response.body).toBe(200);
+      expect(JSON.parse(response.body).status).toBe("action");
+    }
+    const draftCalls = () => runner.calls.filter((invocation) => invocation.stdin.includes("Stage: draft-implementation")).length;
+
+    const failed = await call(port, dispatch("draft-implementation"));
+    expect(JSON.parse(failed.body)).toMatchObject({ status: "failure", code: "artifact_invalid" });
+    expect(draftCalls()).toBe(3);
+
+    const status = await new Promise<string>((resolve, reject) => execFile(
+      "git",
+      ["status", "--porcelain"],
+      { cwd: root },
+      (error, stdout) => (error ? reject(error) : resolve(stdout)),
+    ));
+    expect(status).not.toContain(planDirectory);
+
+    const refused = await call(port, dispatch("draft-implementation"));
+
+    expect(JSON.parse(refused.body)).toMatchObject({
+      status: "failure",
+      code: "artifact_invalid",
+      retryRefusal: "retry_requires_warrant",
+    });
+    expect(draftCalls()).toBe(3);
+
+    // The owner corrects the MISSING_VALIDATION findings in the gitignored plan document.
+    await writeFile(join(root, planDirectory, "plan-spec.md"), `${planFixture}\nOwner note: revalidated the planning package before retrying.\n`);
+
+    const retried = await call(port, dispatch("draft-implementation"));
+
+    expect(retried.status, retried.body).toBe(200);
+    expect(JSON.parse(retried.body)).toMatchObject({ status: "action", summary: "Implementation drafted." });
+    expect(JSON.parse(retried.body)).not.toHaveProperty("retryRefusal");
+    const checkpoint = (await store.load(runId)).journeyCheckpoint;
+    const runtime = parseRuntimeState(checkpoint?.runtimeStateJson ?? "");
+    expect(runtime.ok).toBe(true);
+    if (!runtime.ok) throw new Error(runtime.reason);
+    const ledger = runtime.value.retry;
+    const refusedFingerprint = ledger.find((entry) => entry.outcome === "retry_requires_warrant")?.fingerprint;
+    expect(refusedFingerprint).toBeDefined();
+    expect(ledger.at(-1)).toMatchObject({ warrant: "new_evidence", outcome: "admitted" });
+    expect(ledger.at(-1)?.fingerprint).not.toBe(refusedFingerprint);
   });
 
   it("reports only the bounded repository-fit diagnostic through recovery and the redacted issue draft", async () => {
@@ -6649,7 +6939,7 @@ describe("POST /api/v1/repository", () => {
     const { port, cap } = await launch();
     const cookie = await exchangeCookie(port, cap);
     const root = await tempRepo();
-    await writeFile(join(root, ".gitignore"), ".bearing/\n");
+    await writeFile(join(root, ".gitignore"), ".bearing/\nbearing-*/\n");
 
     const initialized = await call(port, {
       method: "POST",
@@ -6661,7 +6951,7 @@ describe("POST /api/v1/repository", () => {
     expect(JSON.parse(initialized.body)).toMatchObject({
       status: "initialized",
       repositoryPath: root,
-      disclosure: `Bearing writes durable planning state to ${root}/.bearing/ (gitignored).`,
+      disclosure: `Bearing writes durable planning state to ${root}/.bearing/ and visible bearing-<plan>/ plan workspaces (gitignored).`,
       gitignoreMissing: false,
     });
     expect(await readFile(join(root, ".bearing", "workspace.json"), "utf8")).toContain(root);
@@ -6994,7 +7284,9 @@ describe("POST /api/v1/repository/gitignore", () => {
     });
     expect(JSON.parse(initialized.body)).toMatchObject({ status: "initialized", gitignoreMissing: true });
 
-    for (const expected of ["dist/\n.bearing/\n", "dist/\n.bearing/\n"]) {
+    // Anchored spelling: an unanchored `bearing-*/` would also ignore a user's real
+    // `packages/bearing-core/` at any depth.
+    for (const expected of ["dist/\n.bearing/\n/bearing-*/\n", "dist/\n.bearing/\n/bearing-*/\n"]) {
       const response = await call(port, {
         method: "POST",
         path: "/api/v1/repository/gitignore",
@@ -7041,7 +7333,7 @@ describe("POST /api/v1/repository/gitignore", () => {
     await expect(access(join(nonGit, ".gitignore"))).rejects.toBeDefined();
   });
 
-  it("treats a bare .bearing ignore line as already ignored and never appends a duplicate", async () => {
+  it("treats a bare .bearing ignore line as insufficient and appends the visible workspace rule once", async () => {
     const { port, cap } = await launch();
     const cookie = await exchangeCookie(port, cap);
     const root = await tempRepo();
@@ -7053,7 +7345,7 @@ describe("POST /api/v1/repository/gitignore", () => {
       headers: sessionHeaders(port, { cookie }),
       body: JSON.stringify({ path: root }),
     });
-    expect(JSON.parse(initialized.body)).toMatchObject({ status: "initialized", gitignoreMissing: false });
+    expect(JSON.parse(initialized.body)).toMatchObject({ status: "initialized", gitignoreMissing: true });
 
     const response = await call(port, {
       method: "POST",
@@ -7063,7 +7355,9 @@ describe("POST /api/v1/repository/gitignore", () => {
     });
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body)).toEqual({ status: "ok", gitignored: true });
-    expect(await readFile(join(root, ".gitignore"), "utf8")).toBe("dist/\n.bearing\n");
+    // The workspace rule is anchored to the repository root: an unanchored `bearing-*/` would
+    // also ignore a user's real `packages/bearing-core/` at any depth.
+    expect(await readFile(join(root, ".gitignore"), "utf8")).toBe("dist/\n.bearing\n/bearing-*/\n");
   });
 
   it("keeps the repository mutation guards on the consent endpoint", async () => {
@@ -7160,6 +7454,99 @@ describe("POST /api/v1/owner", () => {
     });
     expect(resumed.status).toBe(200);
     expect(JSON.parse(resumed.body)).toMatchObject({ status: "resumed", ownerName: "Smokie", greeting: expect.stringContaining("Smokie") });
+  });
+});
+
+describe("owner-name presentation across repository sessions", () => {
+  it("presents a resumed saved owner name as a settled summary with an Edit action, never as a required unanswered field", async () => {
+    const first = await launch();
+    const firstCookie = await exchangeCookie(first.port, first.cap);
+    const root = await tempRepo();
+    await call(first.port, {
+      method: "POST",
+      path: "/api/v1/repository",
+      headers: sessionHeaders(first.port, { cookie: firstCookie }),
+      body: JSON.stringify({ path: root }),
+    });
+    expect((await call(first.port, {
+      method: "POST",
+      path: "/api/v1/owner",
+      headers: sessionHeaders(first.port, { cookie: firstCookie }),
+      body: JSON.stringify({ name: 'A"<Smokie>' }),
+    })).status).toBe(200);
+
+    const second = await launch();
+    const secondCookie = await exchangeCookie(second.port, second.cap);
+    const resumed = await call(second.port, {
+      method: "POST",
+      path: "/api/v1/repository",
+      headers: sessionHeaders(second.port, { cookie: secondCookie }),
+      body: JSON.stringify({ path: root }),
+    });
+    expect(resumed.status).toBe(200);
+    // The hostile name round-trips through the API verbatim; the page renders it
+    // only through textContent below, so `"` and `<` can never become markup.
+    expect(JSON.parse(resumed.body)).toMatchObject({ status: "resumed", ownerName: 'A"<Smokie>' });
+
+    const page = await call(second.port, { method: "GET", path: "/" });
+    expect(page.status).toBe(200);
+    // The settled summary exists, is hidden by default (first use still prompts), and carries an Edit action.
+    expect(page.body).toContain('id="owner-summary" hidden');
+    expect(page.body).toContain('<span>We\'ll call you <strong id="owner-name-summary"></strong>.</span>');
+    expect(page.body).toContain('<button id="edit-owner-name" type="button">Edit</button>');
+    // The name renders through textContent, never into markup; the page never uses innerHTML.
+    expect(page.body).toContain('if (settled) document.getElementById("owner-name-summary").textContent = rememberedName');
+    expect(page.body).not.toContain("innerHTML");
+    // The toggle is wired to every repository selection so a resume shows the settled summary.
+    expect(page.body).toContain('function syncOwnerNameSettled(settled)');
+    expect(page.body).toContain('syncOwnerNameSettled(repositoryHasOwner)');
+    // A repository without a saved name clears the remembered name, so one repository's
+    // name never leaks into another repository's session.
+    expect(page.body).toContain('rememberedName = result.body.ownerName || ""');
+    // The prefilled value keeps the launch path working without re-entering the name.
+    expect(page.body).toContain('document.getElementById("owner-name").value = rememberedName');
+    // Edit reveals the editable field again.
+    expect(page.body).toContain('edit-owner-name").addEventListener("click"');
+  });
+
+  it("still asks for an owner name on first use, after removal, and when the persisted state is invalid or unreadable", async () => {
+    const launch1 = await launch();
+    const cookie = await exchangeCookie(launch1.port, launch1.cap);
+    const root = await tempRepo();
+
+    const select = (body: string) => call(launch1.port, {
+      method: "POST",
+      path: "/api/v1/repository",
+      headers: sessionHeaders(launch1.port, { cookie }),
+      body,
+    });
+
+    // First use: no saved name yet.
+    await select(JSON.stringify({ path: root }));
+    expect(JSON.parse((await select(JSON.stringify({ path: root }))).body)).not.toHaveProperty("ownerName");
+
+    // After the saved name is removed.
+    await call(launch1.port, {
+      method: "POST",
+      path: "/api/v1/owner",
+      headers: sessionHeaders(launch1.port, { cookie }),
+      body: JSON.stringify({ name: "Smokie" }),
+    });
+    await rm(join(root, ".bearing", "owner.json"));
+    expect(JSON.parse((await select(JSON.stringify({ path: root }))).body)).not.toHaveProperty("ownerName");
+
+    // Persisted state present but invalid.
+    await writeFile(join(root, ".bearing", "owner.json"), "{ not json");
+    expect(JSON.parse((await select(JSON.stringify({ path: root }))).body)).not.toHaveProperty("ownerName");
+
+    // Persisted state present but unreadable (not a regular file).
+    await rm(join(root, ".bearing", "owner.json"));
+    await mkdir(join(root, ".bearing", "owner.json"));
+    expect(JSON.parse((await select(JSON.stringify({ path: root }))).body)).not.toHaveProperty("ownerName");
+
+    // The browser's default is still the required prompt when no validated name is known.
+    const page = await call(launch1.port, { method: "GET", path: "/" });
+    expect(page.body).toContain('<label for="owner-name">What should we call you?</label><input id="owner-name" type="text" required autocomplete="name" maxlength="80">');
   });
 });
 
@@ -7425,6 +7812,198 @@ describe("browser showcase JSON findings redaction", () => {
       retryRefusal: "retry_requires_warrant",
     });
     expect(refused.body).not.toMatch(/ghp_/);
+  });
+});
+
+describe("run inspection surface", () => {
+  it("identifies the state location and run inspection of a plan-bound run in the journey status payload", async () => {
+    const root = await tempRepo();
+    const { port, cap } = await launchHandler();
+    const cookie = await exchangeCookie(port, cap);
+    await selectRepository(port, cookie, root);
+    await seedRun(root, "inspect-run", "docs/plans/inspect");
+
+    const status = await call(port, { method: "GET", path: "/api/v1/journey/inspect-run/status", headers: { cookie } });
+
+    expect(status.status).toBe(200);
+    const run = JSON.parse(status.body).run;
+    expect(run.stateLocation).toBe("bearing-inspect/runs/inspect-run");
+    expect(run.workspace).toBe("bearing-inspect");
+    expect(Array.isArray(run.events) && run.events.length > 0).toBe(true);
+    expect(run.events[0]).toMatchObject({ type: "workRequestCreated", sequence: 1, recordedAt: expect.any(String) });
+    expect(Array.isArray(run.allowedActions) && run.allowedActions.includes("status")).toBe(true);
+  });
+
+  it("identifies the legacy state location for a run that stayed in .bearing", async () => {
+    const root = await tempRepo();
+    const { port, cap } = await launchHandler();
+    const cookie = await exchangeCookie(port, cap);
+    await selectRepository(port, cookie, root);
+    // A legacy run is seeded with a checkpoint that carries no plan binding, so
+    // its audit trail never relocates out of .bearing.
+    const store = new BearingStore(root);
+    const created = await store.apply({
+      schemaVersion: 1, commandId: "create-legacy-inspect", runId: "legacy-inspect", expectedRevision: 0,
+      type: "createWorkRequest", payload: { title: "Legacy run", goal: "Complete the approved work" },
+      session: { sessionId: "test-owner", actor: "owner" }, correlationId: "create-legacy-inspect",
+    });
+    if (!created.ok) throw new Error(created.reason);
+    const recorded = await store.apply({
+      schemaVersion: 1, commandId: "checkpoint-legacy-inspect", runId: "legacy-inspect", expectedRevision: created.state.revision,
+      type: "recordJourneyCheckpoint", payload: {
+        stage: "review", status: "complete", artifacts: [],
+        lastResultJson: JSON.stringify({ status: "action", summary: "Complete.", artifacts: [], tokens: 1 }),
+      },
+      session: { sessionId: "test-bearing", actor: "bearing" }, correlationId: "checkpoint-legacy-inspect",
+    });
+    if (!recorded.ok) throw new Error(recorded.reason);
+
+    const status = await call(port, { method: "GET", path: "/api/v1/journey/legacy-inspect/status", headers: { cookie } });
+
+    expect(status.status).toBe(200);
+    const run = JSON.parse(status.body).run;
+    expect(run.stateLocation).toBe(".bearing/runs/legacy-inspect");
+    // The legacy-home fallback must satisfy the HEADLESS_STATE_LOCATION receipt
+    // grammar on every platform; platform `join` would emit `\` on win32 and
+    // the receipt validator would silently drop the location.
+    expect(run.stateLocation).toMatch(/^(?:[A-Za-z0-9._-]{1,64}\/)?runs\/[A-Za-z0-9_-]{1,128}$/);
+    expect(run.workspace).toBeUndefined();
+  });
+
+  it("serves the run inspection block and textContent-only renderer in the app page", async () => {
+    const root = await tempRepo();
+    const { port, cap } = await launchHandler();
+    const cookie = await exchangeCookie(port, cap);
+    await selectRepository(port, cookie, root);
+
+    const page = await call(port, { method: "GET", path: "/", headers: { cookie } });
+
+    expect(page.status).toBe(200);
+    expect(page.body).toContain('<aside class="run-inspection" id="run-inspection" hidden');
+    expect(page.body).toContain('id="inspection-state-location"');
+    expect(page.body).toContain("function renderRunInspection(run)");
+    expect(page.body).toContain('document.getElementById("inspection-state-location").textContent = run.stateLocation');
+    expect(page.body).toContain("renderRunInspection(body.run)");
+  });
+
+  it("keeps a journey POST response fully formed when the run inspection store access faults", async () => {
+    const root = await tempRepo();
+    const runner = new CheckpointRunner();
+    const { port, cookie } = await readyJourneyHandler(root, runner);
+    const runId = "inspection-fault";
+    await seedRun(root, runId);
+    const originalApply = BearingStore.prototype.apply;
+    const originalLoad = BearingStore.prototype.load;
+    // Model the owner deleting or renaming `bearing-<plan>/` while the POST is
+    // in flight: the checkpoint persist succeeds, then the inspection's own
+    // store access throws workspace_root_changed. The inspection projection is
+    // best-effort disclosure — the response must stay fully formed without it.
+    let checkpointApplies = 0;
+    let armInspectionFault = false;
+    const apply = vi.spyOn(BearingStore.prototype, "apply").mockImplementation(async function (this: BearingStore, command) {
+      if (command.type === "recordJourneyCheckpoint" && command.payload.stage === "gather-supplies") {
+        // The pre-execution checkpoint persist and the post-execution persist both
+        // apply at the requested stage; the inspection runs after the second one.
+        checkpointApplies += 1;
+        if (checkpointApplies === 2) armInspectionFault = true;
+      }
+      return originalApply.call(this, command);
+    });
+    const load = vi.spyOn(BearingStore.prototype, "load").mockImplementation(async function (this: BearingStore, runId: string) {
+      if (armInspectionFault) {
+        armInspectionFault = false;
+        throw Object.assign(new Error("simulated workspace_root_changed"), { code: "workspace_root_changed" });
+      }
+      return originalLoad.call(this, runId);
+    });
+    try {
+      expect((await call(port, {
+        method: "POST",
+        path: "/api/v1/journey",
+        headers: sessionHeaders(port, { cookie }),
+        body: JSON.stringify({ runId, stage: "set-bearings", workGoal: "Complete the approved work" }),
+      })).status).toBe(200);
+      const gathered = await callBounded(port, {
+        method: "POST",
+        path: "/api/v1/journey",
+        headers: sessionHeaders(port, { cookie }),
+        body: JSON.stringify({ runId, stage: "gather-supplies", workGoal: "Complete the approved work" }),
+      }, 3_000);
+      expect(gathered.status, gathered.body).toBe(200);
+      expect(JSON.parse(gathered.body)).toMatchObject({ status: "action", summary: "Requirements ready." });
+      expect(JSON.parse(gathered.body)).not.toHaveProperty("stateLocation");
+    } finally {
+      apply.mockRestore();
+      load.mockRestore();
+    }
+  });
+});
+
+describe("journey artifact link rewriting", () => {
+  it("routes an anchor after a `--!>` comment terminator while keeping every existing comment-skip behavior", async () => {
+    const root = await tempRepo();
+    const runId = "comment-end-bang";
+    const planDirectory = `docs/plans/${runId}`;
+    // The served report links to four sibling artifacts; its comments cover both
+    // terminators the HTML spec recognizes (`-->` and `--!>`) and the
+    // unterminated-comment dead end. The link map is built from every recorded
+    // artifact relative to the served artifact's directory.
+    const report = [
+      '<!doctype html><html><head><title>Report</title></head><body>',
+      '<a href="plain.html">plain</a>',
+      '<!-- hidden --><a href="normal.html">normal</a>',
+      '<!-- hidden --!><a href="bang.html">bang</a>',
+      '<!-- unterminated <a href="after-unterminated.html">after</a>',
+      '</body></html>',
+    ].join("");
+    await mkdir(join(root, planDirectory), { recursive: true });
+    await writeFile(join(root, planDirectory, "report.html"), report);
+    for (const artifact of ["plain.html", "normal.html", "bang.html", "after-unterminated.html"]) {
+      await writeFile(join(root, planDirectory, artifact), "<!doctype html><html><body>artifact</body></html>");
+    }
+    const store = await seedRun(root, runId, planDirectory);
+    const durable = await store.load(runId);
+    const recorded = await store.apply({
+      schemaVersion: 1,
+      commandId: `artifacts-${runId}`,
+      runId,
+      expectedRevision: durable.revision,
+      type: "recordJourneyCheckpoint",
+      payload: {
+        stage: "gather-supplies",
+        status: "complete",
+        artifacts: [
+          `${planDirectory}/report.html`,
+          `${planDirectory}/plain.html`,
+          `${planDirectory}/normal.html`,
+          `${planDirectory}/bang.html`,
+          `${planDirectory}/after-unterminated.html`,
+        ],
+        planDirectory,
+      },
+      session: { sessionId: "test-bearing", actor: "bearing" },
+      correlationId: `artifacts-${runId}`,
+    });
+    if (!recorded.ok) throw new Error(recorded.reason);
+
+    const { port, cap } = await launchHandler();
+    const cookie = await exchangeCookie(port, cap);
+    await selectRepository(port, cookie, root);
+    // A status GET restores the journey from durable state, including its artifacts.
+    const status = await call(port, { method: "GET", path: `/api/v1/journey/${runId}/status`, headers: { cookie } });
+    expect(status.status).toBe(200);
+
+    const artifact = await call(port, { method: "GET", path: `/api/v1/journey/${runId}/artifacts/0`, headers: { cookie } });
+    expect(artifact.status).toBe(200);
+    // Anchors outside comments, and after a `-->`-terminated comment, are routed.
+    expect(artifact.body).toContain('href="/api/v1/journey/comment-end-bang/artifacts/1"');
+    expect(artifact.body).toContain('href="/api/v1/journey/comment-end-bang/artifacts/2"');
+    // A browser ends the comment at `--!>` (comment-end-bang state) and renders the
+    // following anchor live, so the rewriter must route it rather than skip it.
+    expect(artifact.body).toContain('href="/api/v1/journey/comment-end-bang/artifacts/3"');
+    // An unterminated comment still consumes the remainder of the input.
+    expect(artifact.body).toContain('href="after-unterminated.html"');
+    expect(artifact.body).not.toContain('/artifacts/4');
   });
 });
 
