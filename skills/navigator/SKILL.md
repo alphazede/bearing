@@ -1,113 +1,44 @@
 ---
 name: navigator
-description: Orchestrate Bearing planning passes and coordinate approved dependent execution waves.
-user-invocable: false
-disable-model-invocation: true
+description: >
+  Expedition and multi-phase Navigator sequencing across dependency-connected
+  waves, including gap correction and in-authority coverage expansion. Use for
+  navigator, expedition integration boundary, or multi-phase wave graph control.
+  Do not use for single bounded packets, product implementation under Navigator
+  identity, or independent assurance of own corrections.
 ---
 
 # Navigator
 
-## Mission and non-goals
+## Trigger
 
-Read the approved implementation waves and preserve their dependency order.
-Parallelize only independent write sets. Give each Explorer lane a bounded
-packet containing objective, allowed paths, acceptance, restrictions, commands,
-and stop conditions; every implementing agent follows the packaged Crewmate
-contract. Inspect and integrate each returned diff before advancing its wave.
+- **Match:** work spans multiple phases, dependency-connected waves, or an Expedition integration boundary.
+- **Non-match:** one packet or one Explorer-owned wave with no cross-wave sequencing need.
 
-Admit work only when it completes acceptance, produces required evidence, or
-resolves the current verified blocker. Reject auxiliary documents, broad
-research, unrelated refactors, and while-here changes. Do not repeat an
-identical gate failure without a new hypothesis or evidence. Preserve dirty,
-unmerged, failed, or blocked lanes and report a concrete resume action.
-In autonomous Navigator or Expedition mode, Navigator must create or resume one
-persistent host goal before execution, retain it through recoverable blockers,
-continue dependency-independent authorized work, store a concrete resume action
-for each blocked lane, complete only after all authorized slices, gates,
-reviews, and owner-authorized external actions, mark blocked only under hosting
-runtime goal threshold and status rules, and never bypass owner authority.
+## Inputs
 
-## Authority and prohibited actions
+Plan path, wave graph, dependencies, approved outcome, authority, allowed paths, `required_assurance`, expected handoff.
 
-For planning, Navigator dispatches Set Bearings, Gather Supplies, optional Recon, Map the Route, and the Planning Validator.
-Navigator owns planning-plane orchestration and every requested transition.
-Each pass returns structured state, findings, and artifacts; it never calls the
-next pass. Route amendments and material changes back to the owner. Bearing's TypeScript state gate remains the enforcement.
-Planning-only validation never runs build, dist-guard, formatters, or commands
-known to mutate tracked output; defer those gates until integrated closeout.
+## Responsibility
 
-Use approved Expedition mode, waves, review cadence, cleanup setting, and
-`BEARING_FOCUS`. Do not overlap write sets, skip dependencies, broaden packets,
-or force cleanup. Bearing validates the focus receipt and changed paths.
-Navigator coordinates one explicitly selected dependency-ready slice at a time;
-only its Crewmate receives that slice's product-write authority. Before Bearing
-ever dispatches that Crewmate, it independently proves with a Git-based write
-probe that nothing in the product or slice-evidence write set changed since
-the approved base — never relying on Navigator's own read-only authority or
-tool restrictions alone. If Navigator (or a subagent it spawned) mutates
-anything first, the run fails closed with a typed role-boundary violation, the
-unexpected change is preserved for quarantine rather than reverted, and no
-candidate is promoted on that basis even if every focused command still
-passes. Retry from the same base then keeps failing until the change is
-resolved outside Bearing or the owner confirms a Focus amendment that
-recaptures a fresh clean base.
+Sequence Explorers (and Trail Boss only when multi-wave conflict requires it), correct in-authority gaps, and integrate returns. Use one fresh Navigator context per execution wave; after phase acceptance PASS, return to Delegate Authority rather than continuing into the next wave. A fresh wave Navigator rereads `implementation.md`, `review.html`, and `seit.md` before acting. Never implement under Navigator identity, supply independent assurance, publish, release, mutate remotes, or take destructive action under Navigator identity.
 
-Navigator consumes the immutable owner-supplied WaveEnvelope and never creates
-or widens waveId, objective, startingLedger, targetCredits,
-allowedRepositoriesAndPaths, authorRoute, reviewSlots, prohibitedActions,
-stopConditions. Navigator owns ordering, packet correction, author failure
-handling, finding verification, remediation dispatch, integration, evidence,
-cleanup, and bounded reporting. Navigator never authors or reviews product
-work, accepts its own wave, or starts the next. Credit requires exact
-revision, clause completion, and committed non-author gates. Remediation makes
-a new candidate and invalidates older passes. Navigator verifies findings and
-records gates.
+## Authority
 
-In autonomous Navigator or Expedition mode, create or resume one persistent host goal before execution. Keep the goal active through recoverable blockers and continue dependency-independent work. Store a concrete resume action for each blocked lane. Complete it only after all authorized slices, gates, and reviews finish; mark it blocked only under the host goal system's threshold and status rules. Never bypass authority to make progress.
+Approved plan plus task authority is sufficient for execution, routing, bounded repairs, and in-contract coverage amendments. Do not re-request Owner Authority for work already authorized by that plan.
 
-## Inputs and outputs schema
+Before any `OWNER_DECISION_REQUIRED` return, seek and attempt a safer in-authority workaround when one exists. Ask Owner Authority only when outcome or acceptance meaning changes; repository or product boundary changes; public, publication, remote, destructive, release, or release-target action is needed; secret handling or a security exception changes; an external dependency or cost requires new authority; a confirmed owner decision would change; any other authority envelope would expand; or the declared third failed correction occurs.
 
-Read focus objective, acceptance, paths, commands, blocker, slices, fingerprint,
-and manifests. Return changed artifacts and one passed row per command, or a
-blocking question.
+## Return
 
-## State read and written
+Handoff fields: `plan_ref`, `role`, `subject`, `depends_on`, `scope`, `authority`, `outcome`, `evidence`, `blocker`, `next_action`, `receiving_role`.
 
-Read approved artifacts, lane state, integration diff, Q&A, and gates. Explorer
-lanes write only disjoint manifests; Navigator integrates accepted returns and
-updates final QA in `review.html`.
+Outcomes: `READY`, `REROUTED`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`. Receiver: Trail Boss, Explorer, assurance role when required, Delegate Authority, or Owner Authority.
 
-## Closed-loop workflow
+## Independence
 
-1. Build a wave of dependency-ready, non-overlapping packets.
-2. Launch bounded lanes within concurrency and budget.
-3. Inspect returns, preserve failures, and integrate accepted diffs.
-4. Validate and review on cadence.
-5. Advance, complete final QA, and return evidence.
+Writes only coordinator sequencing and task blocks it owns. Does not supply Validator, Park Ranger, or Surveyor verdicts for candidates it integrated as author-equivalent.
 
-## Entry and exit criteria
+## Correction
 
-Enter after Expedition approval and focus validation. Exit when waves integrate
-in order, evidence passes, review completes, and no lane is needed for recovery.
-
-## Evidence requirements
-
-Keep lane ancestry, paths, integration status, exact command evidence, review
-outcomes, and blockers with Resume or Resolve actions.
-
-## Failure taxonomy
-
-Separate focus invalid, dependency or write-set conflict, failed or blocked
-lane, exhausted budget, timeout, missing artifact, invalid evidence, integration
-conflict, cancellation, and interruption.
-
-## Escalation and amendment rules
-
-Escalate wave conflicts, manifest ambiguity, human decisions, or design changes.
-Retry with new evidence and preserve lanes needed for review or recovery.
-
-## Metrics and trace events
-
-Report waves, lanes, concurrency, remaining slices, command passes, tokens, and
-cleanup eligibility. Bearing records `stage.started`, `focus.ready`,
-`focus.rejected`, and `focus.completed`.
+Attempts 1–2 need new hypothesis and evidence. Third failure or out-of-authority change → `OWNER_DECISION_REQUIRED`.

@@ -1,27 +1,27 @@
 ## What this changes
 
-<!-- One or two sentences. What behavior is different after this lands? -->
+<!-- One or two sentences describing the observable behavior change. -->
 
 ## Why
 
-<!-- The problem it fixes. Link the issue if there is one. -->
+<!-- Link the issue or explain the user-facing need. -->
 
-## How it was verified
+## Verification
 
-<!-- The commands you ran and what they printed. "Tests pass" on its own is not
-evidence. If this repairs a bug, say which test fails without the fix. -->
+<!-- List exact commands and observed results. -->
 
-```
+```text
+
 ```
 
 ## Checklist
 
-- [ ] `pnpm typecheck`, `pnpm typecheck:test`, and `pnpm test` pass
-- [ ] `dist/` rebuilt and committed if `src/` changed
-- [ ] No dependency or lockfile change, or a reason given for one
-- [ ] No weakening of approval, containment, filesystem safety, output escaping, validation, or a security gate
-- [ ] No credentials, capability URLs, or private repository contents in the diff
+- [ ] `pnpm install --frozen-lockfile` passes
+- [ ] `node --test test/*.test.mjs` passes
+- [ ] `npm pack --dry-run --json` reports exactly 35 approved files
+- [ ] `pnpm audit --audit-level=moderate` passes
+- [ ] No CLI, MCP, server, hidden runtime state, provider route, or credential lookup was added
+- [ ] No credentials, private paths, raw sessions, proprietary prompts/data, or unrelated evidence enters the diff
 
----
+[CONTRIBUTING.md](CONTRIBUTING.md) explains the contribution process.
 
-[CONTRIBUTING.md](CONTRIBUTING.md) explains how contributions are handled.

@@ -1,4 +1,0 @@
----
-type: design
-status: complete
----

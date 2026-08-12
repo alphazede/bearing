@@ -1,4 +1,4 @@
-name: Publish Bearing npm package
+name: Publish Bearing Lite npm package
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       bootstrap_npm_token:
-        description: Use NPM_TOKEN only for the one-time first publish
+        description: Use NPM_TOKEN only for the first package publication
         required: true
         default: false
         type: boolean
@@ -24,7 +24,7 @@ permissions:
   security-events: read
 
 concurrency:
-  group: bearing-npm-publish
+  group: bearing-lite-npm-publish
   cancel-in-progress: false
 
 jobs:
@@ -49,13 +49,11 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
-      - name: Set up pnpm
+      - name: Set up pnpm and npm
         run: |
           corepack enable
           corepack prepare pnpm@10.33.0 --activate
-
-      - name: Set up current npm
-        run: npm install --global npm@11.5.1
+          npm install --global npm@11.15.0
 
       - name: Verify immutable release tag and confirmation
         env:
@@ -63,7 +61,6 @@ jobs:
           CONFIRMATION: ${{ inputs.confirm }}
         run: |
           set -euo pipefail
-          node -e "const p=require('./package.json'); if (!p.name || !p.version) throw new Error('package identity is required')"
           package_name="$(node -p "require('./package.json').name")"
           package_version="$(node -p "require('./package.json').version")"
           expected_tag="v${package_version}"
@@ -72,7 +69,7 @@ jobs:
           test "$CONFIRMATION" = "$expected_confirmation"
           test "$(git rev-parse HEAD)" = "$(git rev-parse "${expected_tag}^{commit}")"
 
-      - name: Verify required hosted checks
+      - name: Verify main and required hosted checks
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -80,49 +77,38 @@ jobs:
           checked_out_sha="$(git rev-parse HEAD)"
           main_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
           test "$checked_out_sha" = "$main_sha"
-          checks_file="${RUNNER_TEMP}/bearing-check-runs.json"
           gh api --paginate --slurp \
             "/repos/${GITHUB_REPOSITORY}/commits/${checked_out_sha}/check-runs?filter=latest&per_page=100" \
-            > "$checks_file"
-          CHECKS_FILE="$checks_file" node <<'NODE'
+            > "${RUNNER_TEMP}/check-runs.json"
+          CHECKS_FILE="${RUNNER_TEMP}/check-runs.json" node <<'NODE'
           const { readFileSync } = require("node:fs");
           const pages = JSON.parse(readFileSync(process.env.CHECKS_FILE, "utf8"));
           const runs = pages.flatMap((page) => page.check_runs ?? []);
           for (const name of ["quality", "Semgrep scan", "Analyze (javascript-typescript)", "Analyze (actions)"]) {
             const latest = runs.filter((run) => run.name === name).sort((a, b) => b.id - a.id)[0];
-            if (!latest) throw new Error(`Required check is missing: ${name}`);
-            if (latest.status !== "completed" || latest.conclusion !== "success") {
-              throw new Error(`Required check is not successful: ${name} (${latest.status}/${latest.conclusion ?? "none"})`);
+            if (!latest || latest.status !== "completed" || latest.conclusion !== "success") {
+              throw new Error(`Required check is not successful: ${name}`);
             }
             console.log(`Verified ${name}: ${latest.html_url}`);
           }
           NODE
-          alerts_file="${RUNNER_TEMP}/bearing-codeql-alerts.json"
           gh api --paginate --slurp \
             "/repos/${GITHUB_REPOSITORY}/code-scanning/alerts?ref=refs/heads/main&state=open&tool_name=CodeQL&per_page=100" \
-            > "$alerts_file"
-          ALERTS_FILE="$alerts_file" node <<'NODE'
+            > "${RUNNER_TEMP}/codeql-alerts.json"
+          ALERTS_FILE="${RUNNER_TEMP}/codeql-alerts.json" node <<'NODE'
           const { readFileSync } = require("node:fs");
           const alerts = JSON.parse(readFileSync(process.env.ALERTS_FILE, "utf8")).flat();
-          if (alerts.length) throw new Error(`CodeQL has ${alerts.length} open alert(s) on refs/heads/main`);
-          console.log("Verified CodeQL: no open alerts on refs/heads/main");
+          if (alerts.length) throw new Error(`CodeQL has ${alerts.length} open alert(s)`);
           NODE
 
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify release
+      - name: Verify release candidate
         run: |
-          pnpm typecheck
-          pnpm typecheck:test
-          pnpm test
-          pnpm test:integration
-          pnpm build
-          pnpm eval:native
+          pnpm install --frozen-lockfile
+          node --test test/*.test.mjs
           pnpm audit --audit-level=moderate
           npm pack --dry-run --json
 
-      - name: Publish first release with bootstrap token
+      - name: Publish first release with bootstrap token and provenance
         if: inputs.bootstrap_npm_token
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -130,4 +116,5 @@ jobs:
 
       - name: Publish with trusted publishing
         if: ${{ !inputs.bootstrap_npm_token }}
-        run: npm publish --provenance --access public
+        run: npm publish --access public
+

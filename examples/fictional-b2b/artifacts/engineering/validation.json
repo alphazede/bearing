@@ -1,5 +1,0 @@
-{
-  "input": "data/import.csv",
-  "header": "id,name,plan",
-  "result": "valid"
-}

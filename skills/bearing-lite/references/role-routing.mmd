@@ -1,0 +1,34 @@
+flowchart TD
+    O[Owner Authority] --> R[Bearing Lite Router]
+    R --> P{Next missing planning stage?}
+    P -->|Repository Fit| PF[Repository Fit]
+    P -->|Set Bearings| SB[Set Bearings]
+    P -->|Gather Supplies| GS[Gather Supplies]
+    P -->|Map the Route| MR[Map the Route]
+    PF --> R
+    SB --> R
+    GS --> R
+    MR --> R
+    P -->|none| Q{Smallest valid route}
+    Q -->|direct| C[Crewmate]
+    Q -->|wave| E[Explorer]
+    Q -->|expedition| N[Navigator]
+    Q -->|long multi-phase| D[Delegate Authority]
+    D --> N
+    N --> TB{Multiple active or conflicting waves?}
+    TB -->|yes| T[Trail Boss]
+    TB -->|no| E
+    T --> E
+    E --> X{Nested split needed?}
+    X -->|yes| SE[Sub-explorer]
+    SE --> C
+    X -->|no| C
+    C --> A{required_assurance / next missing?}
+    A -->|none: coordinator confirms| Q
+    A -->|Validator| V[Validator]
+    A -->|Park Ranger| PK[Park Ranger]
+    A -->|Surveyor| S[Surveyor]
+    A -->|owner acceptance| O
+    V --> A
+    PK --> A
+    S --> O

@@ -1,77 +1,37 @@
 {
-  "name": "@alphazede/bearing",
-  "version": "0.1.7",
-  "description": "Harness-agnostic orchestration for AI coding agents: approved plans, DAG-scheduled routes, bounded execution, and reviewable evidence.",
+  "name": "@alphazede/bearing-lite",
+  "version": "0.1.0",
+  "description": "Skills-first Agent Plugin for planning, routing, bounded execution, and independent review of repository work—without CLI, MCP, server, or hidden runtime state.",
   "keywords": [
-    "ai-agents",
+    "agent-plugins",
+    "agent-skills",
     "coding-agent",
-    "agent-orchestration",
-    "claude-code",
-    "codex",
+    "planning",
+    "workflow",
     "developer-tools",
-    "local-first",
-    "workflow-automation",
-    "dag",
+    "skills-first",
     "evidence",
-    "code-review",
-    "cli"
+    "code-review"
   ],
   "author": "William Rumph / AlphaZede",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/alphazede/bearing.git"
+    "url": "git+https://github.com/alphazede/bearing-lite.git"
   },
-  "homepage": "https://github.com/alphazede/bearing#readme",
+  "homepage": "https://github.com/alphazede/bearing-lite#readme",
   "bugs": {
-    "url": "https://github.com/alphazede/bearing/issues"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "engines": {
-    "node": ">=22"
+    "url": "https://github.com/alphazede/bearing-lite/issues"
   },
   "files": [
-    "dist/",
-    "assets/",
-    ".mcp.json",
-    ".claude-plugin/",
-    ".codex-plugin/",
-    "plugin-skills/",
-    "hooks/",
-    "examples/fictional-b2b/",
+    "plugin.json",
     "skills/",
-    "guide/",
+    "hooks/",
     "README.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
     "SECURITY.md",
-    "LICENSE-APACHE"
-  ],
-  "packageManager": "pnpm@10.33.0",
-  "type": "module",
-  "bin": {
-    "bearing": "dist/cli.js"
-  },
-  "scripts": {
-    "typecheck": "tsc --noEmit",
-    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
-    "test": "vitest run",
-    "eval:native": "tsc && node dist/evaluation/cli.js native",
-    "eval:skillsbench": "tsc && node dist/evaluation/cli.js skillsbench",
-    "test:integration": "vitest run test/local-session.test.ts test/repository-bootstrap.test.ts test/repository-choice.test.ts test/onboarding-http.test.ts test/showcase-http.test.ts",
-    "build": "tsc",
-    "dist-guard": "pnpm build && node scripts/check-dist-freshness.mjs",
-    "prepack": "pnpm build"
-  },
-  "devDependencies": {
-    "@types/node": "22.19.17",
-    "typescript": "5.9.3",
-    "vitest": "4.1.5"
-  },
-  "pnpm": {
-    "overrides": {
-      "postcss": ">=8.5.23",
-      "nanoid": "^3.3.18"
-    }
-  }
+    "LICENSE-APACHE",
+    "guide/migration.md"
+  ]
 }

@@ -22,7 +22,7 @@ Be decent to people. Argue about the work, not the person making it.
 ## Where this applies
 
 Every space this project uses: issues, pull requests, discussions, commit
-messages, and any place where you are speaking for Bearing.
+messages, and any place where you are speaking for Bearing Lite.
 
 ## Reporting
 
@@ -31,7 +31,7 @@ public issue about someone's conduct, because that makes the situation worse for
 the person reporting it.
 
 If the report involves a security matter, use the [private vulnerability
-reporting form](https://github.com/alphazede/bearing/security/advisories/new)
+reporting form](https://github.com/alphazede/bearing-lite/security/advisories/new)
 instead. See [SECURITY.md](SECURITY.md).
 
 Reports are read by the maintainer and kept private. You will get a response.

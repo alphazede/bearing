@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      security-events: write # Upload CodeQL results to code scanning.
+      security-events: write
 
     steps:
       - name: Checkout
@@ -40,3 +40,4 @@ jobs:
         uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
         with:
           category: /language:javascript-typescript
+

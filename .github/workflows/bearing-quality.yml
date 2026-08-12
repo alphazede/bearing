@@ -35,29 +35,25 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
+      - name: Test public Lite contract
+        run: node --test test/*.test.mjs
 
-      - name: Typecheck tests
-        run: pnpm typecheck:test
-
-      - name: Test
-        run: pnpm test
-
-      - name: Integration test
-        run: pnpm test:integration
-
-      - name: Build
-        run: pnpm build
-
-      - name: Check committed dist freshness
-        run: node scripts/check-dist-freshness.mjs
-
-      - name: Native synthetic evaluation
-        run: pnpm eval:native
-
-      - name: Audit
+      - name: Audit dependencies
         run: pnpm audit --audit-level=moderate
 
-      - name: Check package contents
-        run: npm pack --dry-run --json
+      - name: Verify package contents
+        run: |
+          npm pack --dry-run --json > "${RUNNER_TEMP}/pack.json"
+          PACK_JSON="${RUNNER_TEMP}/pack.json" node <<'NODE'
+          const pack = require(process.env.PACK_JSON)[0];
+          if (pack.name !== "@alphazede/bearing-lite" || pack.version !== "0.1.0") {
+            throw new Error(`Unexpected package identity: ${pack.name}@${pack.version}`);
+          }
+          if (pack.entryCount !== 35 || pack.files.length !== 35) {
+            throw new Error(`Expected 35 packed files, got ${pack.entryCount}/${pack.files.length}`);
+          }
+          NODE
+
+      - name: Check whitespace
+        run: git diff --check
+

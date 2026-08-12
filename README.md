@@ -1,249 +1,212 @@
-# Bearing
+# Bearing Lite
 
-[![npm](https://img.shields.io/npm/v/@alphazede/bearing)](https://www.npmjs.com/package/@alphazede/bearing)
-[![quality](https://github.com/alphazede/bearing/actions/workflows/bearing-quality.yml/badge.svg)](https://github.com/alphazede/bearing/actions/workflows/bearing-quality.yml)
+[![npm](https://img.shields.io/npm/v/@alphazede/bearing-lite)](https://www.npmjs.com/package/@alphazede/bearing-lite)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE-APACHE)
 
-![Bearing working in its local planning office](assets/bearing-office.png)
+**Bearing Lite** (`@alphazede/bearing-lite`) is a skills-first Agent Plugin for
+planning, routing, bounded execution, and independent review of repository work.
+It ships portable skills, references, templates, and optional client hooks. It
+does **not** ship a CLI, MCP server, browser control room, local scheduler, or
+hidden runtime database.
 
-Bearing is a local browser control room for evidence-backed agent work. It moves
-a complex repository request through approved planning, bounded execution, owner
-decisions, and reviewable evidence, and you keep approval and review authority
-throughout.
+An agent cannot certify its own work. The router selects the smallest valid
+route; independent assurance roles run only when declared, owner-selected, or
+required by a mandatory integrated phase gate. Owner Authority remains human-only.
 
-**An agent cannot certify its own work.** Every change runs inside a declared
-write set, produces a receipt bound to the runtime that validated it, and is
-reviewed by a role that structurally cannot execute.
+Bearing Lite was created by William Rumph at AlphaZede.
 
-Bearing is packaged for Codex and Claude Code and was created by William Rumph
-at AlphaZede. The public npm package is `@alphazede/bearing`.
+## Install
 
-## The two journeys
+Install as an Agent Plugin in a compatible client (for example Codex or Claude
+Code marketplaces that discover Agent Plugins `plugin.json` and `skills/`).
 
-Bearing plans first and executes second. Once a plan is approved you choose the
-shape of the run, and that choice is yours rather than the product's.
+```sh
+# Example: npm package for packaging and inspection
+npm pack @alphazede/bearing-lite
+```
 
-**Explorer** puts one lane controller over a set of bounded Crewmates. It is the
-smaller shape, using fewer agents and fewer tokens, and it suits work that is
-compact or mostly sequential. The cost is that one controller carries the whole
-coordination load, so there is little parallelism to gain.
+Client install names follow the host plugin UI. The portable identity is always
+`bearing-lite` / `@alphazede/bearing-lite`. No postinstall script, global hook
+copy, or host-config mutation is required.
 
-**Expedition** adds a Navigator above a Trail Boss and runs several lanes at
-once. It fits multi-phase work whose lanes are genuinely independent. The cost
-is real, since more controllers means more coordination and more tokens.
+Node.js is not required to *use* the skills. Optional typed hook adapters under
+`hooks/` run only when a client registers them; hookless clients remain
+first-class and use procedural skill checks.
 
-The deeper reason to reach for Expedition is context. Every agent degrades as its
-context window fills, so splitting work across more controllers keeps each one
-small and sharp on the piece it owns. You are buying focus with coordination.
+## What it does
 
-<table>
-<tr>
-<td width="50%"><img src="assets/bearing-explorer-card.png" alt="Explorer, one lane controller over a small bounded group"></td>
-<td width="50%"><img src="assets/bearing-expedition-card.png" alt="Expedition, a Navigator and Trail Boss over several parallel lanes"></td>
-</tr>
-<tr>
-<td><b>Explorer: focused route, fewer sessions.</b> Best for compact or mostly sequential plans. Tradeoff: less parallelism.</td>
-<td><b>Expedition: parallel ascent, more sessions.</b> Best for independent lanes or multiple phases. Tradeoff: higher token and coordination cost.</td>
-</tr>
-</table>
+1. **Locate** the project plan and next ready task.
+2. **Fill only missing planning stages:** Repository Fit → Set Bearings → Gather
+   Supplies → Map the Route.
+3. **Choose the smallest role route** that preserves dependencies and
+   `required_assurance`.
+4. **Record task state** only in the project's human-readable plan (Markdown).
+5. **Return structured handoffs**; parent coordinators write plan transitions.
 
-Either shape can use substantial tokens. Bearing shows a persistent warning
-rather than imposing a default ceiling, and `--budget` sets a per-call
-acceptance ceiling. See [execution modes](guide/execution-modes.md) for the
-scoring contract behind the choice.
+Bearing Lite never selects models, providers, credentials, or launchers. The
+owner or client maps available agents to role capability needs.
+
+## Routes and scaling
+
+| Route | When | Cost |
+|---|---|---|
+| **Direct** | One bounded implementer packet | Lowest coordination |
+| **Explorer (wave)** | One wave, one or more Crewmates | One lane controller |
+| **Expedition** | Multi-phase or concurrent independent lanes | Navigator; Trail Boss only for concurrent/conflicting waves |
+| **Long multi-phase** | Owner-approved intent across sessions | Optional Delegate Authority |
+
+**Explorer** keeps one controller over a compact or sequential set of slices.
+**Expedition** adds navigation (and sometimes a Trail Boss) so independent lanes
+stay small and sharp instead of degrading in one long context. Either shape can
+use substantial tokens; the product does not impose a default budget ceiling.
+
+### Role routing (explanatory)
+
+![Bearing Lite role routing: Owner Authority and the router select missing planning stages, then the smallest route among Direct Crewmate, Explorer wave, Expedition Navigator, or long multi-phase Delegate Authority; optional Trail Boss, Sub-explorer, and assurance roles appear only when required](skills/bearing-lite/assets/role-routing.png)
+
+Reviewable Mermaid source: [`skills/bearing-lite/references/role-routing.mmd`](skills/bearing-lite/references/role-routing.mmd)
+(plan-local twin under `docs/plans/2026-08-09-bearing-skills-first-architecture/assets/`).
+
+**Authoritative text (vision optional):** Owner Authority remains human-only. The
+Bearing Lite Router is entry, not a work role. It invokes only missing planning
+stages, then picks the least costly route: Direct Crewmate; Explorer for one
+wave; Navigator for an expedition (Trail Boss only when waves conflict or run
+concurrently); Delegate Authority only for explicit long multi-phase owner
+delegation. Nested Sub-explorer opens only when a lane must split. After
+Crewmate work, `required_assurance: none` means author self-check plus
+coordinator confirmation; Validator, Park Ranger, and Surveyor appear only when
+listed, owner-selected at slice level, or required by a mandatory phase gate.
+Diagrams explain orientation; they never authorize a transition.
 
 ## Roles and authority
 
-Bearing names its roles after an expedition, so the second column says what each
-one actually is.
+| Role | What it is | Executes | Notes |
+|---|---|---|---|
+| **Router** | Plugin entry procedure | no | Not a work role |
+| **Navigator** | Expedition orchestrator | yes | Owns cross-wave sequencing |
+| **Trail Boss** | Multi-wave controller | yes | Only concurrent or conflicting waves |
+| **Explorer** | One-wave lane controller | yes | Dispatches Crewmates |
+| **Sub-explorer** | Nested lane controller | yes | Only when a lane must split |
+| **Crewmate** | Bounded implementer | yes | Writes only inside declared authority |
+| **Validator** | Evidence sufficiency | yes | Independent of the author |
+| **Park Ranger** | Defect review | yes | Independent of the author |
+| **Surveyor** | User-facing acceptance | no | Read-only acceptance judgment |
+| **Delegate Authority** | Cross-session phase owner | yes | Only when owner explicitly delegates |
+| **Owner Authority** | Human decision | n/a | Never an agent role |
 
-| Role | What it is | Executes | Default tier | Constraint |
-|---|---|---|---|---|
-| **Navigator** | Orchestrator. Owns the planning plane and coordinates the Expedition | yes | `high` | No network, no external action, context off |
-| **Trail Boss** | Expedition controller. Runs the wave graph across lanes | yes | `medium` | Expedition only, never paired with Explorer mode |
-| **Explorer** | Lane controller. Runs one lane and dispatches its implementers | yes | `medium` | Read-only authority, no write tools |
-| **Sub-explorer** | Nested lane controller. Opened when one lane needs to split again | yes | `medium` | Complex work only, inherits the Explorer boundary |
-| **Crewmate** | Implementer. Writes the code for one bounded slice | yes | `medium` | Writes only inside the Focus envelope |
-| **Validator** | Evidence validator. Checks the contract was actually proven | yes | `high` | Verdict is `PASS`, `NEEDS_MORE_EVIDENCE`, or `FAIL` |
-| **Park Ranger** | Code reviewer. Hunts defects introduced by the diff | yes | `high` | Findings ranked `P0` through `P3` |
-| **Grader** | Quality scorer. Rates the finished result against a rubric | yes | `high` | Frozen rubric v1, each dimension 0 through 4 |
-| **Surveyor** | Acceptance reviewer. Judges whether it works for the user | no | `medium` | Read-only, no network, no search, context off |
+**Independent review:** a candidate author never provides their own Validator,
+Park Ranger, or Surveyor verdict.
 
-Trail Boss, Explorer, and Sub-explorer are a swarm. Splitting work across more
-controllers keeps each agent's context window small, so every agent stays
-functional on the part it owns instead of degrading as one long context fills up.
+Failure escalates to the nearest role whose scope can see it:
 
-Seven of these ship as packaged skills in `skills/`. Trail Boss and Sub-explorer
-are roles in the execution graph instead, and that graph is implemented and
-tested but is not yet what the browser journey schedules.
+| Failure scope | Escalates to |
+|---|---|
+| Within one slice or packet | Explorer or nearest parent |
+| Across slices in a wave | Trail Boss when present, else Navigator |
+| Across phases | Navigator or Delegate Authority |
+| Contract, security, or authority change | Owner Authority |
 
-A failure escalates to the nearest role whose scope can actually see it:
+## Task state (explanatory)
 
-| Failure scope | Escalates to | Meaning |
-|---|---|---|
-| `within-slice` | Explorer | The lane controller can resolve it |
-| `cross-slice` | Trail Boss | Needs the wave graph, above any one lane |
-| `cross-phase` | Navigator | Needs the whole Expedition |
-| `contract-change` | Owner | No agent may change the approved contract |
+![Bearing Lite task state machine: PROPOSED through READY, IN_PROGRESS, EVIDENCE_READY, optional VALIDATING or REVIEWING, ACCEPTANCE, COMPLETE, with WAITING_ON, CORRECTION_REQUIRED, OWNER_DECISION_REQUIRED, and CANCELLED paths](skills/bearing-lite/assets/task-state.png)
 
-### The loop that runs per slice
+Reviewable Mermaid source: [`skills/bearing-lite/references/task-state.mmd`](skills/bearing-lite/references/task-state.mmd).
+Authoritative transition rules: [`skills/bearing-lite/references/task-state.md`](skills/bearing-lite/references/task-state.md).
 
-Roles only, no failure states. The controller slot depends on mode, since Trail
-Boss runs an Expedition and Explorer runs the simpler shape.
+**Authoritative summary:** The project's plan is the only task-state record.
+Normal progress is `PROPOSED` → `READY` → `IN_PROGRESS` → `EVIDENCE_READY`, then
+optional `VALIDATING` / `REVIEWING` when required, then `ACCEPTANCE` →
+`COMPLETE`. `WAITING_ON` holds for missing prerequisites or assurance dispatch.
+`CORRECTION_REQUIRED` allows two in-authority repairs; a third failed correction
+escalates to `OWNER_DECISION_REQUIRED`. Diagrams never create state or authorize
+transitions.
 
-![Per-slice execution loop: Navigator to Trail Boss or Explorer, then Crewmate to Validator to Park Ranger once per slice, then Grader at the end of a phase and Surveyor at completion](assets/bearing-execution-loop.png)
+## Implementation process (explanatory)
+
+Owner-approved multi-phase work follows four phases: Inventory, Foundation,
+Proof and Documentation, and Final Audit. Default slice completion is author
+self-check plus coordinator confirmation when `required_assurance` is `none`.
+Fresh Validator then separate Park Ranger is mandatory only on exact integrated
+phase candidates, not on every packet.
+
+![Bearing Lite implementation process: four phases with default self-check slices, optional owner slice assurance, mandatory integrated phase gates, bounded correction, and final Surveyor acceptance](docs/plans/2026-08-09-bearing-skills-first-architecture/assets/implementation-process.png)
+
+Mermaid source:
+[`docs/plans/2026-08-09-bearing-skills-first-architecture/assets/implementation-process.mmd`](docs/plans/2026-08-09-bearing-skills-first-architecture/assets/implementation-process.mmd).
 
 <details>
-<summary>Diagram source</summary>
+<summary>Diagram source (implementation process)</summary>
 
 ```mermaid
-flowchart LR
-    N["Navigator"] --> M{"mode"}
-    M -->|expedition| T["Trail Boss"]
-    M -->|explorer| E["Explorer"]
-    T --> E
-    E --> C
-    subgraph slice ["runs once per slice"]
-      direction LR
-      C["Crewmate"] --> V["Validator"]
-      V --> P["Park Ranger"]
-    end
-    P --> D{"more work?"}
-    D -->|next slice| C
-    D -->|phase done| G["Grader"]
-    G -->|next phase| E
-    D -->|all phases done| S["Surveyor"]
-    S --> F(["Evidence complete"])
+flowchart TD
+    P1[Phase 1 Inventory S1-S4 complete] --> P2[Phase 2 Foundation S4A-S7]
+    P2 --> SLICE[Crewmate then author self-check]
+    SLICE --> CC[Coordinator scope and dependency confirmation]
+    CC --> OPT{Owner slice assurance?}
+    OPT -->|Yes| V[Fresh Validator then optional Park Ranger]
+    OPT -->|No| MORE{More Foundation slices?}
+    V -->|Fail or repair| R[Bounded Correction Attempt]
+    V -->|Pass| MORE
+    R -->|Attempt 1 or 2| SLICE
+    R -->|3rd Failure| O[OWNER_DECISION_REQUIRED]
+    MORE -->|Yes| SLICE
+    MORE -->|No: integrated Foundation| FG[Fresh Validator then separate Park Ranger]
+    FG --> P3[Phase 3 Proof and Documentation S8-S10]
+    P3 --> SLICE3[Crewmate then author self-check]
+    SLICE3 --> CC3[Coordinator confirmation]
+    CC3 --> OPT3{Owner slice assurance?}
+    OPT3 -->|Yes| V3[Fresh Validator then optional Park Ranger]
+    OPT3 -->|No| MORE3{More Proof and Documentation slices?}
+    V3 -->|Fail or repair| R
+    V3 -->|Pass| MORE3
+    MORE3 -->|Yes| SLICE3
+    MORE3 -->|No: integrated Proof and Documentation| PG[Fresh Validator then separate Park Ranger]
+    PG --> P4[Phase 4 Final Audit S11-S12]
+    P4 --> S11[S11 Skill and State Alignment Audit]
+    S11 --> S12[S12 Integrated Acceptance]
+    S12 --> S[Fresh Surveyor Final Acceptance]
+    S -->|Pass| CMP[COMPLETE]
+    O -->|Owner Decision| MORE
 ```
 
 </details>
 
-The local Node server owns everything that matters, not the browser: durable
-workflow state, command validation, approval checks, adapter invocation, and
-evidence projection. The browser never receives provider credentials, and a
-recommendation never authorizes execution.
+## Package layout
 
-## Install and start
-
-Bearing requires Node.js 22 or newer. To run from a source checkout:
-
-```sh
-corepack enable
-pnpm install --frozen-lockfile
-pnpm build
-node dist/cli.js start
-```
-
-Install the published package globally:
-
-```sh
-npm install --global @alphazede/bearing
-bearing start
-```
-
-Or run it without installing:
-
-```sh
-npx --yes @alphazede/bearing start
-```
-
-`start` binds an ephemeral port on `127.0.0.1`, prints the local URL, and opens
-the default browser. Use `--no-open` to print the URL without opening one, and
-`--detach` to keep an agent-launched session alive after the launching turn
-ends. Otherwise keep the terminal open while `start` runs.
-
-The URL contains a one-time capability in its fragment; do not share it.
-
-## Codex plugin
-
-Add the Bearing marketplace and install its plugin:
-
-```sh
-codex plugin marketplace add alphazede/bearing
-codex plugin add bearing@bearing
-```
-
-Start a new Codex session, then invoke `$bearing` or ask Codex to use the
-Bearing skill. When the request does not name a mode, Codex asks whether to run
-the guided workflow in the current conversation, open the browser UI, or use
-the headless CLI. An explicit browser request starts the installed Bearing CLI
-in persistent mode, reports its loopback URL, and best-effort opens the browser
-automatically. Guided and headless modes follow the receipt-driven journey in
-the [headless CLI guide](guide/cli.md). Bearing does not launch on SessionStart,
-install software, or change Codex native collaboration behavior.
-
-If the active Codex sandbox blocks the loopback listener, Codex asks for owner
-approval to rerun only the Bearing CLI launch with host escalation. That launch
-exception does not weaken the sandbox, tools, authority, or isolation of agents
-Bearing starts for repository work.
-
-## Claude Code plugin
-
-In Claude Code, add this repository as a marketplace and install Bearing:
-
-```text
-/plugin marketplace add alphazede/bearing
-/plugin install bearing@bearing
-```
-
-Invoke `/bearing` or ask Claude to use Bearing. The shared skill offers the same
-guided, browser, and headless choices described above.
-
-## What a run looks like
-
-Point Bearing at one writable local directory, choose a provider route, pass the
-readiness check, and enter your work request. It then works through repository
-fit, Set Bearings, Gather Supplies, Map the Route, an optional Recon, and a
-route review you approve before anything is implemented. Only then do you pick
-Explorer or Expedition.
-
-Nothing is written before you confirm it, planning approval is recorded as
-durable owner evidence, and a run that stops reports what stopped, why, and the
-decision it needs. The full stage-by-stage account is in
-[the browser journey](guide/browser-journey.md).
-
-## Documentation
-
-| Guide | What it covers |
+| Path | Purpose |
 |---|---|
-| [The browser journey](guide/browser-journey.md) | First launch, the seven stages, plan validation, and the planning state machine |
-| [Focus mode and workflow skills](guide/focus-mode.md) | Containment, receipts, runtime identity, and the packaged skills |
-| [Verification layers](guide/verification.md) | Validator, Grader, Park Ranger, Surveyor, cadence, and gate sets |
-| [Execution modes and reasoning](guide/execution-modes.md) | The mode-recommendation contract and the reasoning tier ladder |
-| [Headless CLI](guide/cli.md) | The browser-free journey, receipt grammar, and every start flag |
-| [State, recovery, export, deletion](guide/state-and-recovery.md) | Where durable state lives, how a journey resumes, backup and retirement |
-| [Improvement loop](guide/improvement-loop.md) | What Bearing notices about its own runs, and why it never acts on it |
-| [Examples and fixtures](guide/examples.md) | Deterministic, provider-disabled demonstrations |
-| [Repository layout and platform](guide/repository-layout.md) | Source tree, host requirements, and stated limitations |
+| `plugin.json` | Agent Plugins v1.0.0 manifest |
+| `skills/` | Router, planning stages, and role skills |
+| `hooks/` | Optional client-specific sequencing adapters |
+| `README.md` and governance docs | Public product and conduct surfaces |
 
-## Requirements and boundaries
+There is no `mcp.json`, `bin` entrypoint, postinstall, or runtime dependency on
+another product's state.
 
-Node.js 22 or newer and a writable local filesystem. The server is single-user
-and loopback-only. Bearing sends no telemetry and provides no hosted account,
-remote service, production deployment, or multi-user authorization boundary. The
-agent CLI and provider account you point it at remain yours to supply. Full
-detail, including the native platform testing still outstanding, is in
-[repository layout and platform](guide/repository-layout.md).
+## Provider neutrality
+
+Skills declare **capabilities** (reasoning depth, repository access, mutation
+tools, independence, optional vision). They never pin a model, provider API key,
+default route, or launcher. Owners and clients choose how to satisfy each role.
+
+## Migration note
+
+Bearing Lite does not import historical deep-harness run directories or hidden
+runtime state. Resume from the approved project plan and a verified
+human-readable handoff using native agent tools. See
+[guide/migration.md](guide/migration.md) for existing-run migration and
+owner distribution checkpoints.
 
 ## Contributing
 
-Issues are the most useful contribution right now. [CONTRIBUTING.md](CONTRIBUTING.md)
-explains how this repository relates to the one Bearing is developed in, and why
-that changes what happens to a pull request. Everyone taking part is covered by
-the [Code of Conduct](CODE_OF_CONDUCT.md).
+Issues and carefully scoped pull requests help. See
+[CONTRIBUTING.md](CONTRIBUTING.md). Everyone is covered by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Security
 
-Bearing fail-closed revalidates workspace root path identity and containment
-around filesystem operations to detect symlink swaps, while documenting the
-residual TOCTOU race unavoidable without native directory-fd path syscalls in
-Node.js.
-
-Report suspected vulnerabilities through GitHub's [private vulnerability
-reporting form](https://github.com/alphazede/bearing/security/advisories/new),
-not a public issue. See [SECURITY.md](SECURITY.md) for supported versions,
-report contents, response targets, disclosure, and safe-harbor terms. Use
-[public issues](https://github.com/alphazede/bearing/issues) for ordinary bugs.
+Report suspected vulnerabilities privately—not in a public issue. See
+[SECURITY.md](SECURITY.md).
 
 ## License
 

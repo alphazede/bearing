@@ -1,26 +1,27 @@
 name: Feature request
-description: Propose a change to what Bearing does.
+description: Propose a focused Bearing Lite capability.
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        State the problem before the solution. Bearing is deliberately bounded: local, single user, no telemetry, no hosted service, and no agent that certifies its own work.
+        State the user problem first. Bearing Lite is deliberately skills-first and has no CLI, MCP server, browser control room, or hidden runtime state.
   - type: textarea
     id: problem
     attributes:
-      label: The problem
-      description: What are you trying to do, and where does Bearing get in the way?
+      label: Problem
+      description: What are you trying to accomplish, and where does the current plugin fall short?
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
-      label: What you would like it to do
+      label: Proposed outcome
+      description: Describe the smallest observable outcome that would solve the problem.
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
-      label: What you tried instead
-      description: Workarounds you already use, and why they are not enough.
+      label: Alternatives considered
+
