@@ -1,0 +1,4 @@
+interface:
+  display_name: "Trail Boss"
+  short_description: "Coordinate approved Expedition Explorer lanes"
+  default_prompt: "Use $trail-boss to coordinate the approved Expedition wave graph."

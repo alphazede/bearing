@@ -1,0 +1,29 @@
+stateDiagram-v2
+    [*] --> PROPOSED
+    PROPOSED --> READY
+    PROPOSED --> WAITING_ON
+    WAITING_ON --> READY: prerequisite satisfied
+    WAITING_ON --> EVIDENCE_READY: fresh assurance available
+    WAITING_ON --> CANCELLED
+    READY --> IN_PROGRESS
+    READY --> OWNER_DECISION_REQUIRED
+    IN_PROGRESS --> EVIDENCE_READY
+    IN_PROGRESS --> CORRECTION_REQUIRED
+    IN_PROGRESS --> OWNER_DECISION_REQUIRED
+    CORRECTION_REQUIRED --> READY
+    CORRECTION_REQUIRED --> OWNER_DECISION_REQUIRED: third failed correction
+    EVIDENCE_READY --> VALIDATING: Validator required
+    EVIDENCE_READY --> REVIEWING: Park Ranger required
+    EVIDENCE_READY --> ACCEPTANCE: Surveyor, owner, or coordinator when required_assurance is none
+    EVIDENCE_READY --> WAITING_ON: assurance dispatch unavailable
+    VALIDATING --> CORRECTION_REQUIRED
+    VALIDATING --> EVIDENCE_READY: pass, select next assurance
+    REVIEWING --> CORRECTION_REQUIRED
+    REVIEWING --> EVIDENCE_READY: accepted, select next assurance
+    REVIEWING --> OWNER_DECISION_REQUIRED
+    ACCEPTANCE --> CORRECTION_REQUIRED
+    ACCEPTANCE --> COMPLETE
+    OWNER_DECISION_REQUIRED --> READY
+    OWNER_DECISION_REQUIRED --> CANCELLED
+    COMPLETE --> [*]
+    CANCELLED --> [*]

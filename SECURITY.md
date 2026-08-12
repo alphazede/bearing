@@ -2,10 +2,11 @@
 
 ## Supported versions
 
-Bearing is currently a pre-1.0 project. Security fixes are provided for the
-current `main` branch and the latest published `0.1.x` release, when one is
-available. Older commits, development snapshots, and superseded releases are
-not supported unless a published advisory says otherwise.
+Bearing Lite is currently a pre-1.0 project. Security fixes are provided for the
+current `main` branch and the latest published `0.1.x` release of
+`@alphazede/bearing-lite`, when one is available. Older commits, development
+snapshots, and superseded releases are not supported unless a published advisory
+says otherwise.
 
 | Version | Supported |
 |---|---|
@@ -16,46 +17,46 @@ not supported unless a published advisory says otherwise.
 ## Report a vulnerability privately
 
 Use GitHub's [private vulnerability reporting
-form](https://github.com/alphazede/bearing/security/advisories/new). Private
-vulnerability reporting is enabled for this repository.
+form](https://github.com/alphazede/bearing-lite/security/advisories/new). Private
+vulnerability reporting is enabled for this repository when the host supports it.
 
 Do not open a public issue, discussion, pull request, or social-media post for
 a suspected vulnerability. Use [public
-issues](https://github.com/alphazede/bearing/issues) only for ordinary,
+issues](https://github.com/alphazede/bearing-lite/issues) only for ordinary,
 non-security bugs.
 
 Include enough information to reproduce and assess the problem:
 
-- The affected Bearing version or commit.
-- Operating system, Node.js version, installation method, and selected harness.
+- The affected Bearing Lite version or commit.
+- Operating system, installation method, and agent client.
 - A minimal reproduction, proof of concept, and observed impact.
-- Whether owner approval, repository containment, or local authentication was
-  bypassed.
+- Whether owner authority, repository boundaries, skill routing, or hook
+  integrity behavior was bypassed or misreported.
 - Suggested mitigations, if known.
 
-Use synthetic data whenever possible. Do not send credentials, one-time
-capability URLs, customer data, private repository contents, raw agent-session
-history, or unredacted evidence. If a secret may have been exposed, revoke or
-rotate it before reporting and include only a redacted identifier.
+Use synthetic data whenever possible. Do not send credentials, customer data,
+private repository contents, raw agent-session history, or unredacted evidence.
+If a secret may have been exposed, revoke or rotate it before reporting and
+include only a redacted identifier.
 
 ## Security boundaries
 
 Reports are especially useful when they involve:
 
-- Session authentication, capability leakage, or approval bypass.
-- Repository-containment failures, path traversal, symlink attacks, filesystem
-  races, or unsafe deletion.
-- Command or argument injection and unintended agent or harness authority.
-- Stored or reflected script injection and incorrect output escaping.
-- Sensitive data leaking through logs, artifacts, reports, browser state,
-  plugin contents, or npm packages.
+- Skill or hook behavior that expands authority, skips required assurance, or
+  claims executable enforcement the client cannot provide.
+- Path traversal, unsafe file mutation guidance, or repository-boundary mistakes
+  in packaged skills or hooks.
+- Sensitive data leaking through logs, packaged files, diagnostics, or npm
+  package contents.
 - Release, dependency, build, or package-publishing integrity.
-- Resume or recovery behavior that executes work without the recorded owner
-  decision.
+- Model, provider, or credential handling introduced into public product
+  surfaces (Bearing Lite must remain provider-neutral and must not ship
+  credentials or secret lookup paths).
 
-A weakness in a third-party harness, model provider, runtime, or dependency
-should normally be reported to that project. Report it to Bearing as well when
-Bearing exposes, amplifies, or incorrectly handles the weakness.
+A weakness in a third-party agent client, model provider, runtime, or dependency
+should normally be reported to that project. Report it to Bearing Lite as well
+when this package exposes, amplifies, or incorrectly handles the weakness.
 
 ## Response and disclosure
 
@@ -85,4 +86,4 @@ of this policy when the researcher promptly stops, reports the issue, avoids
 harm, and gives reasonable time for remediation. This policy cannot authorize
 testing of third-party systems or excuse violations of applicable law.
 
-Bearing does not currently offer a bug bounty or promise compensation.
+Bearing Lite does not currently offer a bug bounty or promise compensation.

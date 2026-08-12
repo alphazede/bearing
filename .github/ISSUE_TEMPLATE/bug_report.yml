@@ -1,58 +1,46 @@
 name: Bug report
-description: Something in Bearing behaved incorrectly.
+description: Something in Bearing Lite behaved incorrectly.
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Do not report a security problem here. Use the [private vulnerability reporting form](https://github.com/alphazede/bearing/security/advisories/new) instead.
+        Do not report security problems here. Use the [private vulnerability form](https://github.com/alphazede/bearing-lite/security/advisories/new). Sanitize credentials, private paths, raw sessions, and proprietary data.
   - type: textarea
     id: what-happened
     attributes:
       label: What happened
-      description: What you did, and what Bearing did instead of what you expected.
+      description: Describe the task, expected behavior, and observed Bearing Lite behavior.
     validations:
       required: true
-  - type: textarea
-    id: receipt
-    attributes:
-      label: Receipt or error code
-      description: Paste the receipt, error code, or console output. This usually tells us more than a description does.
-      render: text
   - type: input
     id: version
     attributes:
-      label: Bearing version
-      placeholder: "0.1.7"
+      label: Bearing Lite version
+      placeholder: "0.1.0"
     validations:
       required: true
   - type: dropdown
     id: install
     attributes:
-      label: How you installed it
+      label: Installation source
       options:
-        - npm install --global
-        - npx
-        - Codex plugin
-        - Claude Code plugin
+        - npm package
+        - GitHub repository
+        - Agent Plugin marketplace
         - Source checkout
     validations:
       required: true
-  - type: input
-    id: environment
-    attributes:
-      label: Operating system and Node version
-      placeholder: "Ubuntu 24.04, Node 22.19"
-    validations:
-      required: true
-  - type: input
-    id: harness
-    attributes:
-      label: Selected harness
-      description: The provider route you chose, if the problem happened during a run.
-      placeholder: "Codex, Claude, Grok, Agy, Pi"
   - type: textarea
     id: reproduction
     attributes:
-      label: Steps to reproduce
-      description: Use synthetic data. Never paste credentials, capability URLs, or private repository contents.
+      label: Reproduction
+      description: Use synthetic data and list the smallest reproducible steps.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Include typed outcomes or logs only after removing secrets and private data.
+

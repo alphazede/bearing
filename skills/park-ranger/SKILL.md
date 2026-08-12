@@ -1,53 +1,38 @@
 ---
 name: park-ranger
-description: Adjudicates readiness claims, applies reproduction and reachability requirements, runs test-strength lens, clamps priorities by trust boundary, and synthesizes a stable ranked finding list.
-user-invocable: false
-disable-model-invocation: true
+description: >
+  Review introduced defects on one exact candidate when required_assurance
+  includes Park Ranger, the owner opts in, or a material integrated phase gate
+  requires defect review. Use for park ranger, defect review, or introduced-bug
+  adjudication. Do not use for implementation, automatic per-slice gates,
+  sufficiency scoring, or user-facing acceptance.
 ---
 
 # Park Ranger
 
-## Mission and non-goals
+## Trigger
 
-Detect concrete introduced defects with reproduction. Reject unreproduced suspicions from becoming findings. Apply test-strength, reachability, and priority clamp. Synthesize across lenses with total order. Never self-certify.
+- **Match:** `required_assurance` lists Park Ranger; owner opts in; or integrated phase gate requires defect review on a stable candidate.
+- **Non-match:** `required_assurance: none` without owner opt-in/phase gate; Validator sufficiency-only; Surveyor acceptance; implementation packets.
 
-Park Ranger only adjudicates/deduplicates; it fills no reviewer slots.
+## Inputs
 
-## Authority and prohibited actions
+Plan path, exact `candidate_ref`, diff or evidence, prior Validator result when present, expected handoff.
 
-Receives lens reports as data. Runs no processes itself.
+## Responsibility
 
-## Inputs and outputs schema
+Find introduced defects with reproduction and reachability. Rank findings. Never implement fixes or repeat an unchanged review as new proof.
 
-parseParkRangerReport rejects unreproduced findings (empty inputs or observedFailure), empty reachability, and findings without a non-empty bounded `sliceIds` scope. Every slice ID must belong to the approved execution contract. Missing or empty finding scope returns `finding_slice_scope_invalid`. Unreproduced go to questions only. synthesizeFindings dedupes and orders stably; single-lens P0 is demoted.
+## Return
 
-## State read and written
+Handoff fields: `plan_ref`, `role`, `subject`, `depends_on`, `scope`, `authority`, `outcome`, `evidence`, `blocker`, `next_action`, `receiving_role`.
 
-Read lens reports and claims. Write no state.
+Outcomes: `BLOCK`, `REPAIR_REQUIRED`, `ACCEPT_WITH_FINDINGS`, `ACCEPT`. Receiver: parent coordinator, Surveyor when next required, or correction owner.
 
-## Closed-loop workflow
+## Independence
 
-1. Parse reports, routing unreproduced.
-2. Adjudicate every inbound claim.
-3. Apply clampPriority by boundary.
-4. Synthesize with dedupe and two-lens floor for blockers.
+Fresh non-author only. Never automatic per slice. Candidate authors never supply this verdict.
 
-## Entry and exit criteria
+## Correction
 
-Enter after validator or at cadence. Exit with findings, questions, and verdict. A blocker confirmed by one lens is demoted.
-
-## Evidence requirements
-
-Every finding carries reproduction, reachability path, priority justification, confirming lenses, and one or more approved execution slice IDs.
-
-## Failure taxonomy
-
-Separate finding-unreproduced, claim-unadjudicated, unsupported-claim, and demoted-single-lens-P0.
-
-## Escalation and amendment rules
-
-P0 requires >=2 lenses. Test-strength lens is proven on live stale fingerprint.
-
-## Metrics and trace events
-
-Report finding counts by priority, questions, and final verdict. Bearing records the gate result.
+Returns repair targets only. Does not edit the candidate or re-review without new evidence.

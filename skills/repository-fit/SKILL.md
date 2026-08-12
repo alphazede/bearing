@@ -1,52 +1,33 @@
 ---
 name: repository-fit
-description: Inspect bounded repository evidence and propose one repository and plan-directory assumption for owner confirmation. Use only when Bearing enters Repository Fit before Set Bearings; do not use after fit is confirmed.
-user-invocable: false
-disable-model-invocation: true
+description: >
+  Propose one target repository and plan-directory assumption when the target
+  is absent or ambiguous. Use for repository fit, choose repo, or confirm
+  workspace before Set Bearings. Do not use after fit is confirmed, for product
+  edits, routing roles, or owner-only publication decisions.
 ---
 
 # Repository Fit
 
-## Mission and non-goals
+Procedural stage. Not a persona.
 
-Run one bounded read-only inventory in the selected repository, then propose exactly one evidence-backed repository and `docs/plans/` assumption. Ask one concise owner confirmation question; never confirm it or continue into Set Bearings.
+## Match / non-match
 
-## Authority and prohibited actions
+- **Match:** selected repository is missing, multi-root, or identity is ambiguous.
+- **Non-match:** owner already confirmed fit; Set Bearings or later stages are ready.
 
-Stay inside the selected repository. Inspect one additional workspace root only when explicitly authorized. Do not walk parents, inspect other roots, write files or state, or treat a recommendation as approval.
+## Inputs
 
-## Inputs and outputs schema
+Work goal, candidate roots, and any prior fit evidence.
 
-Read the work goal and selected repository working directory. Return `assumption` plus `question`, or `fit_unavailable`, `fit_malformed`, or `fit_undecidable`. Include `repository`, `planDirectory`, `rationale`, and evidence entries containing `kind`, `path`, and `detail`.
+## Procedure
 
-## State read and written
+1. Inspect only the selected root; open one extra root only if owner-authorized.
+2. Cap discovery (depth 4, 200 paths). Prefer manifests, top-level docs, plan conventions.
+3. Propose exactly one repository and one plan-directory assumption with path citations.
+4. Ask one concise owner confirmation question. Do not treat a recommendation as approval.
+5. Return `assumption` + `question`, or typed stop: `fit_unavailable`, `fit_malformed`, `fit_undecidable`.
 
-Inspect path names and only the minimum manifest, workspace configuration, top-level documentation, and plan-convention content needed. Cap discovery at depth 4 and 200 paths. Write nothing.
+## Never
 
-## Closed-loop workflow
-
-1. Compare the work goal with the bounded evidence.
-2. Keep the selected repository as the proposed repository.
-3. Propose one plan path from observed conventions and the work goal.
-4. Cite every inspected path supporting the assumption.
-5. Return the assumption and one question, or stop as undecidable.
-
-## Entry and exit criteria
-
-Enter before Set Bearings. Exit with one well-formed fit receipt or typed failure without advancing the journey.
-
-## Evidence requirements
-
-Cite at least one inspected path and tie the rationale to it. Do not invent paths, repository identity, evidence, or owner approval.
-
-## Failure taxonomy
-
-Use `fit_unavailable` when inspection cannot run, `fit_malformed` for an invalid receipt, and `fit_undecidable` when evidence cannot support one assumption.
-
-## Escalation and amendment rules
-
-Return `fit_undecidable` when one assumption is not defensible. Ask the owner to resolve scope or identity; do not rank alternatives, widen inspection, or select a fallback.
-
-## Metrics and trace events
-
-Report evidence count, inspected roots, proposed values, and typed outcome. Bearing records journey activity separately.
+Write files, walk parents without authority, rank alternatives after undecidable, or advance into Set Bearings.
