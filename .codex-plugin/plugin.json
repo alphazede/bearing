@@ -1,0 +1,29 @@
+{
+  "name": "bearing-lite",
+  "version": "0.1.0",
+  "description": "Skills-first portable planning, routing, bounded execution, and independent assurance for repository work.",
+  "author": {
+    "name": "William Rumph / AlphaZede",
+    "url": "https://github.com/alphazede"
+  },
+  "homepage": "https://github.com/alphazede/bearing-lite",
+  "repository": "https://github.com/alphazede/bearing-lite",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Bearing Lite",
+    "shortDescription": "Skills-first repository workflow.",
+    "longDescription": "Plan, route, execute, and independently review bounded repository work with portable skills.",
+    "developerName": "William Rumph / AlphaZede",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Planning",
+      "Agent roles",
+      "Independent assurance"
+    ],
+    "defaultPrompt": [
+      "Use Bearing Lite to choose the smallest valid route for this repository task."
+    ],
+    "brandColor": "#2563EB"
+  }
+}
