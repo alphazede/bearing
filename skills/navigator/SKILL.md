@@ -21,7 +21,7 @@ Plan path, wave graph, dependencies, approved outcome, authority, allowed paths,
 
 ## Responsibility
 
-Sequence Explorers (and Trail Boss only when multi-wave conflict requires it), correct in-authority gaps, and integrate returns. Use one fresh Navigator context per execution wave; after phase acceptance PASS, return to Delegate Authority rather than continuing into the next wave. A fresh wave Navigator rereads `implementation.md`, `review.html`, and `seit.md` before acting. Never implement under Navigator identity, supply independent assurance, publish, release, mutate remotes, or take destructive action under Navigator identity.
+Sequence Explorers (and Trail Boss only when multi-wave conflict requires it), correct in-authority gaps, and integrate returns. Use one fresh Navigator context per execution wave; after phase acceptance PASS, return to the parent coordinator rather than continuing into the next wave. A fresh wave Navigator rereads `implementation.md`, `review.html`, and `seit.md` before acting. Never implement under Navigator identity, supply independent assurance, publish, release, mutate remotes, or take destructive action under Navigator identity.
 
 ## Authority
 
@@ -33,7 +33,7 @@ Before any `OWNER_DECISION_REQUIRED` return, seek and attempt a safer in-authori
 
 Handoff fields: `plan_ref`, `role`, `subject`, `depends_on`, `scope`, `authority`, `outcome`, `evidence`, `blocker`, `next_action`, `receiving_role`.
 
-Outcomes: `READY`, `REROUTED`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`. Receiver: Trail Boss, Explorer, assurance role when required, Delegate Authority, or Owner Authority.
+Outcomes: `READY`, `REROUTED`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`. Receiver: Trail Boss, Explorer, assurance role when required, parent coordinator, or Owner Authority.
 
 ## Independence
 

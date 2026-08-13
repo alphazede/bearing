@@ -1,19 +1,18 @@
 /**
  * CMD-ROUTING-01 / SEIT-ROUTING-01
- * Direct, Explorer-owned wave, Expedition, delegated routes; dormancy negatives.
+ * Direct, Explorer-owned wave, and Expedition routes; dormancy negatives.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-/** @typedef {'crewmate'|'explorer'|'navigator'|'trail-boss'|'sub-explorer'|'delegate-authority'|'validator'|'park-ranger'|'surveyor'} Role */
+/** @typedef {'crewmate'|'explorer'|'navigator'|'trail-boss'|'sub-explorer'|'validator'|'park-ranger'|'surveyor'} Role */
 
 /**
  * @typedef {{
- *   kind: 'direct' | 'explorer_wave' | 'expedition' | 'delegated',
+ *   kind: 'direct' | 'explorer_wave' | 'expedition',
  *   packetCount?: number,
  *   multiWaveConflict?: boolean,
  *   nestedLanes?: number,
- *   ownerDelegatedMultiPhase?: boolean,
  *   requiredAssurance?: string[],
  *   explorerImplements?: boolean,
  *   forceControllersOnSinglePacket?: boolean,
@@ -39,7 +38,6 @@ const ALL_ROLES = /** @type {const} */ ([
   "navigator",
   "trail-boss",
   "sub-explorer",
-  "delegate-authority",
   "validator",
   "park-ranger",
   "surveyor",
@@ -63,7 +61,7 @@ export function selectRoute(input) {
     return {
       ok: false,
       code: "single_packet_forces_controllers",
-      message: "Single packet must not force Navigator/Trail Boss/Delegate controllers",
+      message: "Single packet must not force coordination roles",
     };
   }
   if (input.kind === "expedition" && input.omitWaveCoordination === true) {
@@ -85,15 +83,6 @@ export function selectRoute(input) {
     active.push("navigator", "explorer", "crewmate");
     if (input.multiWaveConflict) active.push("trail-boss");
     if ((input.nestedLanes ?? 0) >= 2) active.push("sub-explorer");
-  } else if (input.kind === "delegated") {
-    if (!input.ownerDelegatedMultiPhase) {
-      return {
-        ok: false,
-        code: "delegation_without_owner",
-        message: "Delegate Authority requires explicit owner multi-phase delegation",
-      };
-    }
-    active.push("delegate-authority", "navigator", "explorer", "crewmate");
   } else {
     return {
       ok: false,
@@ -115,7 +104,7 @@ export function selectRoute(input) {
   const activeSet = new Set(active);
   const dormant = ALL_ROLES.filter((r) => !activeSet.has(r));
   const coordinators = active.filter((r) =>
-    ["explorer", "navigator", "trail-boss", "sub-explorer", "delegate-authority"].includes(r)
+    ["explorer", "navigator", "trail-boss", "sub-explorer"].includes(r)
   );
   const workers = active.filter((r) => r === "crewmate");
 
@@ -144,7 +133,6 @@ describe("CMD-ROUTING-01 role-routing (SEIT-ROUTING-01)", () => {
       assert.deepEqual(verdict.coordinators, []);
       assert.ok(verdict.dormant.includes("explorer"));
       assert.ok(verdict.dormant.includes("navigator"));
-      assert.ok(verdict.dormant.includes("delegate-authority"));
     }
   });
 
@@ -160,7 +148,6 @@ describe("CMD-ROUTING-01 role-routing (SEIT-ROUTING-01)", () => {
       assert.ok(verdict.active.includes("crewmate"));
       assert.ok(!verdict.active.includes("navigator"));
       assert.ok(verdict.dormant.includes("trail-boss"));
-      assert.ok(verdict.dormant.includes("delegate-authority"));
     }
   });
 
@@ -185,17 +172,10 @@ describe("CMD-ROUTING-01 role-routing (SEIT-ROUTING-01)", () => {
     }
   });
 
-  it("Delegated: Delegate Authority when owner multi-phase delegation is explicit", () => {
-    const verdict = selectRoute({
-      kind: "delegated",
-      ownerDelegatedMultiPhase: true,
-    });
-    assert.equal(verdict.ok, true);
-    if (verdict.ok) {
-      assert.ok(verdict.active.includes("delegate-authority"));
-      assert.ok(verdict.active.includes("navigator"));
-      assert.ok(verdict.active.includes("crewmate"));
-    }
+  it("negative: removed delegated route is rejected", () => {
+    const verdict = selectRoute({ kind: "delegated" });
+    assert.equal(verdict.ok, false);
+    if (!verdict.ok) assert.equal(verdict.code, "unknown_route_kind");
   });
 
   it("dormant roles create no work entries in the route fixture", () => {

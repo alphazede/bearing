@@ -1,7 +1,7 @@
 /**
  * CMD-PUBLIC-01 / SEIT-PUBLIC-01, SEIT-MODEL-01, SEIT-INDEPENDENCE-01
  * Scan packaged Lite public surfaces for private spill, model pins, deep coupling.
- * Includes S9 public docs and the packed S10 migration page (guide/migration.md).
+ * Includes the S9 public documents.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -15,14 +15,12 @@ const PACKAGE = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8")
 
 /**
  * Packed Lite public documents that must be scanned.
- * guide/migration.md is the only guide page allowed in the npm files allowlist.
  */
 const PACKED_PUBLIC_DOCS = [
   "README.md",
   "CODE_OF_CONDUCT.md",
   "CONTRIBUTING.md",
   "SECURITY.md",
-  "guide/migration.md",
 ];
 const SCAN_ROOTS = [
   "plugin.json",
@@ -32,13 +30,6 @@ const SCAN_ROOTS = [
   ...PACKED_PUBLIC_DOCS,
 ];
 
-/**
- * Path-scoped exception for PROC-DISTRIBUTION-01 deprecation guidance.
- * guide/migration.md must name the old package `@alphazede/bearing` so owners
- * can deprecate it. Only that package-name deep-coupling pattern is ignored,
- * and only on that exact path. Other files and other coupling patterns still fail.
- */
-const MIGRATION_GUIDE_PATH = "guide/migration.md";
 const OLD_PACKAGE_NAME_COUPLING = {
   code: "deep_product_coupling",
   re: /@alphazede\/bearing(?!-lite)/,
@@ -80,20 +71,6 @@ const DEEP_COUPLING_PATTERNS = [
  */
 
 /**
- * True when a diagnostic is the documented migration-guide old-package exception.
- * @param {string} relPath
- * @param {string} code
- * @param {RegExp} re
- */
-function isMigrationOldPackageException(relPath, code, re) {
-  return (
-    relPath === MIGRATION_GUIDE_PATH &&
-    code === OLD_PACKAGE_NAME_COUPLING.code &&
-    re === OLD_PACKAGE_NAME_COUPLING.re
-  );
-}
-
-/**
  * @param {string} relPath
  * @param {string} content
  * @returns {PublicDiagnostic[]}
@@ -109,7 +86,6 @@ export function scanContent(relPath, content) {
   ];
   for (const { code, re } of groups) {
     if (!re.test(content)) continue;
-    if (isMigrationOldPackageException(relPath, code, re)) continue;
     diagnostics.push({
       code,
       message: `${relPath} matches prohibited pattern ${re}`,
@@ -199,11 +175,8 @@ describe("CMD-PUBLIC-01 public-boundary (SEIT-PUBLIC-01, SEIT-MODEL-01, SEIT-IND
     assert.ok(PACKAGE.files.includes("plugin.json"));
     assert.ok(PACKAGE.files.includes("skills/"));
     assert.ok(PACKAGE.files.includes("hooks/"));
-    assert.ok(
-      PACKAGE.files.includes("guide/migration.md"),
-      "files allowlist must require guide/migration.md"
-    );
     assert.ok(!PACKAGE.files.includes("guide/"), "must not pack entire guide/ directory");
+    assert.ok(!PACKAGE.files.includes("guide/migration.md"));
     assert.ok(!PACKAGE.files.includes("src/"));
     assert.ok(!PACKAGE.files.includes("dist/"));
     assert.ok(!PACKAGE.files.includes("mcp.json"));
@@ -222,10 +195,6 @@ describe("CMD-PUBLIC-01 public-boundary (SEIT-PUBLIC-01, SEIT-MODEL-01, SEIT-IND
     for (const doc of PACKED_PUBLIC_DOCS) {
       assert.ok(verdict.scanned.includes(doc), `expected scanned path ${doc}`);
     }
-    assert.ok(
-      verdict.scanned.includes(MIGRATION_GUIDE_PATH),
-      "guide/migration.md must be a packed scanned public surface"
-    );
   });
 
   it("plugin.json and hooks do not pin models or credentials", () => {
@@ -239,7 +208,7 @@ describe("CMD-PUBLIC-01 public-boundary (SEIT-PUBLIC-01, SEIT-MODEL-01, SEIT-IND
     }
   });
 
-  it("S9/S10 packed public documents are in scan roots and clean", () => {
+  it("S9 packed public documents are in scan roots and clean", () => {
     for (const doc of PACKED_PUBLIC_DOCS) {
       assert.ok(SCAN_ROOTS.includes(doc), `SCAN_ROOTS must include ${doc}`);
       assert.ok(existsSync(path.join(ROOT, doc)), doc);
@@ -248,27 +217,12 @@ describe("CMD-PUBLIC-01 public-boundary (SEIT-PUBLIC-01, SEIT-MODEL-01, SEIT-IND
     }
   });
 
-  it("migration guide old-package name exception is path- and pattern-scoped only", () => {
-    // Required deprecation wording is allowed only on guide/migration.md.
-    const migrationHits = scanContent(
-      MIGRATION_GUIDE_PATH,
-      "Deprecate `@alphazede/bearing` with a migration message.\n"
-    );
-    assert.equal(migrationHits.length, 0, JSON.stringify(migrationHits));
-
-    // Same old-package name on any other packed path still fails.
-    const otherHits = scanContent(
+  it("old deep package references fail on every packed path", () => {
+    const hits = scanContent(
       "README.md",
       "Deprecate `@alphazede/bearing` with a migration message.\n"
     );
-    assert.ok(otherHits.some((d) => d.code === "deep_product_coupling"));
-
-    // Other deep-coupling patterns on the migration guide still fail.
-    const harnessHits = scanContent(
-      MIGRATION_GUIDE_PATH,
-      "call bearing_focus_begin() after install\n"
-    );
-    assert.ok(harnessHits.some((d) => d.code === "deep_product_coupling"));
+    assert.ok(hits.some((d) => d.code === "deep_product_coupling"));
   });
 
   it("negative: injected private path fails validation", () => {

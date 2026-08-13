@@ -1,6 +1,6 @@
 {
   "name": "@alphazede/bearing-lite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Skills-first Agent Plugin for planning, routing, bounded execution, and independent review of repository work—without CLI, MCP, server, or hidden runtime state.",
   "keywords": [
     "agent-plugins",
@@ -31,7 +31,6 @@
     "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
-    "LICENSE-APACHE",
-    "guide/migration.md"
+    "LICENSE-APACHE"
   ]
 }

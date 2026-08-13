@@ -5,15 +5,13 @@
 
 **Bearing Lite** (`@alphazede/bearing-lite`) is a skills-first Agent Plugin for
 planning, routing, bounded execution, and independent review of repository work.
-It ships portable skills, references, templates, and optional client hooks. It
-does **not** ship a CLI, MCP server, browser control room, local scheduler, or
-hidden runtime database.
+It ships portable skills, references, templates, and optional client hooks.
 
 An agent cannot certify its own work. The router selects the smallest valid
 route; independent assurance roles run only when declared, owner-selected, or
 required by a mandatory integrated phase gate. Owner Authority remains human-only.
 
-Bearing Lite was created by William Rumph at AlphaZede.
+Bearing Lite was created by William Rumph.
 
 ## Install
 
@@ -53,7 +51,6 @@ owner or client maps available agents to role capability needs.
 | **Direct** | One bounded implementer packet | Lowest coordination |
 | **Explorer (wave)** | One wave, one or more Crewmates | One lane controller |
 | **Expedition** | Multi-phase or concurrent independent lanes | Navigator; Trail Boss only for concurrent/conflicting waves |
-| **Long multi-phase** | Owner-approved intent across sessions | Optional Delegate Authority |
 
 **Explorer** keeps one controller over a compact or sequential set of slices.
 **Expedition** adds navigation (and sometimes a Trail Boss) so independent lanes
@@ -62,7 +59,7 @@ use substantial tokens; the product does not impose a default budget ceiling.
 
 ### Role routing (explanatory)
 
-![Bearing Lite role routing: Owner Authority and the router select missing planning stages, then the smallest route among Direct Crewmate, Explorer wave, Expedition Navigator, or long multi-phase Delegate Authority; optional Trail Boss, Sub-explorer, and assurance roles appear only when required](skills/bearing-lite/assets/role-routing.png)
+![Bearing Lite role routing: Owner Authority and the router select missing planning stages, then the smallest route among Direct Crewmate, Explorer wave, or Expedition Navigator; optional Trail Boss, Sub-explorer, and assurance roles appear only when required](skills/bearing-lite/assets/role-routing.png)
 
 Reviewable Mermaid source: [`skills/bearing-lite/references/role-routing.mmd`](skills/bearing-lite/references/role-routing.mmd)
 (plan-local twin under `docs/plans/2026-08-09-bearing-skills-first-architecture/assets/`).
@@ -71,8 +68,7 @@ Reviewable Mermaid source: [`skills/bearing-lite/references/role-routing.mmd`](s
 Bearing Lite Router is entry, not a work role. It invokes only missing planning
 stages, then picks the least costly route: Direct Crewmate; Explorer for one
 wave; Navigator for an expedition (Trail Boss only when waves conflict or run
-concurrently); Delegate Authority only for explicit long multi-phase owner
-delegation. Nested Sub-explorer opens only when a lane must split. After
+concurrently). Nested Sub-explorer opens only when a lane must split. After
 Crewmate work, `required_assurance: none` means author self-check plus
 coordinator confirmation; Validator, Park Ranger, and Surveyor appear only when
 listed, owner-selected at slice level, or required by a mandatory phase gate.
@@ -91,7 +87,6 @@ Diagrams explain orientation; they never authorize a transition.
 | **Validator** | Evidence sufficiency | yes | Independent of the author |
 | **Park Ranger** | Defect review | yes | Independent of the author |
 | **Surveyor** | User-facing acceptance | no | Read-only acceptance judgment |
-| **Delegate Authority** | Cross-session phase owner | yes | Only when owner explicitly delegates |
 | **Owner Authority** | Human decision | n/a | Never an agent role |
 
 **Independent review:** a candidate author never provides their own Validator,
@@ -103,7 +98,7 @@ Failure escalates to the nearest role whose scope can see it:
 |---|---|
 | Within one slice or packet | Explorer or nearest parent |
 | Across slices in a wave | Trail Boss when present, else Navigator |
-| Across phases | Navigator or Delegate Authority |
+| Across phases | Navigator |
 | Contract, security, or authority change | Owner Authority |
 
 ## Task state (explanatory)
@@ -188,14 +183,6 @@ another product's state.
 Skills declare **capabilities** (reasoning depth, repository access, mutation
 tools, independence, optional vision). They never pin a model, provider API key,
 default route, or launcher. Owners and clients choose how to satisfy each role.
-
-## Migration note
-
-Bearing Lite does not import historical deep-harness run directories or hidden
-runtime state. Resume from the approved project plan and a verified
-human-readable handoff using native agent tools. See
-[guide/migration.md](guide/migration.md) for existing-run migration and
-owner distribution checkpoints.
 
 ## Contributing
 

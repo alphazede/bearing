@@ -20,8 +20,6 @@ const APPROVED_FILES_ALLOWLIST = [
   "CONTRIBUTING.md",
   "SECURITY.md",
   "LICENSE-APACHE",
-  // Exact single-page entry: packs migration only, not legacy guide/* pages.
-  "guide/migration.md",
 ];
 
 const PROHIBITED_PACK_PATTERNS = [
@@ -179,7 +177,7 @@ describe("CMD-PACKAGE-01 package-boundary (SEIT-PACKAGE-01)", () => {
     assert.deepEqual(pkg.files, APPROVED_FILES_ALLOWLIST);
   });
 
-  it("npm pack --dry-run --json includes migration guide and excludes prohibited surfaces", () => {
+  it("npm pack --dry-run --json excludes prohibited surfaces", () => {
     const out = execFileSync("npm", ["pack", "--dry-run", "--json"], {
       cwd: ROOT,
       encoding: "utf8",
@@ -192,18 +190,7 @@ describe("CMD-PACKAGE-01 package-boundary (SEIT-PACKAGE-01)", () => {
     assert.ok(paths.includes("plugin.json"));
     assert.ok(paths.some((p) => p.startsWith("hooks/")));
     assert.ok(paths.some((p) => p.startsWith("skills/")));
-    assert.ok(
-      paths.includes("guide/migration.md"),
-      "packed surface must include guide/migration.md"
-    );
-    const otherGuide = paths.filter(
-      (p) => p.startsWith("guide/") && p !== "guide/migration.md"
-    );
-    assert.deepEqual(
-      otherGuide,
-      [],
-      `legacy guide pages must not pack: ${JSON.stringify(otherGuide)}`
-    );
+    assert.ok(!paths.some((p) => p.startsWith("guide/")));
     assert.ok(!paths.some((p) => p === "mcp.json" || p.startsWith("mcp.")));
     assert.ok(!paths.some((p) => /(^|\/)bin(\/|$)/.test(p)));
     assert.ok(!paths.some((p) => p.includes(".bearing")));

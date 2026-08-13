@@ -13,8 +13,6 @@ flowchart TD
     Q -->|direct| C[Crewmate]
     Q -->|wave| E[Explorer]
     Q -->|expedition| N[Navigator]
-    Q -->|long multi-phase| D[Delegate Authority]
-    D --> N
     N --> TB{Multiple active or conflicting waves?}
     TB -->|yes| T[Trail Boss]
     TB -->|no| E
