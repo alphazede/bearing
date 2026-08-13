@@ -24,7 +24,6 @@ const ROLES = [
   "navigator",
   "trail-boss",
   "sub-explorer",
-  "delegate-authority",
   "validator",
   "park-ranger",
   "surveyor",
@@ -208,8 +207,8 @@ function listSkillDirsWithSkillMd() {
 describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)", () => {
   const skillDirs = listSkillDirsWithSkillMd();
 
-  it("catalog is exactly 1 router + 4 planning + 9 roles = 14 SKILL.md", () => {
-    assert.equal(EXPECTED_CATALOG.length, 14);
+  it("catalog is exactly 1 router + 4 planning + 8 roles = 13 SKILL.md", () => {
+    assert.equal(EXPECTED_CATALOG.length, 13);
     assert.deepEqual(skillDirs, [...EXPECTED_CATALOG].sort());
     const catalogVerdict = validateCatalog(skillDirs);
     assert.equal(catalogVerdict.ok, true, JSON.stringify(catalogVerdict));
@@ -221,6 +220,18 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     const negative = validateCatalog([...skillDirs, "grader"]);
     assert.equal(negative.ok, false);
     assert.ok(negative.diagnostics.some((d) => d.code === "standalone_grader_present"));
+  });
+
+  it("no Delegate Authority skill remains", () => {
+    assert.ok(!skillDirs.includes("delegate-authority"));
+    assert.ok(!existsSync(path.join(SKILLS_DIR, "delegate-authority", "SKILL.md")));
+    const negative = validateCatalog([...skillDirs, "delegate-authority"]);
+    assert.equal(negative.ok, false);
+    assert.ok(
+      negative.diagnostics.some(
+        (d) => d.code === "unexpected_skill" && d.skill === "delegate-authority"
+      )
+    );
   });
 
   it("each skill frontmatter name equals directory and description is present", () => {
@@ -236,7 +247,6 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       ["crewmate", "implement packet with write-set change as crewmate"],
       ["explorer", "orchestrate wave of crewmate packets as explorer"],
       ["navigator", "sequence expedition waves as navigator"],
-      ["delegate-authority", "delegate authority multi-phase journey"],
       ["validator", "validator sufficiency check for candidate"],
       ["repository-fit", "repository fit choose repo workspace"],
     ];
@@ -256,7 +266,7 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
 
   it("non-matching broad / name-similarity wording keeps unneeded roles dormant", () => {
     // Name-similarity: "validate the plan structure" should not activate park-ranger.
-    // Broad: "do some repository work" should not force navigator/delegate-authority.
+    // Broad: "do some repository work" should not force navigator.
     const park = readFileSync(path.join(SKILLS_DIR, "park-ranger", "SKILL.md"), "utf8");
     const parkV = validateSkillDocument("park-ranger", park);
     assert.equal(parkV.ok, true);
@@ -275,19 +285,6 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
         activationMatches("navigator", navV.description, "do some repository work"),
         false,
         "navigator must stay dormant for broad wording"
-      );
-    }
-    const del = readFileSync(path.join(SKILLS_DIR, "delegate-authority", "SKILL.md"), "utf8");
-    const delV = validateSkillDocument("delegate-authority", del);
-    assert.equal(delV.ok, true);
-    if (delV.ok) {
-      assert.equal(
-        activationMatches(
-          "delegate-authority",
-          delV.description,
-          "small single packet coding task"
-        ),
-        false
       );
     }
   });

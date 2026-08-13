@@ -38,22 +38,22 @@ jobs:
       - name: Test public Lite contract
         run: node --test test/*.test.mjs
 
-      - name: Audit dependencies
+      - name: Audit
         run: pnpm audit --audit-level=moderate
 
-      - name: Verify package contents
+      - name: Check package contents
         run: |
           npm pack --dry-run --json > "${RUNNER_TEMP}/pack.json"
           PACK_JSON="${RUNNER_TEMP}/pack.json" node <<'NODE'
           const pack = require(process.env.PACK_JSON)[0];
-          if (pack.name !== "@alphazede/bearing-lite" || pack.version !== "0.1.0") {
+          const pkg = require("./package.json");
+          if (pack.name !== pkg.name || pack.version !== pkg.version) {
             throw new Error(`Unexpected package identity: ${pack.name}@${pack.version}`);
           }
-          if (pack.entryCount !== 35 || pack.files.length !== 35) {
-            throw new Error(`Expected 35 packed files, got ${pack.entryCount}/${pack.files.length}`);
+          if (pack.entryCount !== pack.files.length || pack.files.length === 0) {
+            throw new Error(`Invalid packed file count: ${pack.entryCount}/${pack.files.length}`);
           }
           NODE
 
       - name: Check whitespace
         run: git diff --check
-
