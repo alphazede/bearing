@@ -1,0 +1,21 @@
+{
+  "name": "bearing-lite",
+  "interface": {
+    "displayName": "Bearing Lite"
+  },
+  "plugins": [
+    {
+      "name": "bearing-lite",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/alphazede/bearing-lite.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

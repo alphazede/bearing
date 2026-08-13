@@ -163,6 +163,36 @@ describe("CMD-MANIFEST-01 plugin-manifest (SEIT-MANIFEST-01, SEIT-EXTENSION-01)"
     }
   });
 
+  it("keeps Codex and Claude install metadata aligned with Bearing Lite", () => {
+    const codex = JSON.parse(
+      readFileSync(path.join(ROOT, ".codex-plugin/plugin.json"), "utf8")
+    );
+    const claude = JSON.parse(
+      readFileSync(path.join(ROOT, ".claude-plugin/plugin.json"), "utf8")
+    );
+    const codexMarketplace = JSON.parse(
+      readFileSync(path.join(ROOT, ".agents/plugins/marketplace.json"), "utf8")
+    );
+    const claudeMarketplace = JSON.parse(
+      readFileSync(path.join(ROOT, ".claude-plugin/marketplace.json"), "utf8")
+    );
+
+    for (const manifest of [codex, claude]) {
+      assert.equal(manifest.name, "bearing-lite");
+      assert.equal(manifest.version, "0.1.0");
+      assert.equal(manifest.skills, "./skills/");
+      assert.equal(manifest.mcpServers, undefined);
+    }
+    assert.equal(codexMarketplace.name, "bearing-lite");
+    assert.equal(codexMarketplace.plugins[0].name, "bearing-lite");
+    assert.equal(
+      codexMarketplace.plugins[0].source.url,
+      "https://github.com/alphazede/bearing-lite.git"
+    );
+    assert.equal(claudeMarketplace.name, "bearing-lite");
+    assert.equal(claudeMarketplace.plugins[0].name, "bearing-lite");
+  });
+
   it("negative: floating / non-1.0.0 schema is rejected with typed diagnostic", () => {
     const fixture = {
       $schema: "https://agent-plugins.org/schemas/2.0.0/plugin.schema.json",

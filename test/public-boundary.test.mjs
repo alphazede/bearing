@@ -25,6 +25,10 @@ const PACKED_PUBLIC_DOCS = [
 const SCAN_ROOTS = [
   "plugin.json",
   "package.json",
+  ".agents/plugins/marketplace.json",
+  ".claude-plugin/marketplace.json",
+  ".claude-plugin/plugin.json",
+  ".codex-plugin/plugin.json",
   "hooks",
   "skills",
   ...PACKED_PUBLIC_DOCS,
