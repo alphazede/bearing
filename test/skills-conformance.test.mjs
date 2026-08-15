@@ -239,6 +239,10 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       const text = readFileSync(path.join(SKILLS_DIR, name, "SKILL.md"), "utf8");
       const verdict = validateSkillDocument(name, text);
       assert.equal(verdict.ok, true, `${name}: ${JSON.stringify(verdict)}`);
+      const lines = text.trimEnd().split(/\r?\n/).length;
+      const words = text.trim().split(/\s+/).length;
+      assert.ok(lines < 60, `${name}: ${lines} lines must be below 60`);
+      assert.ok(words < 400, `${name}: ${words} words must be below 400`);
     }
   });
 
@@ -287,6 +291,71 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
         "navigator must stay dormant for broad wording"
       );
     }
+  });
+
+  it("router requires explicit Bearing invocation and owns the Journey conversation", () => {
+    const routerPath = path.join(SKILLS_DIR, "bearing-lite", "SKILL.md");
+    const router = readFileSync(routerPath, "utf8");
+    const verdict = validateSkillDocument("bearing-lite", router);
+    assert.equal(verdict.ok, true);
+    if (verdict.ok) {
+      assert.equal(
+        activationMatches(
+          "bearing-lite",
+          verdict.description,
+          "Use Bearing Lite to start this repository journey"
+        ),
+        true,
+        "explicit Bearing Lite request should match"
+      );
+      assert.equal(
+        activationMatches(
+          "bearing-lite",
+          verdict.description,
+          "route the next task for this repository"
+        ),
+        false,
+        "ordinary repository routing must not invoke Bearing Lite"
+      );
+    }
+    assert.match(router, /Gathering Supplies for this Journey\./);
+    assert.match(
+      router,
+      /What Journey shall\s+we Embark on—an Explorer Journey or an Expedition\?/
+    );
+    assert.match(router, /Is this a\s+good lineup for the roles on this Journey\?/);
+    assert.match(router, /per slice, per round, or\s+at the end\?/);
+    assert.match(router, /Router alone writes Journey\s+planning state/);
+    assert.match(router, /Every node gets a fresh session/);
+    assert.match(router, /If .*default-role-lineup\.md` is absent, create a\s+proposed copy/);
+    assert.match(router, /Never infer identity values/);
+  });
+
+  it("at-end assurance occurs once at the Journey boundary", () => {
+    const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
+    const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
+    assert.match(explorer, /Expedition wave defers assurance to the Navigator's\s+final Journey boundary/);
+    assert.match(navigator, /only the final integrated outcome/);
+  });
+
+  it("Gather Supplies converges one recommended question at a time", () => {
+    const gather = readFileSync(
+      path.join(SKILLS_DIR, "gather-supplies", "SKILL.md"),
+      "utf8"
+    );
+    assert.match(gather, /Ask exactly one question/);
+    assert.match(gather, /recommended answer/);
+    assert.match(gather, /Never ask the\s+owner for a fact tools can establish/);
+    assert.match(gather, /explicit confirmation that shared understanding/);
+    assert.match(gather, /Return each confirmed decision immediately to the Router/);
+  });
+
+  it("Codex metadata keeps the router explicitly invoked", () => {
+    const metadataPath = path.join(SKILLS_DIR, "bearing-lite", "agents", "openai.yaml");
+    assert.ok(existsSync(metadataPath), "router must publish Codex activation metadata");
+    const metadata = readFileSync(metadataPath, "utf8");
+    assert.match(metadata, /allow_implicit_invocation:\s*false/);
+    assert.match(metadata, /\$bearing-lite/);
   });
 
   it("negative: missing role fails with typed diagnostic", () => {

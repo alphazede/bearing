@@ -1,33 +1,45 @@
 ---
 name: gather-supplies
 description: >
-  Resolve only material owner decisions that block a complete plan after the
-  workspace exists. Use for gather supplies, owner decisions, plan-spec
-  assumptions, or blocking scope questions. Do not use for design drafting,
-  implementation, product edits, or replaying settled owner answers.
+  Relentlessly resolve material owner decisions for a Bearing Journey, one
+  dependency-ordered question at a time, until shared understanding is explicit.
+  Use for Gather Supplies or unresolved plan intent. Do not use for discoverable
+  repository facts, design drafting, implementation, or settled decisions.
 ---
 
 # Gather Supplies
 
-Procedural stage. Not a persona.
+Planning node, not a persona or plan-state writer.
 
-## Match / non-match
+## Match and inputs
 
-- **Match:** material open decisions block scope, architecture, security, authority, or acceptance.
-- **Non-match:** decisions already recorded; Map the Route can proceed; pure implementation packets.
+- **Match:** a Journey choice or material scope, behavior, authority, risk, or
+  acceptance decision is unresolved.
+- **Non-match:** evidence can answer it, the owner already decided it, or a work
+  packet is ready.
+- **Inputs:** goal, visible plan state, repository evidence, prior decisions,
+  open decision tree, and return schema.
 
-## Inputs
+## Algorithm
 
-Goal, repository evidence, plan workspace, and prior owner Q&A.
+1. Inspect the repository and available evidence before asking. Never ask the
+   owner for a fact tools can establish.
+2. Select the earliest unresolved decision whose dependencies are satisfied.
+3. Ask exactly one question. Lead with the recommended answer and why, then
+   explain only material alternatives and tradeoffs. Wait for the owner.
+4. Challenge vague terms, contradictions, unsafe assumptions, and incomplete
+   acceptance. A default, probability, or silence is not approval.
+5. Follow the affected dependency branch. Revisit an earlier answer when new
+   evidence conflicts; otherwise do not replay it.
+6. Return each confirmed decision immediately to the Router for recording.
+7. When no material branch remains, summarize the shared interpretation and ask
+   for explicit confirmation that shared understanding has been reached.
 
-## Procedure
+## Return and recovery
 
-1. Ask only material questions; reuse durable prior answers without re-asking.
-2. For each question: recommendation, evidence, options/tradeoffs, affected section, safe default.
-3. Apply completed answers into the validated plan specification only.
-4. Keep requirements testable with stable IDs; record blockers instead of inventing approval.
-5. Exit with zero-to-few bounded questions, applied plan-spec, or `OWNER_DECISION_REQUIRED`.
+Return `DECISION_CONFIRMED`, `SHARED_UNDERSTANDING_CONFIRMED`,
+`NEEDS_EVIDENCE`, or `OWNER_DECISION_REQUIRED` with decision ID, answer,
+rationale, affected requirements, remaining branch, and next action. Stop after
+three evidence-changing attempts on one blocked decision.
 
-## Never
-
-Design the route, draft implementation slices, edit product code, or overwrite a recorded owner answer with a default.
+Never write Journey state, choose for the owner, design, or implement.

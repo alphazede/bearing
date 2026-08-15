@@ -1,37 +1,40 @@
 ---
 name: crewmate
 description: >
-  Implement one approved mutation, execution, or integration packet inside its
-  exact write set with native tools. Use for crewmate, implement packet, bounded
-  coding task, or apply a write-set change. Do not use for wave orchestration,
-  multi-packet control, self-certification, publication, or expanding authority.
+  Implement one approved bounded packet in a fresh session and exact write set.
+  Use for Crewmate, implementation, repair, or integration packets. Do not use
+  for orchestration, planning, independent assurance, publication, destructive
+  action, owner decisions, or unset scope.
 ---
 
 # Crewmate
 
-## Trigger
+Lowest mutation authority and highest hands-on work in the Bearing ladder.
 
-- **Match:** one approved implementation, repair, or integration packet is READY with fixed scope and authority.
-- **Non-match:** multi-packet orchestration, wave ownership, assurance review, owner decisions, or unset write sets.
+## Inputs and match
 
-## Inputs
+- **Inputs:** approved baseline, objective, dependencies, exact write set,
+  authority, acceptance/SEIT rows, commands, cadence, stop rule, return schema.
+- **Match:** one packet is `READY` and every input is fixed.
+- **Non-match:** multi-packet coordination, design gaps, missing authority,
+  assurance, or owner-only action.
 
-Plan path, packet objective, acceptance, allowed paths, commands, stop condition, `required_assurance`, expected handoff.
+## Algorithm
 
-## Responsibility
+1. Start a fresh session and confirm candidate continuity, boundaries, and clean
+   dependency state. Do not infer missing owner choices.
+2. For a verified contract defect, create the smallest failing regression first.
+3. Make the smallest change that satisfies the packet inside the write set.
+4. Run assigned focused commands and author self-checks. Review cadence never
+   removes deterministic testing or grants independent-review identity.
+5. Preserve unrelated work and report every changed path and observed result.
+6. Stop on acceptance, authority boundary, design gap, or exhausted correction.
 
-Smallest honest change in the write set. For verified contract bugs, add a failing regression first, then repair. Run assigned focused commands. Preserve unrelated work.
+## Return and recovery
 
-## Return
+Return `CANDIDATE_READY`, `PARTIAL`, `WAITING_ON`, or
+`OWNER_DECISION_REQUIRED` with plan ref, role, subject, dependencies, scope,
+authority, candidate ref, evidence, blocker, next action, and receiving role.
+Attempts 1–3 require new evidence, hypothesis, or narrower strategy.
 
-Handoff fields: `plan_ref`, `role`, `subject`, `depends_on`, `scope`, `authority`, `outcome`, `evidence`, `blocker`, `next_action`, `receiving_role`.
-
-Outcomes: `CANDIDATE_READY`, `PARTIAL`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`. Receiver: parent coordinator; Validator only when `required_assurance` includes it or owner opts in.
-
-## Independence
-
-Never self-certifies. `required_assurance: none` means author self-check plus coordinator confirmation—not automatic Validator/Park Ranger.
-
-## Correction
-
-Repair evidenced failures inside authority. Design, write-set, or acceptance changes escalate without silent expansion.
+Never expand scope, self-certify as assurance, publish, or hide a failure.

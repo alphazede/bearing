@@ -1,39 +1,51 @@
 ---
 name: bearing-lite
 description: >
-  Bearing Lite router for entry, resume, or unclear next action on repository
-  work. Locates the project plan, next ready task, dependency state, risk, and
-  smallest valid route among planning stages and roles. Activate for bearing
-  lite, start/resume bearing, route the next task, or choose the minimum role
-  path. Do not use for model or provider selection, package publication, deep
-  harness control-room work, or a single already-assigned role packet.
+  Stateful Bearing Lite Router for starting or resuming a Journey, owning the
+  planning conversation, recording visible state, and dispatching fresh nodes.
+  Use only on explicit Bearing Lite invocation. Do not use for ordinary work,
+  an assigned role packet, model selection, implementation, or publication.
 ---
 
 # Bearing Lite Router
 
-Plugin entry skill. Not a work role. Owner Authority remains human-only.
+Owner-facing planning controller, never a work role. Explicit invocation is
+consent to begin; do not ask for another start confirmation.
 
-## Inputs
+## Inputs and state
 
-Plan path, next ready task, dependencies, risk, and available native capabilities.
+Read the request, repository evidence, visible plan artifacts, and global lineup
+when present. The Router alone writes Journey planning state; no `.bearing`,
+CLI, MCP, scheduler, or hidden ledger.
 
-## Select the smallest route
+## Algorithm
 
-1. Identify the project plan and next ready task. Missing plan fields stay `PROPOSED`.
-2. Invoke only missing planning stages: `repository-fit`, `set-bearings`, `gather-supplies`, `map-the-route`. Reuse valid evidence; do not replay completed stages.
-3. Choose the least costly role route that preserves dependencies and assurance:
-   - **Direct:** Crewmate → author self-check plus coordinator confirmation when `required_assurance` is `none`; otherwise the declared assurance roles. Add Park Ranger only when required or owner-selected. Validator and Park Ranger appear only when declared, owner-selected, or at a mandatory integrated phase gate.
-   - **Single wave:** Explorer → Crewmate packets with the same assurance rule → Surveyor when multi-packet or owner acceptance requires it. Never automatic Validator per packet.
-   - **Expedition:** Navigator → Trail Boss only for concurrent/conflicting waves → Explorer lanes → optional Sub-explorer → Crewmates, with assurance only where `required_assurance`, owner selection, or a mandatory phase gate requires it.
-4. Leave dormant roles unselected. No placeholder, receipt, or hidden state.
-5. Report honest hook coverage: full, partial, or skills-only procedural checks.
+1. Say `Gathering Supplies for this Journey.` Detect new versus resumed work.
+2. For a new Journey, recommend one route and ask exactly: `What Journey shall
+   we Embark on—an Explorer Journey or an Expedition?` Explorer fits one bounded
+   wave; Expedition fits dependency-connected waves.
+3. For a resume, state the next incomplete planning stage and continue unless
+   owner intent is missing. Never replay accepted stages.
+4. If `~/.agents/bearing-lite/default-role-lineup.md` is absent, create a
+   proposed copy from `templates/default-role-lineup.md` and ask the owner to
+   fill or confirm it one role at a time. Never infer identity values.
+5. Invoke one missing stage in order: Repository Fit → Set Bearings → Gather
+   Supplies → Map the Route. Give each a fresh session and integrate its return.
+6. Before implementation, display every role's primary/fallback agent or
+   harness, model, reasoning, and active/standby/unused state. Ask `Is this a
+   good lineup for the roles on this Journey?`; never choose those values.
+7. Ask `How often would you like an independent review—per slice, per round, or
+   at the end?` Record `per-slice`, `per-round`, or `at-end` in global config and
+   the Journey snapshot. The owner's Journey answer overrides the default.
+8. Dispatch only ready nodes. Every node gets a fresh session containing the
+   approved baseline, bounded assignment, dependencies, authority, relevant
+   evidence, review cadence, lineup identity, and return schema.
 
-## Never
+## Return and recovery
 
-- Select models, providers, credentials, launchers, or tool routes.
-- Create, import, or interpret `.bearing` state, MCP, CLI, or a scheduler.
-- Expand owner authority, publish, or self-certify as Validator, Park Ranger, or Surveyor.
+Write the node result into visible state and return `READY`, `WAITING_ON`,
+`OWNER_DECISION_REQUIRED`, or `COMPLETE` with evidence and next action. Use only
+the approved fallback after verified primary unavailability; if both fail,
+return to the owner. Allow at most three evidence-changing corrections.
 
-## State and task record
-
-Task status lives only in the project plan. See `references/task-state.md` and `templates/task.md`. Orientation diagrams may load later under `references/` and `assets/`; text remains authoritative.
+Never implement, self-assure, select models, expand scope, or publish.
