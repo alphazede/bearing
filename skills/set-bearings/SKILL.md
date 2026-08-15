@@ -1,33 +1,39 @@
 ---
 name: set-bearings
 description: >
-  Create or resume the bounded plan workspace and repository map when project
-  context or current-state map is missing after fit. Use for set bearings,
-  plan workspace, or repository map. Do not use before fit is confirmed, for
-  owner decisions, design drafts, product edits, or risk-profile authoring.
+  Create or resume the visible Journey workspace and bounded repository map
+  after Repository Fit is confirmed. Use for Set Bearings or stale project
+  context. Do not use before fit, for owner decisions, design, implementation,
+  hidden state, or deleting historical plans.
 ---
 
 # Set Bearings
 
-Procedural stage. Not a persona.
+Fresh planning node. The Router announces `Setting Our Bearings in <repo>.`
 
-## Match / non-match
+## Inputs and match
 
-- **Match:** fit is confirmed and plan workspace or repository map is missing or stale.
-- **Non-match:** workspace already ready; Gather Supplies or later stages apply.
+- **Inputs:** confirmed repository root, owner-confirmed plan directory, Journey
+  title, visible existing artifacts, repository rules, and return schema.
+- **Match:** the workspace or current-state repository map is missing or stale.
+- **Non-match:** both are current and usable by Gather Supplies or Map the Route.
 
-## Inputs
+## Algorithm
 
-Repository root, work goal, and owner-confirmed plan directory (verbatim).
+1. Re-read the exact confirmed root and plan directory; never derive a different
+   root, slug, suffix, or sibling workspace.
+2. Preserve every existing artifact and unrelated edit. Resume rather than
+   replace an existing Journey.
+3. Create only the missing plan-directory stub and bounded repository map.
+4. Record observed systems, relevant paths, constraints, Git boundaries,
+   validation commands, and unknowns as evidence—not invented decisions.
+5. Verify that all written paths remain inside authority and are human-readable.
 
-## Procedure
+## Return and recovery
 
-1. Use the confirmed plan directory exactly; never derive, slug, or suffix it.
-2. Create or resume the workspace without deleting existing plan content.
-3. Write only the plan-directory stub and sibling repository map.
-4. Leave risk-profile content to Gather Supplies / owner; do not invent it.
-5. Return relative paths and whether the workspace was created or resumed.
+Return `WORKSPACE_READY`, `WORKSPACE_RESUMED`, `NEEDS_EVIDENCE`, or `BLOCKED`
+with paths, map freshness, evidence, blocker, and next planning stage. Retry only
+from corrected evidence, at most three attempts.
 
-## Never
-
-Ask planning questions, design, implement, edit product code, or delete plans or hidden runtime state.
+Never ask planning questions, write risk choices, design, implement, create
+hidden runtime state, or delete plan content.

@@ -1,38 +1,40 @@
 ---
 name: trail-boss
 description: >
-  Trail Boss cross-wave coordination for concurrent Explorer-owned waves with
-  shared-interface or dependency conflicts. Use for trail boss, multi-wave
-  conflict management, wave readiness scheduling, or integration order across
-  waves. Do not use for a single wave, packet implementation, review, grading,
-  or assurance verdicts.
+  Coordinate concurrent Explorer waves that share interfaces, dependencies, or
+  integration conflicts in a fresh session. Use for Trail Boss, cross-wave
+  readiness, or integration ordering. Do not use for one wave, packet work,
+  planning, model selection, review, grading, or assurance.
 ---
 
 # Trail Boss
 
-## Trigger
+Cross-wave authority. Coordinates more and implements less than Explorer.
 
-- **Match:** ≥2 Explorer-owned waves are active or need cross-wave dependency, shared-interface, or conflict management.
-- **Non-match:** one Explorer owns the whole route; direct Crewmate work; review or implementation tasks.
+## Inputs and match
 
-## Inputs
+- **Inputs:** approved wave graph, lane status, shared interfaces, dependencies,
+  authority, lineup, cadence, budgets, and return schema.
+- **Match:** at least two active Explorer waves require conflict or integration
+  control.
+- **Non-match:** one Explorer can sequence all work or the request is execution
+  or assurance.
 
-Plan path, wave graph, lane status, budgets, shared interfaces, `required_assurance`, expected handoff.
+## Algorithm
 
-## Responsibility
+1. Start fresh; verify every wave owner, dependency edge, shared interface, and
+   candidate boundary.
+2. Schedule readiness and integration order. Serialize conflicting writes;
+   allow parallel waves only when independence is proven.
+3. Dispatch fresh Explorer sessions with bounded wave packets and named lineup.
+4. Reconcile typed returns and surface interface drift without repairing it.
+5. Tell the Navigator when the cadence boundary is ready for assurance; never
+   create an extra review round.
 
-Schedule wave readiness and integration order only. Never perform a wave's work, implement product changes, or fill review/assurance slots.
+## Return and recovery
 
-## Return
+Return `READY`, `REROUTED`, `WAITING_ON`, or `OWNER_DECISION_REQUIRED` with
+plan ref, role, subject, dependencies, scope, authority, evidence, blocker, next
+action, and receiver. Try at most three evidence-changing schedules.
 
-Handoff fields: `plan_ref`, `role`, `subject`, `depends_on`, `scope`, `authority`, `outcome`, `evidence`, `blocker`, `next_action`, `receiving_role`.
-
-Outcomes: `READY`, `REROUTED`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`. Receiver: Explorer, Navigator, or assurance role when required.
-
-## Independence
-
-Orchestration-only. Omitted when one Explorer suffices. Never self-certifies integrated candidates.
-
-## Correction
-
-Escalate unresolvable cross-wave conflicts to Navigator or Owner Authority; do not absorb Explorer packet work.
+Never implement, absorb Explorer work, self-assure, or expand authority.

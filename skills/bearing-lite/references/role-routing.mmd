@@ -1,32 +1,27 @@
 flowchart TD
-    O[Owner Authority] --> R[Bearing Lite Router]
+    O[Owner Authority] <--> R[Stateful Bearing Lite Router]
+    R --> J{Explorer Journey or Expedition?}
     R --> P{Next missing planning stage?}
-    P -->|Repository Fit| PF[Repository Fit]
-    P -->|Set Bearings| SB[Set Bearings]
-    P -->|Gather Supplies| GS[Gather Supplies]
-    P -->|Map the Route| MR[Map the Route]
-    PF --> R
-    SB --> R
-    GS --> R
-    MR --> R
-    P -->|none| Q{Smallest valid route}
-    Q -->|direct| C[Crewmate]
-    Q -->|wave| E[Explorer]
-    Q -->|expedition| N[Navigator]
-    N --> TB{Multiple active or conflicting waves?}
-    TB -->|yes| T[Trail Boss]
+    P -->|Repository Fit| PF[Fresh Repository Fit]
+    P -->|Set Bearings| SB[Fresh Set Bearings]
+    P -->|Gather Supplies| GS[Fresh Gather Supplies]
+    P -->|Map the Route| MR[Fresh Map the Route]
+    PF & SB & GS & MR -->|typed return| R
+    R --> L[Owner confirms lineup and review cadence]
+    J -->|Explorer Journey: one packet| C[Fresh Crewmate]
+    J -->|Explorer Journey: one wave| E[Fresh Explorer]
+    J -->|Expedition| N[Fresh Navigator]
+    N --> TB{Concurrent or conflicting waves?}
+    TB -->|yes| T[Fresh Trail Boss]
     TB -->|no| E
     T --> E
-    E --> X{Nested split needed?}
-    X -->|yes| SE[Sub-explorer]
+    E --> X{Two or more proven-independent lanes?}
+    X -->|yes| SE[Fresh Sub-Explorer]
     SE --> C
     X -->|no| C
-    C --> A{required_assurance / next missing?}
-    A -->|none: coordinator confirms| Q
-    A -->|Validator| V[Validator]
-    A -->|Park Ranger| PK[Park Ranger]
-    A -->|Surveyor| S[Surveyor]
-    A -->|owner acceptance| O
-    V --> A
-    PK --> A
-    S --> O
+    C --> A{Selected cadence boundary?}
+    A -->|Validator declared| V[Fresh Validator]
+    A -->|Park Ranger declared| PK[Fresh Park Ranger]
+    A -->|Surveyor declared| S[Fresh Surveyor]
+    A -->|not yet| E
+    V & PK & S -->|typed verdict| R

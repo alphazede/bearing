@@ -7,9 +7,10 @@
 planning, routing, bounded execution, and independent review of repository work.
 It ships portable skills, references, templates, and optional client hooks.
 
-An agent cannot certify its own work. The router selects the smallest valid
-route; independent assurance roles run only when declared, owner-selected, or
-required by a mandatory integrated phase gate. Owner Authority remains human-only.
+An agent cannot certify its own work. The stateful Router owns the planning
+conversation and visible Journey state, then dispatches fresh bounded sessions.
+Independent assurance runs at the owner's selected cadence: per slice, per
+execution/correction round, or once at the end. Owner Authority remains human-only.
 
 Bearing Lite was created by William Rumph.
 
@@ -33,60 +34,58 @@ first-class and use procedural skill checks.
 
 ## What it does
 
-1. **Locate** the project plan and next ready task.
+1. **Ask** whether the Journey is an Explorer Journey or an Expedition.
 2. **Fill only missing planning stages:** Repository Fit → Set Bearings → Gather
    Supplies → Map the Route.
-3. **Choose the smallest role route** that preserves dependencies and
-   `required_assurance`.
-4. **Record task state** only in the project's human-readable plan (Markdown).
-5. **Return structured handoffs**; parent coordinators write plan transitions.
+3. **Confirm** the user-owned primary/fallback lineup and review cadence.
+4. **Dispatch fresh sessions** with bounded context, authority, and return types.
+5. **Record state visibly** in human-readable Markdown artifacts only.
 
 Bearing Lite never selects models, providers, credentials, or launchers. The
-owner or client maps available agents to role capability needs.
+owner provides each role's primary/fallback agent or harness, model, and
+reasoning level in `~/.agents/bearing-lite/default-role-lineup.md`, then confirms
+the applicable Journey snapshot before implementation.
 
 ## Routes and scaling
 
 | Route | When | Cost |
 |---|---|---|
-| **Direct** | One bounded implementer packet | Lowest coordination |
-| **Explorer (wave)** | One wave, one or more Crewmates | One lane controller |
+| **Explorer Journey** | One bounded packet or one wave | Direct Crewmate or one Explorer |
 | **Expedition** | Multi-phase or concurrent independent lanes | Navigator; Trail Boss only for concurrent/conflicting waves |
 
-**Explorer** keeps one controller over a compact or sequential set of slices.
+An **Explorer Journey** uses a direct Crewmate for one ready packet or one
+Explorer over a compact/sequential wave.
 **Expedition** adds navigation (and sometimes a Trail Boss) so independent lanes
 stay small and sharp instead of degrading in one long context. Either shape can
 use substantial tokens; the product does not impose a default budget ceiling.
 
 ### Role routing (explanatory)
 
-![Bearing Lite role routing: Owner Authority and the router select missing planning stages, then the smallest route among Direct Crewmate, Explorer wave, or Expedition Navigator; optional Trail Boss, Sub-explorer, and assurance roles appear only when required](skills/bearing-lite/assets/role-routing.png)
-
-Reviewable Mermaid source: [`skills/bearing-lite/references/role-routing.mmd`](skills/bearing-lite/references/role-routing.mmd)
-(plan-local twin under `docs/plans/2026-08-09-bearing-skills-first-architecture/assets/`).
+Current routing diagram source: [`skills/bearing-lite/references/role-routing.mmd`](skills/bearing-lite/references/role-routing.mmd).
+The text below remains authoritative for clients that do not render Mermaid.
 
 **Authoritative text (vision optional):** Owner Authority remains human-only. The
-Bearing Lite Router is entry, not a work role. It invokes only missing planning
-stages, then picks the least costly route: Direct Crewmate; Explorer for one
-wave; Navigator for an expedition (Trail Boss only when waves conflict or run
-concurrently). Nested Sub-explorer opens only when a lane must split. After
-Crewmate work, `required_assurance: none` means author self-check plus
-coordinator confirmation; Validator, Park Ranger, and Surveyor appear only when
-listed, owner-selected at slice level, or required by a mandatory phase gate.
-Diagrams explain orientation; they never authorize a transition.
+Bearing Lite Router is the stateful planning controller, not a work role. It
+invokes only missing planning stages in fresh sessions, confirms the owner's
+lineup and cadence, then dispatches an Explorer Journey or Expedition. Nested
+Sub-Explorer opens only for proven-independent lanes. Validator, Park Ranger,
+and Surveyor appear only when declared and when the selected per-slice,
+per-round, or at-end boundary is reached. Diagrams explain orientation; they
+never authorize a transition.
 
 ## Roles and authority
 
 | Role | What it is | Executes | Notes |
 |---|---|---|---|
-| **Router** | Plugin entry procedure | no | Not a work role |
-| **Navigator** | Expedition orchestrator | yes | Owns cross-wave sequencing |
-| **Trail Boss** | Multi-wave controller | yes | Only concurrent or conflicting waves |
-| **Explorer** | One-wave lane controller | yes | Dispatches Crewmates |
-| **Sub-explorer** | Nested lane controller | yes | Only when a lane must split |
-| **Crewmate** | Bounded implementer | yes | Writes only inside declared authority |
-| **Validator** | Evidence sufficiency | yes | Independent of the author |
-| **Park Ranger** | Defect review | yes | Independent of the author |
-| **Surveyor** | User-facing acceptance | no | Read-only acceptance judgment |
+| **Router** | Stateful planning controller | no | User-facing; planning-state writer |
+| **Navigator** | Expedition orchestrator | no | Owns cross-wave sequencing |
+| **Trail Boss** | Multi-wave controller | no | Only concurrent or conflicting waves |
+| **Explorer** | One-wave controller | no | Dispatches Crewmates |
+| **Sub-explorer** | Nested lane controller | no | Only when lanes are proven independent |
+| **Crewmate** | Bounded implementer | yes | Most hands-on work; exact write set |
+| **Validator** | Evidence sufficiency | no | Independent of the author |
+| **Park Ranger** | Defect review | no | Independent of the author |
+| **Surveyor** | User-facing acceptance | no | Read-only outcome judgment |
 | **Owner Authority** | Human decision | n/a | Never an agent role |
 
 **Independent review:** a candidate author never provides their own Validator,

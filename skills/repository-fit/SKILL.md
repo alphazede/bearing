@@ -1,33 +1,39 @@
 ---
 name: repository-fit
 description: >
-  Propose one target repository and plan-directory assumption when the target
-  is absent or ambiguous. Use for repository fit, choose repo, or confirm
-  workspace before Set Bearings. Do not use after fit is confirmed, for product
-  edits, routing roles, or owner-only publication decisions.
+  Verify and propose one target repository and plan directory when repository
+  identity is absent or ambiguous. Use for Repository Fit before Set Bearings.
+  Do not use after owner-confirmed fit, for parent-wide exploration, planning
+  decisions, product edits, role routing, or publication.
 ---
 
 # Repository Fit
 
-Procedural stage. Not a persona.
+Fresh planning node. It returns evidence; the Router records the decision.
 
-## Match / non-match
+## Inputs and match
 
-- **Match:** selected repository is missing, multi-root, or identity is ambiguous.
-- **Non-match:** owner already confirmed fit; Set Bearings or later stages are ready.
+- **Inputs:** Journey goal, authorized candidate roots, visible prior decisions,
+  repository rules, and discovery limits.
+- **Match:** target root, repository identity, or plan location is unresolved.
+- **Non-match:** the owner already named and confirmed the repository and plan.
 
-## Inputs
+## Algorithm
 
-Work goal, candidate roots, and any prior fit evidence.
+1. Inspect the selected root only. Open one additional root only when authorized.
+2. Cap discovery at depth 4 and 200 paths; prefer Git identity, manifests,
+   top-level instructions, and current plan conventions.
+3. Reject nested-repository confusion, missing Git identity, or conflicting
+   owner evidence with a typed finding.
+4. Propose exactly one repository and one plan-directory assumption with path
+   evidence and a short reason.
+5. Ask one owner confirmation question. A recommendation is not confirmation.
 
-## Procedure
+## Return and recovery
 
-1. Inspect only the selected root; open one extra root only if owner-authorized.
-2. Cap discovery (depth 4, 200 paths). Prefer manifests, top-level docs, plan conventions.
-3. Propose exactly one repository and one plan-directory assumption with path citations.
-4. Ask one concise owner confirmation question. Do not treat a recommendation as approval.
-5. Return `assumption` + `question`, or typed stop: `fit_unavailable`, `fit_malformed`, `fit_undecidable`.
+Return `FIT_PROPOSED`, `FIT_CONFIRMED`, `FIT_UNAVAILABLE`, `FIT_MALFORMED`, or
+`FIT_UNDECIDABLE` with root, plan directory, evidence, blocker, and next action.
+Retry only from new evidence, at most three attempts.
 
-## Never
-
-Write files, walk parents without authority, rank alternatives after undecidable, or advance into Set Bearings.
+Never write files, walk unapproved parents, rank endless alternatives, or
+advance the Journey itself.

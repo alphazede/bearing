@@ -10,13 +10,13 @@ Bearing rejects deviations with typed findings.
 2. Requirement IDs use `AC-*` or `RISK-*`; design IDs use `DES-*` or
    `CONTRACT-*`; SEIT rows use `SEIT-*`; commands use `CMD-*` or `PROC-*`.
    Suffixes contain only uppercase letters, digits, dots, or hyphens.
-3. `plan-spec.md` declares requirements, Entry criteria, Exit criteria,
+3. `<journey-topic>-spec.md` declares requirements, Entry criteria, Exit criteria,
    Rollback or repair, and Accountable controller. `design.md` declares design
    IDs. `seit.md` declares SEIT rows and commands.
 4. Preserve stable IDs. Every implementation reference resolves to a declared
    requirement, design contract, SEIT row, and command.
-5. The plan's Role routes decision supplies immutable `authorRoute` and
-   `reviewSlots`. Missing or incomplete routes block implementation drafting.
+5. The owner-confirmed lineup and review cadence supply named active, standby,
+   and unused instances. Missing values block implementation drafting.
 
 ## SEIT rules
 
@@ -38,8 +38,8 @@ Bearing rejects deviations with typed findings.
    `### <id> execution manifest`. IDs are a letter-run plus an integer or
    dotted integer. Every slice has exactly one matching manifest.
 2. Every slice declares Goal, Requirement IDs, Design IDs, SEIT proof rows,
-   Type, Design lenses, Implementation role, Agent model route, Agent reasoning
-   level, and Review path. Goals are at most 512 characters.
+   Type, Design lenses, named implementation role, owner-selected model route,
+   reasoning level, and review path. Goals are at most 512 characters.
 3. Every manifest declares Write set, Command IDs, Stop condition, and Human
    decision. Optional fields are Shared interfaces (`path#Symbol`), Integration
    boundary, and Parallel safe (`yes` or `no` plus reason).
@@ -76,8 +76,8 @@ placeholders, bare negations, or deferral language.
 
 ## Completion boundary
 
-Design-only work returns after valid `design.md` and `seit.md`. Implementation
-drafting returns after valid `implementation.md`. Complete-route work remains
-incomplete until `plan-spec.md`, `design.md`, `seit.md`, and `implementation.md`
-are current. Bearing then generates the complete `review.html`; agents never
-hand-edit, summarize, or replace it.
+The first review gate needs the topic-specific specification and `review.html`.
+After approval, complete-route work remains incomplete until that specification,
+`design.md`, `seit.md`, and `implementation.md` are current. Bearing then
+generates and opens the complete `review.html`; it becomes authoritative only
+after owner approval.

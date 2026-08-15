@@ -210,6 +210,17 @@ function baseTask(overrides = {}) {
 }
 
 describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)", () => {
+  it("template records journey and review cadence before task mapping", () => {
+    assert.match(TEMPLATE, /Journey settings/i);
+    assert.match(TEMPLATE, /journey:\s*<Explorer Journey \| Expedition>/i);
+    assert.match(
+      TEMPLATE,
+      /review_cadence:\s*<per-slice \| per-round \| at-end>/i
+    );
+    assert.match(TEMPLATE, /lineup_snapshot:/i);
+    assert.match(TEMPLATE, /before task mapping/i);
+  });
+
   it("template documents always-present, before-execution, after-candidate, waiting/correcting tiers", () => {
     assert.match(TEMPLATE, /Always present/i);
     assert.match(TEMPLATE, /Before execution/i);

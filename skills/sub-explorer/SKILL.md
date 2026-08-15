@@ -1,37 +1,39 @@
 ---
 name: sub-explorer
 description: >
-  Orchestrate bounded packets inside one Explorer-owned wave when at least two
-  proven-independent lanes need one extra coordination level. Use for
-  sub-explorer or in-wave lane coordination. Do not use as a second nesting
-  level, for product implementation, multi-wave control, or assurance.
+  Coordinate at least two proven-independent lanes inside one Explorer wave in
+  a fresh session. Use for Sub-Explorer or necessary in-wave lane coordination.
+  Do not use for one lane, nested Sub-Explorers, implementation, cross-wave
+  control, planning, or assurance.
 ---
 
-# Sub-explorer
+# Sub-Explorer
 
-## Trigger
+Second mutation-authority level; coordinates more and implements less than a
+Crewmate. Maximum one Sub-Explorer level.
 
-- **Match:** one Explorer-owned wave has ≥2 proven-independent lanes and one extra coordination level materially reduces context or conflict.
-- **Non-match:** single lane; nested Sub-explorer requests; Trail Boss multi-wave work; direct Crewmate packets.
+## Inputs and match
 
-## Inputs
+- **Inputs:** parent wave, lane boundaries, packet specs, dependencies,
+  authority, lineup identities, cadence, and return schema.
+- **Match:** two or more disjoint lanes materially reduce context or conflict.
+- **Non-match:** direct packets suffice, independence is unproven, or another
+  Sub-Explorer level is requested.
 
-Parent wave plan path, lane boundaries, packet specs, dependencies, authority, `required_assurance`, expected handoff.
+## Algorithm
 
-## Responsibility
+1. Start fresh; verify parent authority, lane disjointness, dependencies, and
+   approved primary/fallback identity for each node.
+2. Dispatch fresh Crewmate sessions with only their bounded packet and evidence.
+3. Track returns by packet ID; preserve foreign changes and never write a packet.
+4. Reconcile lane evidence and return conflicts to the Explorer.
+5. Request assurance only at the recorded cadence boundary and only through the
+   parent coordinator.
 
-Orchestrate in-wave packets only. Maximum one Sub-explorer level. Never perform packets, expand parent wave authority, or assure results.
+## Return and recovery
 
-## Return
+Return `READY`, `REROUTED`, `WAITING_ON`, or `OWNER_DECISION_REQUIRED` with
+plan ref, role, subject, dependencies, scope, authority, evidence, blocker, next
+action, and receiver. Allow three evidence-changing corrections per lane.
 
-Handoff fields: `plan_ref`, `role`, `subject`, `depends_on`, `scope`, `authority`, `outcome`, `evidence`, `blocker`, `next_action`, `receiving_role`.
-
-Outcomes: `READY`, `REROUTED`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`. Receiver: Crewmate or Explorer.
-
-## Independence
-
-Dormant unless independence is proven. Does not substitute for Explorer, Trail Boss, or Navigator.
-
-## Correction
-
-Return lane conflicts to Explorer. Out-of-wave expansion escalates to parent coordinator.
+Never implement, add nesting, expand the wave, or provide assurance.

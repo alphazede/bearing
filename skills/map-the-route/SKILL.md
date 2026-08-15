@@ -1,33 +1,43 @@
 ---
 name: map-the-route
 description: >
-  Build the human-readable task graph when the outcome is approved but
-  executable tasks are missing. Use for map the route, implementation slices,
-  task graph, SEIT, or planning artifacts. Do not use to execute work, select
-  models, self-certify assurance, or advance journey state beyond planning.
+  Create or resume Bearing's topic-specific specification, design, SEIT,
+  implementation graph, and self-contained review HTML after decisions are
+  resolved. Use for Map the Route or missing planning artifacts. Do not use to
+  implement, select agents/models, self-approve, or bypass owner review.
 ---
 
 # Map the Route
 
-Procedural stage. Not a persona.
+Fresh planning node. The Router remains the plan-state writer and user contact.
 
-## Match / non-match
+## Inputs and match
 
-- **Match:** plan-spec/decisions are approved and executable task graph or planning package is incomplete.
-- **Non-match:** tasks already READY with roles and assurance; pure Crewmate packet work.
+- **Inputs:** confirmed decisions, repository map, artifact status, requirements,
+  owner-selected lineup/cadence, repository rules, and return schema.
+- **Match:** first specification gate or post-approval planning package is missing.
+- **Non-match:** executable tasks already map to current approved artifacts.
 
-## Inputs
+## Algorithm
 
-Approved goal, decisions, plan-spec, and required Role routes.
+1. Derive `<journey-topic>-spec.md` from the confirmed title and return the name
+   for owner verification before first write. Never require generic `plan-spec.md`.
+2. Write the testable specification and self-contained offline `review.html`.
+   Open the exact HTML in the user's browser and verify the launcher/process.
+3. After specification approval, select and record suitable design lenses
+   without asking unless owner intent changes. Write `design.md`, then `seit.md`;
+   draft `implementation.md` only after both prospective gates are complete.
+4. Give every slice stable requirement/design/SEIT IDs, dependencies, exact
+   write set, authority, fresh-session role, evidence, recovery, and stop rule.
+5. Copy the confirmed lineup and review cadence into implementation and HTML.
+   Show named active, standby, and unused role instances.
+6. Generate the final HTML with deep zoomable diagrams for architecture, state,
+   interactions, failures, dependencies, and ownership. Put the recommended
+   Journey path in Implementation, open it, and request owner approval.
 
-## Procedure
+## Return and recovery
 
-1. Author only missing planning artifacts: design, SEIT, and implementation slices as needed.
-2. For each task declare `depends_on`, assigned role, scope, authority, and `required_assurance` (explicit `none` allowed).
-3. Prefer the smallest valid route; leave dormant roles unselected.
-4. Keep IDs stable; cite acceptance and evidence expectations per task.
-5. Return artifact paths, blockers, and next planning or execution handoff without executing.
-
-## Never
-
-Implement product changes, invent owner approval, run phase gates as automatic, or claim independent assurance.
+Return `SPEC_REVIEW_READY`, `PLAN_REVIEW_READY`, `NEEDS_OWNER_DECISION`, or
+`VALIDATION_FAILED` with artifact paths, evidence, blocker, and next action.
+After final approval, `review.html` is authoritative. At most three
+evidence-changing correction rounds; never invent approval or implement.

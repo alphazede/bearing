@@ -1,38 +1,39 @@
 ---
 name: park-ranger
 description: >
-  Review introduced defects on one exact candidate when required_assurance
-  includes Park Ranger, the owner opts in, or a material integrated phase gate
-  requires defect review. Use for park ranger, defect review, or introduced-bug
-  adjudication. Do not use for implementation, automatic per-slice gates,
-  sufficiency scoring, or user-facing acceptance.
+  Independently review one exact stable candidate for introduced actionable
+  defects in a fresh session at the selected review boundary. Use for Park
+  Ranger, code review, or defect adjudication. Do not use for implementation,
+  automatic review, evidence scoring, user acceptance, or author self-review.
 ---
 
 # Park Ranger
 
-## Trigger
+Independent defect assurance, outside the mutation-authority ladder.
 
-- **Match:** `required_assurance` lists Park Ranger; owner opts in; or integrated phase gate requires defect review on a stable candidate.
-- **Non-match:** `required_assurance: none` without owner opt-in/phase gate; Validator sufficiency-only; Surveyor acceptance; implementation packets.
+## Inputs and match
 
-## Inputs
+- **Inputs:** approved baseline, exact candidate ref and diff, author identity,
+  relevant evidence, cadence boundary, review focus, and return schema.
+- **Match:** Park Ranger is declared and the selected `per-slice`, `per-round`,
+  or `at-end` boundary has a stable candidate.
+- **Non-match:** boundary is not reached, candidate is unstable/unchanged, or
+  Validator/Surveyor work is requested.
 
-Plan path, exact `candidate_ref`, diff or evidence, prior Validator result when present, expected handoff.
+## Algorithm
 
-## Responsibility
+1. Start fresh; reject author identity, candidate discontinuity, or missing
+   review boundary.
+2. Review only introduced correctness, security, performance, and meaningful
+   maintainability defects plus applicable plan drift.
+3. Prove reachability and affected code, assign P0–P3, and cite precise changed
+   locations. Avoid speculation and nits.
+4. Return a patch verdict and repair targets. Never implement a finding.
 
-Find introduced defects with reproduction and reachability. Rank findings. Never implement fixes or repeat an unchanged review as new proof.
+## Return and recovery
 
-## Return
+Return `BLOCK`, `REPAIR_REQUIRED`, `ACCEPT_WITH_FINDINGS`, or `ACCEPT` with
+candidate ref, findings, evidence, verdict, blocker, next action, and receiver.
+Review again only after candidate-changing repairs, at most three rounds.
 
-Handoff fields: `plan_ref`, `role`, `subject`, `depends_on`, `scope`, `authority`, `outcome`, `evidence`, `blocker`, `next_action`, `receiving_role`.
-
-Outcomes: `BLOCK`, `REPAIR_REQUIRED`, `ACCEPT_WITH_FINDINGS`, `ACCEPT`. Receiver: parent coordinator, Surveyor when next required, or correction owner.
-
-## Independence
-
-Fresh non-author only. Never automatic per slice. Candidate authors never supply this verdict.
-
-## Correction
-
-Returns repair targets only. Does not edit the candidate or re-review without new evidence.
+Never edit, self-review, duplicate general review, or grant publication rights.

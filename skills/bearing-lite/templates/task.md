@@ -2,6 +2,23 @@
 
 Use one compact Markdown block per task in the project's existing plan or progress document. Omit unused conditional fields. Prefer the project's format; add only missing fields. Do not create a Bearing-owned state file or hidden ledger.
 
+## Journey settings (record before task mapping)
+
+Record these plan-level choices once, above the task blocks:
+
+```markdown
+- journey: <Explorer Journey | Expedition>
+- review_cadence: <per-slice | per-round | at-end>
+- choice_basis: <owner-confirmed recommendation and reason>
+- lineup_snapshot: <named active, standby, and unused role instances>
+```
+
+`review_cadence` controls independent review frequency, not task-level tests or
+author self-checks. Never infer it from `required_assurance` on an individual
+task. `per-round` means after each integrated execution or correction round;
+`at-end` means one review of the final integrated candidate. The Router asks the
+owner to confirm both the applicable lineup and cadence before implementation.
+
 ## Always present
 
 ```markdown
