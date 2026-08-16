@@ -1,0 +1,35 @@
+{
+  "description": "Bearing Lite verified Claude Code and Codex mapping. Partial coverage: activation on SessionStart, closeout on Stop. Transition-order and protected-action remain procedural.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/com.anthropic.claude-code/host.cjs"
+            ],
+            "timeout": 15,
+            "statusMessage": "Bearing Lite activation"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/com.anthropic.claude-code/host.cjs"
+            ],
+            "timeout": 15,
+            "statusMessage": "Bearing Lite closeout"
+          }
+        ]
+      }
+    ]
+  }
+}

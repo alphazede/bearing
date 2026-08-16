@@ -163,34 +163,54 @@ describe("CMD-MANIFEST-01 plugin-manifest (SEIT-MANIFEST-01, SEIT-EXTENSION-01)"
     }
   });
 
-  it("keeps Codex and Claude install metadata aligned with Bearing Lite", () => {
-    const codex = JSON.parse(
-      readFileSync(path.join(ROOT, ".codex-plugin/plugin.json"), "utf8")
-    );
-    const claude = JSON.parse(
-      readFileSync(path.join(ROOT, ".claude-plugin/plugin.json"), "utf8")
-    );
-    const codexMarketplace = JSON.parse(
-      readFileSync(path.join(ROOT, ".agents/plugins/marketplace.json"), "utf8")
-    );
-    const claudeMarketplace = JSON.parse(
-      readFileSync(path.join(ROOT, ".claude-plugin/marketplace.json"), "utf8")
-    );
+  it("keeps host install metadata aligned with Bearing Lite", () => {
+    const readJson = (rel) => JSON.parse(readFileSync(path.join(ROOT, rel), "utf8"));
+    const claude = readJson(".claude-plugin/plugin.json");
+    const codex = readJson(".codex-plugin/plugin.json");
+    const grok = readJson(".grok-plugin/plugin.json");
+    const cursor = readJson(".cursor-plugin/plugin.json");
+    const kimi = readJson(".kimi-plugin/plugin.json");
+    const agy = readJson(".agy/plugin.json");
+    const pkg = readJson("package.json");
 
-    for (const manifest of [codex, claude]) {
+    for (const manifest of [claude, codex, grok, cursor, kimi]) {
       assert.equal(manifest.name, "bearing-lite");
-      assert.equal(manifest.version, "0.1.0");
       assert.equal(manifest.skills, "./skills/");
       assert.equal(manifest.mcpServers, undefined);
     }
-    assert.equal(codexMarketplace.name, "bearing-lite");
-    assert.equal(codexMarketplace.plugins[0].name, "bearing-lite");
-    assert.equal(
-      codexMarketplace.plugins[0].source.url,
-      "https://github.com/alphazede/bearing-lite.git"
-    );
-    assert.equal(claudeMarketplace.name, "bearing-lite");
-    assert.equal(claudeMarketplace.plugins[0].name, "bearing-lite");
+    for (const manifest of [claude, codex, grok]) {
+      // These hosts auto-load hooks/hooks.json. Declaring both duplicates.
+      assert.equal(manifest.hooks, undefined);
+    }
+    assert.equal(cursor.hooks, "./hooks/com.cursor/hooks.json");
+    assert.ok(Array.isArray(kimi.hooks));
+    assert.equal(kimi.hooks.length, 2);
+    assert.deepEqual(Object.keys(agy).sort(), ["description", "name"]);
+    assert.equal(agy.name, "bearing-lite");
+    assert.deepEqual(pkg.pi, { skills: ["./skills"] });
+    assert.ok(pkg.keywords.includes("pi-package"));
+
+    const portable = readJson("plugin.json");
+    assert.deepEqual(Object.keys(portable.hooks).sort(), [
+      "com.anthropic.claude-code.activation",
+      "com.anthropic.claude-code.closeout",
+      "com.cursor.ide.activation",
+      "com.cursor.ide.closeout",
+      "com.moonshotai.kimi-code.activation",
+      "com.moonshotai.kimi-code.closeout",
+      "com.openai.codex.activation",
+      "com.openai.codex.closeout",
+      "com.xai.grok-build.activation",
+      "com.xai.grok-build.closeout",
+    ]);
+    for (const entry of Object.values(portable.hooks)) {
+      assert.equal(entry.path, "./hooks/com.anthropic.claude-code/host.cjs");
+    }
+
+    assert.equal(readJson(".agents/plugins/marketplace.json").plugins[0].name, "bearing-lite");
+    assert.equal(readJson(".claude-plugin/marketplace.json").plugins[0].name, "bearing-lite");
+    assert.equal(readJson(".grok-plugin/marketplace.json").plugins[0].name, "bearing-lite");
+    assert.equal(readJson(".cursor-plugin/marketplace.json").plugins[0].name, "bearing-lite");
   });
 
   it("negative: floating / non-1.0.0 schema is rejected with typed diagnostic", () => {

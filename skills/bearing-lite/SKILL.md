@@ -16,7 +16,8 @@ consent to begin; do not ask for another start confirmation.
 
 Read the request, repository evidence, visible plan artifacts, and global lineup
 when present. The Router alone writes Journey planning state; no `.bearing`,
-CLI, MCP, scheduler, or hidden ledger.
+CLI, MCP, scheduler, or hidden ledger. Report hook coverage honestly: plugin
+hosts are partial; skill-copy is skills-only.
 
 ## Algorithm
 

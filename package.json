@@ -11,8 +11,12 @@
     "developer-tools",
     "skills-first",
     "evidence",
-    "code-review"
+    "code-review",
+    "pi-package"
   ],
+  "pi": {
+    "skills": ["./skills"]
+  },
   "author": "William Rumph / AlphaZede",
   "license": "Apache-2.0",
   "repository": {

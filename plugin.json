@@ -18,5 +18,37 @@
     "routing",
     "developer-tools",
     "skills-first"
-  ]
+  ],
+  "hooks": {
+    "com.anthropic.claude-code.activation": {
+      "path": "./hooks/com.anthropic.claude-code/host.cjs"
+    },
+    "com.anthropic.claude-code.closeout": {
+      "path": "./hooks/com.anthropic.claude-code/host.cjs"
+    },
+    "com.openai.codex.activation": {
+      "path": "./hooks/com.anthropic.claude-code/host.cjs"
+    },
+    "com.openai.codex.closeout": {
+      "path": "./hooks/com.anthropic.claude-code/host.cjs"
+    },
+    "com.xai.grok-build.activation": {
+      "path": "./hooks/com.anthropic.claude-code/host.cjs"
+    },
+    "com.xai.grok-build.closeout": {
+      "path": "./hooks/com.anthropic.claude-code/host.cjs"
+    },
+    "com.cursor.ide.activation": {
+      "path": "./hooks/com.anthropic.claude-code/host.cjs"
+    },
+    "com.cursor.ide.closeout": {
+      "path": "./hooks/com.anthropic.claude-code/host.cjs"
+    },
+    "com.moonshotai.kimi-code.activation": {
+      "path": "./hooks/com.anthropic.claude-code/host.cjs"
+    },
+    "com.moonshotai.kimi-code.closeout": {
+      "path": "./hooks/com.anthropic.claude-code/host.cjs"
+    }
+  }
 }

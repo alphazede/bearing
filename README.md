@@ -16,21 +16,45 @@ Bearing Lite was created by William Rumph.
 
 ## Install
 
-Install as an Agent Plugin in a compatible client (for example Codex or Claude
-Code marketplaces that discover Agent Plugins `plugin.json` and `skills/`).
+Install as a host plugin. The portable identity is always `bearing-lite` /
+`@alphazede/bearing-lite`. No postinstall script, global hook copy, or
+host-config mutation is required.
 
 ```sh
-# Example: npm package for packaging and inspection
-npm pack @alphazede/bearing-lite
+# Claude Code
+claude plugin marketplace add /path/to/bearing-lite
+claude plugin install bearing-lite@bearing-lite
+
+# Codex
+codex plugin marketplace add /path/to/bearing-lite
+codex plugin add bearing-lite@bearing-lite
+
+# Grok Build
+grok plugin marketplace add /path/to/bearing-lite
+grok plugin install bearing-lite --trust
+
+# Cursor
+# Add the checkout as a Cursor marketplace/plugin (.cursor-plugin/)
+
+# Kimi Code
+# /plugins install /path/to/bearing-lite
+
+# AGY (Antigravity) — install the .agy root, not the repo root
+agy plugin install /path/to/bearing-lite/.agy
+
+# Pi — skills package, no command hooks
+pi install git:github.com/alphazede/bearing-lite
 ```
 
-Client install names follow the host plugin UI. The portable identity is always
-`bearing-lite` / `@alphazede/bearing-lite`. No postinstall script, global hook
-copy, or host-config mutation is required.
+Claude Code, Codex, Grok Build, Cursor, and Kimi Code are **partial** hook
+clients: session start runs the activation advisory and stop runs the closeout
+advisory. AGY and Pi are **skills-only**. Transition-order and protected-action
+checks stay in the skills on every host. Node.js must be on `PATH` for the
+hook adapters.
 
-Node.js is not required to *use* the skills. Optional typed hook adapters under
-`hooks/` run only when a client registers them; hookless clients remain
-first-class and use procedural skill checks.
+**Skills-only copy** of `skills/` into a host skills directory does not
+register hooks. That path remains first-class. See
+[`hooks/com.anthropic.claude-code/mapping.md`](hooks/com.anthropic.claude-code/mapping.md).
 
 ## What it does
 
@@ -171,7 +195,7 @@ flowchart TD
 |---|---|
 | `plugin.json` | Agent Plugins v1.0.0 manifest |
 | `skills/` | Router, planning stages, and role skills |
-| `hooks/` | Optional client-specific sequencing adapters |
+| `hooks/` | Four portable class adapters plus the verified Claude Code / Codex mapping |
 | `README.md` and governance docs | Public product and conduct surfaces |
 
 There is no `mcp.json`, `bin` entrypoint, postinstall, or runtime dependency on
