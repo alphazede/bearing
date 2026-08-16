@@ -14,6 +14,27 @@ execution/correction round, or once at the end. Owner Authority remains human-on
 
 Bearing Lite was created by William Rumph.
 
+## Quick start with Pi
+
+Install the published skills package:
+
+```sh
+pi install npm:@alphazede/bearing-lite
+```
+
+Then give your agent a real task:
+
+> Use Bearing Lite to add rate limiting to this API without changing its public
+> responses. Require one independent review at the end.
+
+Bearing Lite asks whether the work is an Explorer Journey or an Expedition,
+fills only the missing planning stages, confirms the agent lineup and review
+cadence, and dispatches bounded sessions with visible Markdown state.
+
+If Bearing Lite helps keep a long agent task scoped and reviewable,
+[star the repository](https://github.com/alphazede/bearing-lite). It helps other
+coding-agent users find it.
+
 ## Install
 
 Install as a host plugin. The portable identity is always `bearing-lite` /
@@ -43,7 +64,7 @@ grok plugin install bearing-lite --trust
 agy plugin install /path/to/bearing-lite/.agy
 
 # Pi — skills package, no command hooks
-pi install git:github.com/alphazede/bearing-lite
+pi install npm:@alphazede/bearing-lite
 ```
 
 Claude Code, Codex, Grok Build, Cursor, and Kimi Code are **partial** hook
