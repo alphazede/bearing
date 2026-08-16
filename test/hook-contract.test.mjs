@@ -204,6 +204,15 @@ describe("CMD-HOOK-01 hook-contract (SEIT-HOOK-CLASS-01, SEIT-HOOK-COVERAGE-01)"
     }
   });
 
+  it("verified Claude Code / Codex hosts report the documented partial coverage", () => {
+    const host = require(path.join(HOOKS_DIR, "com.anthropic.claude-code/host.cjs"));
+    const expected = reportHookCoverage("partial");
+    assert.equal(expected.ok, true);
+    assert.deepEqual(host.COVERAGE, expected.coverage);
+    assert.equal(host.COVERAGE.transition.executable, false);
+    assert.equal(host.COVERAGE.protected_action.executable, false);
+  });
+
   it("negative: claiming unsupported class as executable enforcement fails", () => {
     const verdict = reportHookCoverage("skills-only", {
       claimExecutable: ["protected_action", "transition"],

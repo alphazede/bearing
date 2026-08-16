@@ -1,0 +1,15 @@
+{
+  "description": "Bearing Lite Cursor mapping. Partial coverage: sessionStart activation, stop closeout. Transition-order and protected-action remain procedural.",
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "node ./hooks/com.anthropic.claude-code/host.cjs"
+      }
+    ],
+    "stop": [
+      {
+        "command": "node ./hooks/com.anthropic.claude-code/host.cjs"
+      }
+    ]
+  }
+}

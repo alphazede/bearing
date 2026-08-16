@@ -1,0 +1,36 @@
+{
+  "name": "bearing-lite",
+  "version": "0.1.0",
+  "description": "Skills-first portable planning, routing, bounded execution, and independent assurance for repository work.",
+  "author": {
+    "name": "William Rumph / AlphaZede"
+  },
+  "homepage": "https://github.com/alphazede/bearing-lite",
+  "license": "Apache-2.0",
+  "keywords": [
+    "planning",
+    "workflow",
+    "repository",
+    "developer-tools",
+    "skills-first"
+  ],
+  "skills": "./skills/",
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "command": "node ./hooks/com.anthropic.claude-code/host.cjs",
+      "timeout": 15
+    },
+    {
+      "event": "Stop",
+      "command": "node ./hooks/com.anthropic.claude-code/host.cjs",
+      "timeout": 15
+    }
+  ],
+  "interface": {
+    "displayName": "Bearing Lite",
+    "shortDescription": "Skills-first repository workflow.",
+    "longDescription": "Plan, route, execute, and independently review bounded repository work with portable skills.",
+    "developerName": "William Rumph / AlphaZede"
+  }
+}

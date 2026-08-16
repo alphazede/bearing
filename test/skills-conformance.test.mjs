@@ -326,6 +326,8 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(router, /Is this a\s+good lineup for the roles on this Journey\?/);
     assert.match(router, /per slice, per round, or\s+at the end\?/);
     assert.match(router, /Router alone writes Journey\s+planning state/);
+    assert.match(router, /plugin\s+hosts are partial/);
+    assert.match(router, /skill-copy is skills-only/);
     assert.match(router, /Every node gets a fresh session/);
     assert.match(router, /If .*default-role-lineup\.md` is absent, create a\s+proposed copy/);
     assert.match(router, /Never infer identity values/);

@@ -4,7 +4,8 @@
 /**
  * Bearing Lite activation/context advisory adapter (CONTRACT-HOOK-01).
  * Advisory only: outcomes are ADVISE or UNAVAILABLE. Never fabricates BLOCK.
- * Skills-only clients: enforcement remains procedural until a verified host maps it.
+ * Skills-only clients: enforcement remains procedural. Claude Code and Codex
+ * use the verified partial mapping in hooks/com.anthropic.claude-code/.
  */
 
 const HOOK_CLASS = "activation";

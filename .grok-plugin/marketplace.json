@@ -1,0 +1,16 @@
+{
+  "name": "bearing-lite",
+  "description": "Skills-first planning and execution roles for bounded repository work.",
+  "owner": {
+    "name": "William Rumph / AlphaZede",
+    "url": "https://github.com/alphazede"
+  },
+  "plugins": [
+    {
+      "name": "bearing-lite",
+      "description": "Route repository work through portable planning, execution, and assurance skills.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
