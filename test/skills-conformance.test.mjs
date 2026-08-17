@@ -341,7 +341,7 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
         "ordinary repository routing must not invoke Bearing Lite"
       );
     }
-    assert.match(router, /Gathering Supplies for this Journey\./);
+    assert.match(router, /Preparing this Journey\./);
     assert.match(
       router,
       /What Journey shall\s+we Embark on—an Explorer Journey or an Expedition\?/
@@ -351,9 +351,21 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(router, /Router alone writes Journey\s+planning state/);
     assert.match(router, /plugin\s+hosts are partial/);
     assert.match(router, /skill-copy is skills-only/);
-    assert.match(router, /Every node gets a fresh session/);
+    assert.match(router, /Every ready node gets a fresh session/);
     assert.match(router, /If .*default-role-lineup\.md` is absent, create a\s+proposed copy/);
     assert.match(router, /Never infer identity values/);
+    assert.match(router, /planning\s+nodes return owner questions/);
+    assert.match(router, /one cheaper and one more expensive alternative/);
+    assert.match(router, /what each gives up or buys/);
+    assert.match(router, /record the named default explicitly/);
+    const route = router.indexOf("What Journey shall");
+    const planning = router.indexOf("Repository Fit");
+    const lineup = router.indexOf("Is this a");
+    const cadence = router.indexOf("How often would you like");
+    const map = router.indexOf("Invoke Map the Route");
+    assert.ok(route >= 0 && route < planning, "route choice must precede planning stages");
+    assert.ok(lineup >= 0 && lineup < map, "lineup gate must precede task mapping");
+    assert.ok(cadence >= 0 && cadence < map, "cadence gate must precede task mapping");
   });
 
   it("execution roles revalidate the visible checkout lease at every acting boundary", () => {

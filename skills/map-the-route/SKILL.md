@@ -14,7 +14,7 @@ Fresh planning node. The Router remains the plan-state writer and user contact.
 ## Inputs and match
 
 - **Inputs:** confirmed decisions, repository map, artifact status, requirements,
-  owner-selected lineup/cadence, repository rules, and return schema.
+  owner-selected route/lineup/cadence, repository rules, and return schema.
 - **Match:** first specification gate or post-approval planning package is missing.
 - **Non-match:** executable tasks already map to current approved artifacts.
 
@@ -29,8 +29,8 @@ Fresh planning node. The Router remains the plan-state writer and user contact.
    draft `implementation.md` only after both prospective gates are complete.
 4. Give every slice stable requirement/design/SEIT IDs, dependencies, exact
    write set, authority, fresh-session role, evidence, recovery, and stop rule.
-5. Copy the confirmed lineup and review cadence into implementation and HTML.
-   Show named active, standby, and unused role instances.
+5. Copy the confirmed route, lineup, and review cadence into implementation and
+   HTML. Show named active, standby, and unused role instances.
 6. Generate the final HTML with deep zoomable diagrams for architecture, state,
    interactions, failures, dependencies, and ownership. Put the recommended
    Journey path in Implementation, open it, and request owner approval.
