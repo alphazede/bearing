@@ -27,7 +27,8 @@ Fresh planning node. It returns evidence; the Router records the decision.
    owner evidence with a typed finding.
 4. Propose exactly one repository and one plan-directory assumption with path
    evidence and a short reason.
-5. Ask one owner confirmation question. A recommendation is not confirmation.
+5. Return one owner confirmation question through the Router. A recommendation
+   is not confirmation.
 
 ## Return and recovery
 
