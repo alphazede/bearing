@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -201,6 +202,24 @@ describe("CMD-HANDOFF-01 role-handoff (SEIT-HANDOFF-01)", () => {
       assert.equal(verdict.action, "reroute");
       assert.ok(verdict.diagnostics.some((d) => d.code === "candidate_mismatch"));
     }
+  });
+
+  it("Direct and Expedition bound exhaustion name candidate and count", () => {
+    const router = readFileSync(
+      path.join(ROOT, "skills/bearing-lite/SKILL.md"),
+      "utf8"
+    );
+    const navigator = readFileSync(
+      path.join(ROOT, "skills/navigator/SKILL.md"),
+      "utf8"
+    );
+    assert.match(router, /Direct route/);
+    assert.match(router, /OWNER_DECISION_REQUIRED` naming the candidate and count/);
+    assert.match(navigator, /OWNER_DECISION_REQUIRED` with\s+candidate and count/);
+    assert.doesNotMatch(
+      router,
+      /only when Navigator|requires Navigator to bound|inherited from Bearing's Navigator/i
+    );
   });
 
   it("closeout protected completion BLOCKs on candidate mismatch", () => {

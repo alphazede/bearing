@@ -43,6 +43,34 @@ const INCOMPLETE_PLAN = `# Notes
 - next_action: <smallest concrete next step>
 `;
 
+const COMPLETE_PLAN = `# Journey
+
+- journey: Explorer Journey
+- review_cadence: per-round
+
+### task_id: T1
+- outcome: PASS
+- status: IN_PROGRESS
+- assigned_role: crewmate
+- depends_on: []
+- next_action: confirm closeout
+- scope: hooks/
+- authority: S7
+- required_assurance: none
+- evidence: host-mapping tests
+- receiving_role: explorer
+- blocker: none
+`;
+
+function assertQuietSuccess(response) {
+  assert.notEqual(response.decision, "block");
+  assert.equal(response.reason, undefined);
+  const serialized = JSON.stringify(response);
+  assert.doesNotMatch(serialized, /additionalContext/);
+  assert.doesNotMatch(serialized, /handoff_incomplete/);
+  assert.doesNotMatch(serialized, /"decision"\s*:\s*"block"/);
+}
+
 function writePlan(dir, markdown, filename = "PLAN.md") {
   writeFileSync(path.join(dir, filename), markdown);
 }
@@ -236,5 +264,161 @@ describe("verified host mapping", () => {
     assert.equal(result.status, 0, result.stderr);
     const parsed = JSON.parse(result.stdout);
     assert.match(parsed.hookSpecificOutput.additionalContext, /UNAVAILABLE/);
+  });
+
+  it("Stop re-entry with stop_hook_active does not request another continuation", () => {
+    const cwd = path.join(tmp, "stop-reentry");
+    mkdirSync(cwd);
+    writePlan(cwd, READY_PLAN);
+    const payload = {
+      session_id: "abc123",
+      transcript_path: "/tmp/transcript.jsonl",
+      cwd,
+      permission_mode: "default",
+      hook_event_name: "Stop",
+      stop_hook_active: true,
+      last_assistant_message: "I've completed the refactoring. Here's a summary...",
+    };
+    const response = host.handle(payload);
+    assertQuietSuccess(response);
+
+    const result = runHost(payload);
+    assert.equal(result.status, 0, result.stderr);
+    assertQuietSuccess(JSON.parse(result.stdout));
+  });
+
+  it("SubagentStop re-entry with stop_hook_active does not request another continuation", () => {
+    const cwd = path.join(tmp, "subagent-reentry");
+    mkdirSync(cwd);
+    writePlan(cwd, READY_PLAN);
+    const response = host.handle({
+      session_id: "abc123",
+      cwd,
+      hook_event_name: "SubagentStop",
+      stop_hook_active: true,
+      agent_id: "def456",
+      agent_type: "Explore",
+    });
+    assertQuietSuccess(response);
+  });
+
+  it("Stop with no Journey, plan, active task, or assigned role terminates quietly", () => {
+    const cwd = path.join(tmp, "empty-stop");
+    mkdirSync(cwd);
+    const response = host.handle({
+      session_id: "s-empty-stop",
+      transcript_path: "/tmp/transcript.jsonl",
+      cwd,
+      hook_event_name: "Stop",
+    });
+    assertQuietSuccess(response);
+    assert.doesNotMatch(JSON.stringify(response), /closeout/);
+  });
+
+  it("active incomplete Journey still reports the specific missing handoff fields", () => {
+    const cwd = path.join(tmp, "incomplete-journey");
+    mkdirSync(cwd);
+    writePlan(cwd, INCOMPLETE_PLAN);
+    const response = host.handle({
+      session_id: "s-incomplete",
+      cwd,
+      hook_event_name: "Stop",
+    });
+    const context = response.hookSpecificOutput.additionalContext;
+    assert.match(context, /handoff_incomplete:/);
+    assert.match(context, /role/);
+    assert.match(context, /scope/);
+    assert.match(context, /authority/);
+    assert.match(context, /evidence/);
+    assert.match(context, /receiving_role/);
+    assert.notEqual(response.decision, "block");
+  });
+
+  it("active complete Journey preserves documented advisory closeout", () => {
+    const cwd = path.join(tmp, "complete-journey");
+    mkdirSync(cwd);
+    writePlan(cwd, COMPLETE_PLAN);
+    const response = host.handle({
+      session_id: "s-complete",
+      cwd,
+      hook_event_name: "Stop",
+    });
+    const context = response.hookSpecificOutput.additionalContext;
+    assert.match(context, /closeout/);
+    assert.match(context, /handoff_complete/);
+    assert.doesNotMatch(context, /handoff_incomplete/);
+    assert.doesNotMatch(context, /protected_completion/);
+    assert.notEqual(response.decision, "block");
+  });
+
+  it("first-pass Stop discovers a journey-marker-only plan", () => {
+    const cwd = path.join(tmp, "journey-marker-only");
+    mkdirSync(cwd);
+    writePlan(
+      cwd,
+      `# Lease-first notes
+
+- journey: Explorer Journey
+`
+    );
+    const derived = host.deriveContext(cwd);
+    assert.equal(derived.plan_present, true);
+    assert.equal(derived.router_invoked, true);
+    assert.equal(derived.assigned_role, undefined);
+    assert.equal(derived.active_task, null);
+
+    const response = host.handle({
+      session_id: "s-journey-marker",
+      cwd,
+      hook_event_name: "Stop",
+    });
+    assert.match(response.hookSpecificOutput.additionalContext, /closeout|ADVISE/);
+    assert.notEqual(response.decision, "block");
+  });
+
+  it("first-pass Stop discovers a checkout_lease-only plan", () => {
+    const cwd = path.join(tmp, "lease-only");
+    mkdirSync(cwd);
+    writePlan(
+      cwd,
+      `# Visible lease
+
+- checkout_lease:
+  - journey: J-A
+  - controller: Router
+  - repository: alphazede/bearing-lite
+  - checkout: wt-main
+  - branch: main
+  - candidate_revision: 4040dfe
+  - acquired_at: 2026-08-18T00:00:00Z
+  - generation: 1
+  - state: active
+`
+    );
+    const derived = host.deriveContext(cwd);
+    assert.equal(derived.plan_present, true);
+    assert.equal(derived.active_task, null);
+
+    const response = host.handle({
+      session_id: "s-lease-only",
+      cwd,
+      hook_event_name: "Stop",
+    });
+    assert.match(response.hookSpecificOutput.additionalContext, /closeout|ADVISE/);
+    assert.notEqual(response.decision, "block");
+  });
+
+  it("mapping.md documents quiet Stop cases and first-pass discoverable Journey context", () => {
+    const mapping = readFileSync(
+      path.join(ROOT, "hooks/com.anthropic.claude-code/mapping.md"),
+      "utf8"
+    );
+    assert.match(mapping, /stop_hook_active/);
+    assert.match(mapping, /quiet success/i);
+    assert.match(mapping, /no discoverable Journey/);
+    assert.match(mapping, /discoverable Journey/);
+    assert.match(mapping, /additionalContext/);
+    assert.match(mapping, /checkout_lease/);
+    assert.match(mapping, /journey marker/);
   });
 });

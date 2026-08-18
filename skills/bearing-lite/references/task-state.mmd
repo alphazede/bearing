@@ -1,7 +1,7 @@
 stateDiagram-v2
     [*] --> PROPOSED
     PROPOSED --> READY
-    PROPOSED --> WAITING_ON
+    PROPOSED --> WAITING_ON: named prerequisite or checkout-lease conflict
     WAITING_ON --> READY: prerequisite satisfied
     WAITING_ON --> EVIDENCE_READY: fresh assurance available
     WAITING_ON --> CANCELLED

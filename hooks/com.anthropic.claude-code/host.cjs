@@ -53,7 +53,8 @@ const TASK_MARK = /(?:^|\n)###\s*task_id:\s*\S+/;
 const TASK_LINE = /^###\s*task_id:\s*(\S+)\s*$/;
 const FIELD_LINE =
   /^-\s*(assigned_role|next_action|status|required_assurance|blocker|evidence|candidate_ref|scope|authority|outcome|depends_on|receiving_role|plan_ref|role|subject):\s*(.*)$/;
-const JOURNEY_LINE = /^-\s*journey:\s*(.+)$/i;
+const JOURNEY_LINE = /^\s*-\s*journey:\s*(.+)$/i;
+const LEASE_MARK = /^\s*-\s*checkout_lease:/m;
 
 const ACTIVATION_EVENTS = new Set([
   "SessionStart",
@@ -63,6 +64,7 @@ const ACTIVATION_EVENTS = new Set([
   "SubagentStart",
 ]);
 const CLOSEOUT_EVENTS = new Set(["Stop", "SubagentStop", "SessionEnd"]);
+const STOP_CONTINUATION_EVENTS = new Set(["Stop", "SubagentStop"]);
 
 const EVENT_ALIASES = Object.freeze({
   sessionstart: "SessionStart",
@@ -212,9 +214,13 @@ function deriveContext(cwd) {
     } catch {
       continue;
     }
-    if (!TASK_MARK.test(text) && !/^-\s*assigned_role:/m.test(text)) continue;
-    planPresent = true;
     const parsed = parsePlanMarkdown(text);
+    const hasAssignedRole = /^-\s*assigned_role:/m.test(text);
+    const hasLease = LEASE_MARK.test(text);
+    if (!TASK_MARK.test(text) && !hasAssignedRole && !parsed.journey && !hasLease) {
+      continue;
+    }
+    planPresent = true;
     if (parsed.journey) journey = parsed.journey;
     for (const task of parsed.tasks) allTasks.push(task);
   }
@@ -246,6 +252,28 @@ function classForEvent(eventName) {
   if (ACTIVATION_EVENTS.has(canonical)) return "activation";
   if (CLOSEOUT_EVENTS.has(canonical)) return "closeout";
   return null;
+}
+
+function isTruthyFlag(value) {
+  return value === true || value === "true";
+}
+
+function isStopReentry(input, eventName) {
+  if (!STOP_CONTINUATION_EVENTS.has(eventName)) return false;
+  return isTruthyFlag(input.stop_hook_active) || isTruthyFlag(input.stopHookActive);
+}
+
+function hasDiscoverableJourney(derived) {
+  return (
+    derived.plan_present === true ||
+    derived.router_invoked === true ||
+    Boolean(derived.assigned_role) ||
+    derived.active_task != null
+  );
+}
+
+function quietSuccess() {
+  return {};
 }
 
 function formatAdvice(verdict) {
@@ -346,6 +374,10 @@ function handle(input) {
     return unavailableHost(eventName || "SessionStart", "unmapped_host_event");
   }
 
+  if (isStopReentry(parsed, eventName)) {
+    return quietSuccess();
+  }
+
   const cwd =
     presentString(parsed.cwd) ||
     presentString(parsed.workspaceRoot) ||
@@ -359,6 +391,10 @@ function handle(input) {
       eventName,
       activation.evaluate({ infrastructure_failure: "permission_error" })
     );
+  }
+
+  if (STOP_CONTINUATION_EVENTS.has(eventName) && !hasDiscoverableJourney(derived)) {
+    return quietSuccess();
   }
 
   return toHostResponse(eventName, evaluateForHost(eventName, derived));

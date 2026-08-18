@@ -11,14 +11,8 @@ flowchart TD
     J -->|Explorer Journey: one packet| C[Fresh Crewmate]
     J -->|Explorer Journey: one wave| E[Fresh Explorer]
     J -->|Expedition| N[Fresh Navigator]
-    N --> TB{Concurrent or conflicting waves?}
-    TB -->|yes| T[Fresh Trail Boss]
-    TB -->|no| E
-    T --> E
-    E --> X{Two or more proven-independent lanes?}
-    X -->|yes| SE[Fresh Sub-Explorer]
-    SE --> C
-    X -->|no| C
+    N --> E
+    E --> C
     C --> A{Selected cadence boundary?}
     A -->|Validator declared| V[Fresh Validator]
     A -->|Park Ranger declared| PK[Fresh Park Ranger]
