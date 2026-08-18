@@ -4,6 +4,19 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const TASK_STATE = readFileSync(
+  path.join(ROOT, "skills/bearing-lite/references/task-state.md"),
+  "utf8"
+);
+const ROUTER = readFileSync(
+  path.join(ROOT, "skills/bearing-lite/SKILL.md"),
+  "utf8"
+);
 
 /**
  * @typedef {{
@@ -155,6 +168,22 @@ export function dependencyClosure(tasks, failedId, opts = {}) {
 }
 
 describe("CMD-RECOVERY-01 recovery (SEIT-CORRECTION-01, SEIT-DEPENDENCY-01)", () => {
+  it("task-state records checkout-lease release and stale recovery", () => {
+    assert.match(TASK_STATE, /Checkout lease/);
+    assert.match(TASK_STATE, /generation-bound checkout lease/);
+    assert.match(TASK_STATE, /checkout-lease conflict/);
+    assert.match(TASK_STATE, /sanitized/);
+    assert.match(TASK_STATE, /same generation/);
+    assert.match(TASK_STATE, /exactly\s+once/);
+    assert.match(TASK_STATE, /Stale recovery/);
+    assert.match(TASK_STATE, /increments generation/);
+    assert.match(TASK_STATE, /cannot\s+steal a live lease/);
+    assert.match(TASK_STATE, /fail closed/);
+    assert.match(ROUTER, /release the checkout lease exactly once/);
+    assert.match(ROUTER, /explicit recorded generation increment/);
+    assert.match(ROUTER, /cannot steal a live lease/);
+  });
+
   it("correction attempts 1 and 2 require new evidence/hypothesis and return READY", () => {
     let task = {
       taskId: "T1",

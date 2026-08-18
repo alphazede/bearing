@@ -22,8 +22,6 @@ const ROLES = [
   "crewmate",
   "explorer",
   "navigator",
-  "trail-boss",
-  "sub-explorer",
   "validator",
   "park-ranger",
   "surveyor",
@@ -207,8 +205,8 @@ function listSkillDirsWithSkillMd() {
 describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)", () => {
   const skillDirs = listSkillDirsWithSkillMd();
 
-  it("catalog is exactly 1 router + 4 planning + 8 roles = 13 SKILL.md", () => {
-    assert.equal(EXPECTED_CATALOG.length, 13);
+  it("catalog is exactly 1 router + 4 planning + 6 roles = 11 SKILL.md", () => {
+    assert.equal(EXPECTED_CATALOG.length, 11);
     assert.deepEqual(skillDirs, [...EXPECTED_CATALOG].sort());
     const catalogVerdict = validateCatalog(skillDirs);
     assert.equal(catalogVerdict.ok, true, JSON.stringify(catalogVerdict));
@@ -232,6 +230,31 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
         (d) => d.code === "unexpected_skill" && d.skill === "delegate-authority"
       )
     );
+  });
+
+  it("no Trail Boss or Sub-Explorer skill remains", () => {
+    for (const name of ["trail-boss", "sub-explorer"]) {
+      assert.ok(!skillDirs.includes(name));
+      assert.ok(!existsSync(path.join(SKILLS_DIR, name, "SKILL.md")));
+      const negative = validateCatalog([...skillDirs, name]);
+      assert.equal(negative.ok, false);
+      assert.ok(
+        negative.diagnostics.some((d) => d.code === "unexpected_skill" && d.skill === name)
+      );
+    }
+  });
+
+  it("Explorer owns proven-independent lanes; Navigator owns cross-wave conflicts", () => {
+    const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
+    const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
+    const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
+    assert.match(explorer, /proven-independent/);
+    assert.match(explorer, /never add a\s+nested coordinator/);
+    assert.doesNotMatch(explorer, /Trail Boss|Sub-Explorer|trail-boss|sub-explorer/);
+    assert.match(navigator, /cross-wave/);
+    assert.match(navigator, /conflict/);
+    assert.doesNotMatch(navigator, /Trail Boss|Sub-Explorer|trail-boss|sub-explorer/);
+    assert.doesNotMatch(router, /Trail Boss|Sub-Explorer|trail-boss|sub-explorer/);
   });
 
   it("each skill frontmatter name equals directory and description is present", () => {
@@ -333,11 +356,110 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(router, /Never infer identity values/);
   });
 
+  it("execution roles revalidate the visible checkout lease at every acting boundary", () => {
+    const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
+    const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
+    const crewmate = readFileSync(path.join(SKILLS_DIR, "crewmate", "SKILL.md"), "utf8");
+    const identity =
+      /Revalidate the visible checkout\s+lease against the approved Journey,\s+repository, checkout\/worktree, branch,\s+candidate revision, generation,\s+and active state/;
+    const failClosed =
+      /Released, stale-generation,\s+forged, or\s+branch\/HEAD-drifted leases fail closed/;
+    for (const [name, text] of [
+      ["navigator", navigator],
+      ["explorer", explorer],
+      ["crewmate", crewmate],
+    ]) {
+      assert.match(text, identity, `${name} must revalidate the full lease identity`);
+      assert.match(text, /before the first write/, `${name} must revalidate before first write`);
+      assert.match(text, failClosed, `${name} must fail closed on drifted or forged leases`);
+    }
+    assert.match(
+      navigator,
+      /before the first write,\s+dispatch, integration, or cross-wave transition/
+    );
+    assert.match(navigator, /same valid lease\s+continues\s+without duplicate dispatch/);
+    assert.match(explorer, /before the first write,\s+dispatch, or integration/);
+    assert.match(explorer, /same valid lease\s+continues\s+without duplicate dispatch/);
+    assert.match(crewmate, /before the first write\s+and\s+every mutation/);
+    assert.match(crewmate, /return WAITING_ON without writing/);
+  });
+
+  it("recorded Journey lineup snapshot outranks later global-default edits", () => {
+    const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
+    const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
+    const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
+    const crewmate = readFileSync(path.join(SKILLS_DIR, "crewmate", "SKILL.md"), "utf8");
+    assert.match(router, /recorded snapshot is authoritative for this Journey/);
+    assert.match(
+      router,
+      /Later edits to\s+`~\/\.agents\/bearing-lite\/default-role-lineup\.md` have no effect on it/
+    );
+    assert.match(router, /explicit owner-confirmed\s+dated visible amendment/);
+    assert.match(router, /lineup identity from the recorded snapshot/);
+    for (const [name, text] of [
+      ["navigator", navigator],
+      ["explorer", explorer],
+      ["crewmate", crewmate],
+    ]) {
+      assert.match(
+        text,
+        /recorded Journey snapshot/,
+        `${name} must read identities from the Journey snapshot`
+      );
+      assert.match(
+        text,
+        /never\s+from\s+the\s+current\s+global\s+defaults\s+file/,
+        `${name} must not reread the global defaults file`
+      );
+    }
+  });
+
   it("at-end assurance occurs once at the Journey boundary", () => {
     const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
     const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
     assert.match(explorer, /Expedition wave defers assurance to the Navigator's\s+final Journey boundary/);
     assert.match(navigator, /only the final integrated outcome/);
+  });
+
+  it("Bearing Lite names max_assurance_rounds and every coordinator honors it", () => {
+    const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
+    const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
+    const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
+    assert.match(router, /`max_assurance_rounds` is 3/);
+    assert.match(router, /candidate lineage/);
+    assert.match(router, /assurance_rounds/);
+    assert.match(router, /Direct route/);
+    assert.match(router, /Navigator is not\s+required|does not depend on Navigator/);
+    assert.match(
+      router,
+      /OWNER_DECISION_REQUIRED` naming the candidate and count/
+    );
+    assert.match(router, /new candidate lineage resets/);
+    for (const [name, text] of [
+      ["explorer", explorer],
+      ["navigator", navigator],
+    ]) {
+      assert.match(text, /max_assurance_rounds/, `${name} must honor the Lite bound`);
+      assert.match(text, /assurance_rounds/, `${name} must read the visible count`);
+      assert.match(
+        text,
+        /OWNER_DECISION_REQUIRED` with\s+candidate and count/,
+        `${name} must escalate with candidate and count`
+      );
+    }
+  });
+
+  it("Validator and Park Ranger declare terminal versus bounded-correction outcomes", () => {
+    const validator = readFileSync(path.join(SKILLS_DIR, "validator", "SKILL.md"), "utf8");
+    const park = readFileSync(path.join(SKILLS_DIR, "park-ranger", "SKILL.md"), "utf8");
+    assert.match(validator, /`PASS` is terminal/);
+    assert.match(validator, /`NEEDS_MORE_EVIDENCE` and `FAIL` permit bounded\s+correction/);
+    assert.match(validator, /max_assurance_rounds/);
+    assert.match(park, /`ACCEPT`, `ACCEPT_WITH_FINDINGS`, and `BLOCK` are terminal/);
+    assert.match(park, /`REPAIR_REQUIRED`\s+permits bounded correction/);
+    assert.match(park, /ACCEPT_WITH_FINDINGS` accepts residual/);
+    assert.match(park, /do not follow it with another repair/);
+    assert.match(park, /max_assurance_rounds/);
   });
 
   it("Gather Supplies converges one recommended question at a time", () => {
@@ -385,5 +507,23 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     const verdict = validateCatalog([...EXPECTED_CATALOG, "crewmate"]);
     assert.equal(verdict.ok, false);
     assert.ok(verdict.diagnostics.some((d) => d.code === "duplicate_contract"));
+  });
+
+  it("does not package stale role-routing or task-state PNGs", () => {
+    const assets = path.join(SKILLS_DIR, "bearing-lite", "assets");
+    assert.equal(existsSync(path.join(assets, "role-routing.png")), false);
+    assert.equal(existsSync(path.join(assets, "task-state.png")), false);
+    const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+    assert.doesNotMatch(readme, /task-state\.png/);
+    assert.doesNotMatch(readme, /role-routing\.png/);
+    assert.match(readme, /task-state\.mmd/);
+    assert.match(readme, /checkout-lease[\s-]+conflict/);
+    assert.match(readme, /WAITING_ON/);
+    const mermaid = readFileSync(
+      path.join(SKILLS_DIR, "bearing-lite", "references", "task-state.mmd"),
+      "utf8"
+    );
+    assert.match(mermaid, /checkout-lease conflict/);
+    assert.match(mermaid, /WAITING_ON/);
   });
 });

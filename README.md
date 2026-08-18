@@ -96,11 +96,11 @@ the applicable Journey snapshot before implementation.
 | Route | When | Cost |
 |---|---|---|
 | **Explorer Journey** | One bounded packet or one wave | Direct Crewmate or one Explorer |
-| **Expedition** | Multi-phase or concurrent independent lanes | Navigator; Trail Boss only for concurrent/conflicting waves |
+| **Expedition** | Multi-phase or concurrent independent lanes | Navigator |
 
 An **Explorer Journey** uses a direct Crewmate for one ready packet or one
 Explorer over a compact/sequential wave.
-**Expedition** adds navigation (and sometimes a Trail Boss) so independent lanes
+**Expedition** adds navigation so independent lanes
 stay small and sharp instead of degrading in one long context. Either shape can
 use substantial tokens; the product does not impose a default budget ceiling.
 
@@ -112,8 +112,9 @@ The text below remains authoritative for clients that do not render Mermaid.
 **Authoritative text (vision optional):** Owner Authority remains human-only. The
 Bearing Lite Router is the stateful planning controller, not a work role. It
 invokes only missing planning stages in fresh sessions, confirms the owner's
-lineup and cadence, then dispatches an Explorer Journey or Expedition. Nested
-Sub-Explorer opens only for proven-independent lanes. Validator, Park Ranger,
+lineup and cadence, then dispatches an Explorer Journey or Expedition. Explorer
+coordinates proven-independent in-wave lanes without a nested coordinator.
+Validator, Park Ranger,
 and Surveyor appear only when declared and when the selected per-slice,
 per-round, or at-end boundary is reached. Diagrams explain orientation; they
 never authorize a transition.
@@ -123,10 +124,8 @@ never authorize a transition.
 | Role | What it is | Executes | Notes |
 |---|---|---|---|
 | **Router** | Stateful planning controller | no | User-facing; planning-state writer |
-| **Navigator** | Expedition orchestrator | no | Owns cross-wave sequencing |
-| **Trail Boss** | Multi-wave controller | no | Only concurrent or conflicting waves |
-| **Explorer** | One-wave controller | no | Dispatches Crewmates |
-| **Sub-explorer** | Nested lane controller | no | Only when lanes are proven independent |
+| **Navigator** | Expedition orchestrator | no | Owns cross-wave sequencing and conflicts |
+| **Explorer** | One-wave controller | no | Dispatches Crewmates; owns proven-independent lanes |
 | **Crewmate** | Bounded implementer | yes | Most hands-on work; exact write set |
 | **Validator** | Evidence sufficiency | no | Independent of the author |
 | **Park Ranger** | Defect review | no | Independent of the author |
@@ -141,21 +140,21 @@ Failure escalates to the nearest role whose scope can see it:
 | Failure scope | Escalates to |
 |---|---|
 | Within one slice or packet | Explorer or nearest parent |
-| Across slices in a wave | Trail Boss when present, else Navigator |
-| Across phases | Navigator |
+| Across slices in a wave | Explorer |
+| Across waves or phases | Navigator |
 | Contract, security, or authority change | Owner Authority |
 
 ## Task state (explanatory)
 
-![Bearing Lite task state machine: PROPOSED through READY, IN_PROGRESS, EVIDENCE_READY, optional VALIDATING or REVIEWING, ACCEPTANCE, COMPLETE, with WAITING_ON, CORRECTION_REQUIRED, OWNER_DECISION_REQUIRED, and CANCELLED paths](skills/bearing-lite/assets/task-state.png)
-
-Reviewable Mermaid source: [`skills/bearing-lite/references/task-state.mmd`](skills/bearing-lite/references/task-state.mmd).
+Current task-state diagram source: [`skills/bearing-lite/references/task-state.mmd`](skills/bearing-lite/references/task-state.mmd).
+The text below remains authoritative for clients that do not render Mermaid.
 Authoritative transition rules: [`skills/bearing-lite/references/task-state.md`](skills/bearing-lite/references/task-state.md).
 
 **Authoritative summary:** The project's plan is the only task-state record.
 Normal progress is `PROPOSED` → `READY` → `IN_PROGRESS` → `EVIDENCE_READY`, then
 optional `VALIDATING` / `REVIEWING` when required, then `ACCEPTANCE` →
-`COMPLETE`. `WAITING_ON` holds for missing prerequisites or assurance dispatch.
+`COMPLETE`. `WAITING_ON` holds for missing prerequisites, checkout-lease
+conflict, or assurance dispatch.
 `CORRECTION_REQUIRED` allows two in-authority repairs; a third failed correction
 escalates to `OWNER_DECISION_REQUIRED`. Diagrams never create state or authorize
 transitions.

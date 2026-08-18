@@ -33,8 +33,10 @@ Independent assurance responsibility, outside the mutation-authority ladder.
 ## Return and recovery
 
 Return `PASS`, `NEEDS_MORE_EVIDENCE`, or `FAIL` with candidate ref, criteria,
-evidence, findings, blocker, next action, and receiver. Re-evaluate only a new
-candidate or materially new evidence, at most three rounds.
+evidence, findings, blocker, next action, and receiver. `PASS` is terminal.
+`NEEDS_MORE_EVIDENCE` and `FAIL` permit bounded correction. Coordinators
+enforce `max_assurance_rounds`; this role does not redispatch. Re-evaluate only
+a new candidate or materially new evidence.
 
 Never implement, repeat unchanged review, replace Park Ranger/Surveyor, or
 grant owner-only approval.

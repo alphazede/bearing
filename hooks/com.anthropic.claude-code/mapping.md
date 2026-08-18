@@ -43,7 +43,7 @@ trees) and sets only:
 
 | Bearing field | Source |
 |---|---|
-| `plan_present` | a Markdown file contains a `task_id` or `assigned_role` block |
+| `plan_present` | a Markdown file contains a `task_id`, `assigned_role`, non-placeholder journey marker, or `checkout_lease` block |
 | `router_invoked` | a `- journey:` setting is present and not a placeholder |
 | `assigned_role` | active task `assigned_role` when not `unassigned` or `<…>` |
 | `next_action` / `next_action_known` | active task `next_action` when not a placeholder |
@@ -57,7 +57,13 @@ of inventing context.
 
 | Outcome | Host JSON | Process exit |
 |---|---|---|
-| `ADVISE`, `REROUTE`, `UNAVAILABLE` | `hookSpecificOutput.additionalContext` | always `0` |
+| `ADVISE`, `REROUTE`, `UNAVAILABLE` on activation or a discoverable-Journey first-pass Stop | `hookSpecificOutput.additionalContext` | always `0` |
+| Stop/SubagentStop re-entry (`stop_hook_active`) | quiet success (empty JSON; no `additionalContext`) | always `0` |
+| Stop/SubagentStop with no discoverable Journey | quiet success (empty JSON; no `additionalContext`) | always `0` |
+| first-pass Stop/SubagentStop with a discoverable Journey | `hookSpecificOutput.additionalContext` | always `0` |
 | `BLOCK` | JSON `decision: "block"` only; this mapping never requests protected completion | always `0` |
 
-Never map policy or infrastructure to a non-zero exit.
+A discoverable Journey is a visible plan with a `task_id`, `assigned_role`,
+non-placeholder journey marker, or `checkout_lease` block. Empty cwd and
+`stop_hook_active` re-entry stay quiet. Never map policy or infrastructure to
+a non-zero exit.

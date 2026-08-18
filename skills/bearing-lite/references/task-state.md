@@ -8,7 +8,7 @@ The project's human-readable plan is the only task-state record. Diagrams explai
 | --- | --- | --- |
 | `PROPOSED` | Parent coordinator | Task exists but is not execution-ready |
 | `READY` | Parent coordinator | Dependencies, scope, authority, and route are satisfied |
-| `WAITING_ON` | Parent coordinator | Named prerequisite or independent-assurance dispatch unavailable |
+| `WAITING_ON` | Parent coordinator | Named prerequisite, checkout-lease conflict, or independent-assurance dispatch unavailable |
 | `IN_PROGRESS` | Assigned worker or coordinator | Assigned action is being performed |
 | `EVIDENCE_READY` | Parent coordinator | Candidate and evidence ready for next missing assurance |
 | `VALIDATING` | Validator | Evidence sufficiency under validation |
@@ -40,3 +40,21 @@ The project's human-readable plan is the only task-state record. Diagrams explai
 - Workers and assurance roles return handoffs; they do not race plan edits.
 - Candidate authors never provide their own Validator, Park Ranger, or Surveyor verdict.
 - Waiting on a prerequisite consumes no correction attempt. Each task has its own three-attempt correction counter; identical retries without new evidence are invalid.
+
+## Checkout lease
+
+The Router inventories visible nonterminal Journeys and holds one
+generation-bound checkout lease before any planning write or dispatch.
+
+- Same checkout plus a live other Journey → `WAITING_ON` with sanitized
+  competing Journey and controller. Distinct explicitly approved compatible
+  worktrees may proceed.
+- Resume keeps the same generation and must not duplicate dispatch.
+- `COMPLETE` or `CANCELLED` releases the lease exactly once.
+- Stale recovery is explicit, recorded, increments generation, and cannot
+  steal a live lease. Forged or stale-generation records fail closed.
+- Branch or HEAD drift from the leased identity stops the transition before
+  mutation. Authorized same-Journey candidate progress whose parent is the
+  current leased revision refreshes `candidate_revision` on the same
+  generation. Foreign controller, branch/worktree, or unrelated HEAD still
+  fail closed as `WAITING_ON`.

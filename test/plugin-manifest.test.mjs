@@ -213,6 +213,15 @@ describe("CMD-MANIFEST-01 plugin-manifest (SEIT-MANIFEST-01, SEIT-EXTENSION-01)"
     assert.equal(readJson(".cursor-plugin/marketplace.json").plugins[0].name, "bearing-lite");
   });
 
+  it("keeps release-bearing manifest versions aligned", () => {
+    const readJson = (rel) => JSON.parse(readFileSync(path.join(ROOT, rel), "utf8"));
+    const claude = readJson(".claude-plugin/plugin.json");
+    const portable = readJson("plugin.json");
+    const pkg = readJson("package.json");
+    assert.equal(claude.version, portable.version);
+    assert.equal(portable.version, pkg.version);
+  });
+
   it("negative: floating / non-1.0.0 schema is rejected with typed diagnostic", () => {
     const fixture = {
       $schema: "https://agent-plugins.org/schemas/2.0.0/plugin.schema.json",
