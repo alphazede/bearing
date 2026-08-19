@@ -483,7 +483,11 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(gather, /recommended answer/);
     assert.match(gather, /Never ask the\s+owner for a fact tools can establish/);
     assert.match(gather, /explicit confirmation that shared understanding/);
-    assert.match(gather, /Return each confirmed decision immediately to the Router/);
+    assert.match(gather, /Buffer confirmed decisions in the active session/);
+    assert.match(gather, /Do not persist, patch, or\s+re-render Journey state after each answer/);
+    assert.match(gather, /Return one consolidated decision batch to the Router/);
+    assert.match(gather, /handoff\/context\s+loss is imminent/);
+    assert.doesNotMatch(gather, /Return each confirmed decision immediately/);
   });
 
   it("Codex metadata keeps the router explicitly invoked", () => {
