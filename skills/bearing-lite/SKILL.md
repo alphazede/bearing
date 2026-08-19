@@ -21,7 +21,10 @@ or hidden ledger. plugin hosts are partial; skill-copy is skills-only.
    proposed copy from `templates/default-role-lineup.md`; confirm one role at a
    time. Never infer identity values.
 5. Run one missing stage in order: Repository Fit → Set Bearings → Gather
-   Supplies. Use fresh sessions; integrate and relay owner questions.
+   Supplies. The Router holds every owner conversation inline; Gather Supplies
+   is a Router-led interview, never dispatched. Dispatch a fresh session only
+   for bounded mechanical legwork (mapping, drafting) after stage intent is
+   clear, on a cheaper lower-reasoning model than the Router; integrate returns.
 6. Before Map the Route, display each role's primary/fallback, model, reasoning,
    and active/standby/unused state. Ask `Is this a
    good lineup for the roles on this Journey?`; never choose. Recommend cadence
