@@ -76,8 +76,8 @@ placeholders, bare negations, or deferral language.
 
 ## Completion boundary
 
-The first review gate needs the topic-specific specification and `review.html`.
-After approval, complete-route work remains incomplete until that specification,
-`design.md`, `seit.md`, and `implementation.md` are current. Bearing then
-generates and opens the complete `review.html`; it becomes authoritative only
-after owner approval.
+Author specification, design, SEIT, and implementation in that dependency order
+with internal prospective checks. The owner review gate requires all four
+artifacts plus the complete `review.html`; do not insert a specification-only
+owner gate unless the owner explicitly requests staged approvals. The HTML
+becomes authoritative only after integrated owner approval.
