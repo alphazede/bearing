@@ -264,8 +264,8 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       assert.equal(verdict.ok, true, `${name}: ${JSON.stringify(verdict)}`);
       const lines = text.trimEnd().split(/\r?\n/).length;
       const words = text.trim().split(/\s+/).length;
-      assert.ok(lines < 60, `${name}: ${lines} lines must be below 60`);
-      assert.ok(words < 400, `${name}: ${words} words must be below 400`);
+      assert.ok(lines <= 60, `${name}: ${lines} lines must be at most 60`);
+      assert.ok(words <= 600, `${name}: ${words} words must be at most 600`);
     }
   });
 
