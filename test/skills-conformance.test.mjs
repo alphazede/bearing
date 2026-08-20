@@ -490,6 +490,24 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.doesNotMatch(gather, /Return each confirmed decision immediately/);
   });
 
+  it("Map the Route presents one integrated owner review", () => {
+    const mapRoute = readFileSync(
+      path.join(SKILLS_DIR, "map-the-route", "SKILL.md"),
+      "utf8"
+    );
+    const grammar = readFileSync(
+      path.join(SKILLS_DIR, "map-the-route", "references", "artifact-grammar.md"),
+      "utf8"
+    );
+    assert.match(mapRoute, /Author in dependency order: testable specification, `design\.md`, `seit\.md`,\s+then `implementation\.md`/);
+    assert.match(mapRoute, /one complete self-contained offline `review\.html`/);
+    assert.match(mapRoute, /request one\s+integrated owner approval/);
+    assert.match(mapRoute, /staged owner approvals only when the owner\s+explicitly requests them/);
+    assert.doesNotMatch(mapRoute, /After specification approval/);
+    assert.match(grammar, /owner review gate requires all four\s+artifacts plus the complete `review\.html`/);
+    assert.match(grammar, /do not insert a specification-only\s+owner gate/);
+  });
+
   it("Codex metadata keeps the router explicitly invoked", () => {
     const metadataPath = path.join(SKILLS_DIR, "bearing-lite", "agents", "openai.yaml");
     assert.ok(existsSync(metadataPath), "router must publish Codex activation metadata");
