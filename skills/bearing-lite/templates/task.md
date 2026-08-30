@@ -96,8 +96,9 @@ in one candidate lineage against Bearing Lite `max_assurance_rounds`. A repair
 of the same work stays in the lineage. A new candidate lineage resets the count
 to 0. The parent coordinator writes the count and checks it before redispatched
 assurance. Review and repair rounds are separate budgets, and the cycle ends on
-a repair: exhausting review rounds while a repair round remains is not
-exhaustion — spend the repair and close the gate.
+a repair: `assurance_rounds` counts reviews while `attempts` counts repairs.
+When the last review permits a remaining repair, spend it and close the gate
+without another review.
 
 ## Waiting or correcting only
 

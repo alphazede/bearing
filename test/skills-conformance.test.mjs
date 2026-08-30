@@ -458,6 +458,8 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
         /OWNER_DECISION_REQUIRED` with\s+candidate and count/,
         `${name} must escalate with candidate and count`
       );
+      assert.match(text, /do not dispatch another review/, `${name} must stop review at the bound`);
+      assert.match(text, /repair[\s\S]*close the\s+gate/, `${name} must spend the final repair`);
     }
   });
 

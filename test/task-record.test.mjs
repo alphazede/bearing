@@ -1422,9 +1422,10 @@ export function admitAssuranceRound(record, event) {
   if (completed >= MAX_ASSURANCE_ROUNDS) {
     return {
       ok: true,
-      status: "OWNER_DECISION_REQUIRED",
-      code: "max_assurance_rounds",
+      status: "CORRECTION_REQUIRED",
+      code: "final_repair_closes_gate",
       dispatch: false,
+      repair: true,
       candidate_ref: event.candidate_ref,
       assurance_rounds: completed,
       lineage,
@@ -1494,16 +1495,17 @@ describe("CMD-TASK-01 assurance-round bound", () => {
     assert.match(TEMPLATE, /new candidate lineage resets/i);
   });
 
-  it("Direct route stops at max_assurance_rounds without Navigator", () => {
+  it("Direct route spends the final repair without another review", () => {
     const played = playAssuranceRoute("direct", "router", [
       "REPAIR_REQUIRED",
       "FAIL",
       "NEEDS_MORE_EVIDENCE",
     ]);
     const last = played.steps[played.steps.length - 1];
-    assert.equal(last.status, "OWNER_DECISION_REQUIRED");
-    assert.equal(last.code, "max_assurance_rounds");
+    assert.equal(last.status, "CORRECTION_REQUIRED");
+    assert.equal(last.code, "final_repair_closes_gate");
     assert.equal(last.dispatch, false);
+    assert.equal(last.repair, true);
     assert.equal(last.assurance_rounds, MAX_ASSURANCE_ROUNDS);
     assert.ok(last.candidate_ref);
     assert.equal(played.record.assurance_rounds, MAX_ASSURANCE_ROUNDS);
@@ -1521,15 +1523,16 @@ describe("CMD-TASK-01 assurance-round bound", () => {
     assert.equal(fourth.assurance_rounds, MAX_ASSURANCE_ROUNDS);
   });
 
-  it("Expedition route uses the same bound before Navigator redispatch", () => {
+  it("Expedition route spends the same final repair before stopping review", () => {
     const played = playAssuranceRoute("expedition", "navigator", [
       "REPAIR_REQUIRED",
       "REPAIR_REQUIRED",
       "FAIL",
     ]);
     const last = played.steps[played.steps.length - 1];
-    assert.equal(last.status, "OWNER_DECISION_REQUIRED");
-    assert.equal(last.code, "max_assurance_rounds");
+    assert.equal(last.status, "CORRECTION_REQUIRED");
+    assert.equal(last.code, "final_repair_closes_gate");
+    assert.equal(last.repair, true);
     assert.equal(last.candidate_ref, "cand-L1-2");
     assert.equal(last.assurance_rounds, MAX_ASSURANCE_ROUNDS);
   });

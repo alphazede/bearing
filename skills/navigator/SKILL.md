@@ -41,9 +41,10 @@ Highest execution authority below Router; performs the least hands-on execution.
 4. Dispatch independent assurance at the confirmed cadence: every slice, every
    integrated execution/correction round, or only the final integrated outcome.
    Before redispatched assurance, honor `max_assurance_rounds` from visible
-   `assurance_rounds`. At the bound, return `OWNER_DECISION_REQUIRED` with
-   candidate and count; do not dispatch another repair or review. A new
-   candidate lineage resets the count.
+   `assurance_rounds`. At the bound, do not dispatch another review. If a
+   repairable result has a remaining `attempts` repair, spend it and close the
+   gate; otherwise return `OWNER_DECISION_REQUIRED` with candidate and count.
+   A new candidate lineage resets the count.
 5. Return to the Router after the bounded Expedition outcome; do not silently
    continue into another Journey or protected action.
 
