@@ -45,8 +45,10 @@ Wave authority. Coordinates more and implements less than Crewmate.
    its final wave once; an Expedition wave defers assurance to the Navigator's
    final Journey boundary. Deterministic checks always run. Before redispatched
    assurance, honor `max_assurance_rounds` from visible `assurance_rounds`. At
-   the bound, return `OWNER_DECISION_REQUIRED` with candidate and count; do not
-   dispatch another repair or review. A new candidate lineage resets the count.
+   the bound, do not dispatch another review. If a repairable result has a
+   remaining `attempts` repair, spend it and close the gate; otherwise return
+   `OWNER_DECISION_REQUIRED` with candidate and count. A new candidate lineage
+   resets the count.
 
 ## Return and recovery
 

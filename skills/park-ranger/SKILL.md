@@ -44,8 +44,8 @@ The gate cycle terminates on a repair, not on a review: `review → repair →
 review → repair → done`. The final repair within bounds completes the gate.
 Do not require an additional review to confirm the last repair — that would
 make every review demand another repair and every repair another review, an
-unbounded loop. A coordinator that has consumed its review rounds and has a
-repair round remaining spends it and closes the gate; that is completion, not
-bounds exhaustion.
+unbounded loop. A coordinator that has consumed its review rounds and has an
+`attempts` repair remaining spends it and closes the gate; that is completion,
+not bounds exhaustion.
 
 Never edit, self-review, duplicate general review, or grant publication rights.

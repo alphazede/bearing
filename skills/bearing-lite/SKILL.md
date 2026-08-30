@@ -41,7 +41,9 @@ Return `READY`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`, or `COMPLETE`. Fallback
 follows primary unavailability; both failing returns to owner.
 Allow three evidence-changing corrections. `max_assurance_rounds` is 3 per
 candidate lineage; Direct route checks `assurance_rounds`; Navigator is not required. At the
-bound return `OWNER_DECISION_REQUIRED` naming the candidate and count; new candidate lineage resets;
+bound, do not dispatch another review. If a repairable result has a remaining
+`attempts` repair, spend it and close the gate; otherwise return
+`OWNER_DECISION_REQUIRED` naming the candidate and count; new candidate lineage resets;
 release the checkout lease exactly once on `COMPLETE` or `CANCELLED`. Recover by
 explicit recorded generation increment that cannot steal a live lease. Process discovery
 cannot replace the lease. Never implement, self-assure, select models, or publish.
