@@ -38,13 +38,13 @@ Highest execution authority below Router; performs the least hands-on execution.
    here; never add a nested multi-wave controller.
 3. Integrate typed wave returns and correct only sequencing/coverage gaps inside
    approved authority; never perform implementation.
-4. Dispatch independent assurance at the confirmed cadence: every slice, every
-   integrated execution/correction round, or only the final integrated outcome.
-   Before redispatched assurance, honor `max_assurance_rounds` from visible
-   `assurance_rounds`. At the bound, do not dispatch another review. If a
-   repairable result has a remaining `attempts` repair, spend it and close the
-   gate; otherwise return `OWNER_DECISION_REQUIRED` with candidate and count.
-   A new candidate lineage resets the count.
+4. Dispatch independent assurance once at the confirmed `per-slice`,
+   `per-round`, or final integrated boundary. Honor `max_assurance_rounds` of 1
+   from visible `assurance_rounds`. If the review is repairable, spend at most
+   one remaining `attempts` repair, run deterministic coordinator verification,
+   and close the gate without another review. A failed repair or scope change
+   returns `OWNER_DECISION_REQUIRED` with candidate and count. After Journey
+   `COMPLETE`, deployment checks do not reopen assurance.
 5. Return to the Router after the bounded Expedition outcome; do not silently
    continue into another Journey or protected action.
 

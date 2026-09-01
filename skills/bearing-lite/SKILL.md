@@ -29,8 +29,8 @@ or hidden ledger. plugin hosts are partial; skill-copy is skills-only.
    and active/standby/unused state. Ask `Is this a
    good lineup for the roles on this Journey?`; never choose. Recommend cadence
    with a reason plus one cheaper and one more expensive alternative stating
-   what each gives up or buys. Ask `How often would you like an independent
-   review—per slice, per round, or at the end?`
+   what each gives up or buys. Ask `Where should the single independent
+   review run—after a slice, after an integrated round, or at the end?`
 7. Record route, lineup, and cadence before task mapping; if declined, record the named default explicitly.
    The recorded snapshot is authoritative for this Journey. Later edits to
    `~/.agents/bearing-lite/default-role-lineup.md` have no effect on it. Replace
@@ -38,12 +38,16 @@ or hidden ledger. plugin hosts are partial; skill-copy is skills-only.
 8. Every ready node gets a fresh session with lineup identity from the recorded snapshot.
 
 Return `READY`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`, or `COMPLETE`. Fallback
-follows primary unavailability; both failing returns to owner.
-Allow three evidence-changing corrections. `max_assurance_rounds` is 3 per
-candidate lineage; Direct route checks `assurance_rounds`; Navigator is not required. At the
-bound, do not dispatch another review. If a repairable result has a remaining
-`attempts` repair, spend it and close the gate; otherwise return
-`OWNER_DECISION_REQUIRED` naming the candidate and count; new candidate lineage resets;
-release the checkout lease exactly once on `COMPLETE` or `CANCELLED`. Recover by
-explicit recorded generation increment that cannot steal a live lease. Process discovery
-cannot replace the lease. Never implement, self-assure, select models, or publish.
+requires primary unavailability; both failing returns to owner. Allow three
+evidence-changing corrections outside assurance. `max_assurance_rounds` is 1
+per Journey; the sole review may authorize one repair. Direct route checks
+`assurance_rounds`; Navigator is not required. After repair, run deterministic
+coordinator verification and close the gate without another review. Failed repair
+or scope change returns `OWNER_DECISION_REQUIRED` naming the candidate and count.
+Only a separately scoped new Journey resets the review allowance.
+`COMPLETE` ends Bearing assurance: authorized deployment keeps deployment checks
+and rollback readiness without reopening review. Candidate-changing deployment
+work starts a new Journey. release the checkout lease exactly once on `COMPLETE`
+or `CANCELLED`. Recover by explicit recorded generation increment; it cannot steal a live lease.
+Process discovery cannot replace the lease. Never implement,
+self-assure, select models, or publish.

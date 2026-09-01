@@ -748,7 +748,7 @@ describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)",
     assert.match(router, /Distinct explicitly approved\s+compatible worktrees/);
     assert.match(router, /same lease generation/);
     assert.match(router, /duplicate a dispatch/);
-    assert.match(router, /release the checkout lease exactly once/);
+    assert.match(router, /release the checkout lease exactly once/i);
     assert.match(router, /cannot steal a live lease/);
   });
 
@@ -1306,7 +1306,7 @@ describe("CMD-TASK-01 checkout-lease admission", () => {
 });
 
 /** Named Bearing Lite bound. Coordinators honor this; reviewers do not redispatch. */
-export const MAX_ASSURANCE_ROUNDS = 3;
+export const MAX_ASSURANCE_ROUNDS = 1;
 
 const ASSURANCE_TERMINAL_SUCCESS = new Set(["PASS", "ACCEPT", "ACCEPT_WITH_FINDINGS"]);
 const ASSURANCE_TERMINAL_STOP = new Set(["BLOCK"]);
@@ -1349,9 +1349,7 @@ const ASSURANCE_COORDINATORS = new Set(["router", "explorer", "navigator"]);
  */
 export function admitAssuranceRound(record, event) {
   const lineage = event.lineage ?? event.candidate_ref;
-  const priorLineage = record.lineage ?? record.candidate_ref;
-  let rounds = Number(record.assurance_rounds) || 0;
-  if (lineage !== priorLineage) rounds = 0;
+  const rounds = Number(record.assurance_rounds) || 0;
 
   if (!ASSURANCE_COORDINATORS.has(event.coordinator)) {
     return {
@@ -1488,19 +1486,15 @@ function playAssuranceRoute(route, coordinator, results, opts = {}) {
 }
 
 describe("CMD-TASK-01 assurance-round bound", () => {
-  it("template carries assurance_rounds for one candidate lineage", () => {
+  it("template carries one Journey-wide assurance round", () => {
     assert.match(TEMPLATE, /assurance_rounds:/);
-    assert.match(TEMPLATE, /candidate lineage/i);
+    assert.match(TEMPLATE, /single submission/i);
     assert.match(TEMPLATE, /max_assurance_rounds/);
-    assert.match(TEMPLATE, /new candidate lineage resets/i);
+    assert.match(TEMPLATE, /new Journey starts at 0/i);
   });
 
   it("Direct route spends the final repair without another review", () => {
-    const played = playAssuranceRoute("direct", "router", [
-      "REPAIR_REQUIRED",
-      "FAIL",
-      "NEEDS_MORE_EVIDENCE",
-    ]);
+    const played = playAssuranceRoute("direct", "router", ["REPAIR_REQUIRED"]);
     const last = played.steps[played.steps.length - 1];
     assert.equal(last.status, "CORRECTION_REQUIRED");
     assert.equal(last.code, "final_repair_closes_gate");
@@ -1509,58 +1503,46 @@ describe("CMD-TASK-01 assurance-round bound", () => {
     assert.equal(last.assurance_rounds, MAX_ASSURANCE_ROUNDS);
     assert.ok(last.candidate_ref);
     assert.equal(played.record.assurance_rounds, MAX_ASSURANCE_ROUNDS);
-    const fourth = admitAssuranceRound(played.record, {
+    const second = admitAssuranceRound(played.record, {
       action: "dispatch",
       route: "direct",
       coordinator: "router",
-      candidate_ref: "cand-L1-3",
+      candidate_ref: "cand-L1-1",
       lineage: "L1",
     });
-    assert.equal(fourth.ok, false);
-    assert.equal(fourth.dispatch, false);
-    assert.equal(fourth.status, "OWNER_DECISION_REQUIRED");
-    assert.equal(fourth.candidate_ref, "cand-L1-3");
-    assert.equal(fourth.assurance_rounds, MAX_ASSURANCE_ROUNDS);
+    assert.equal(second.ok, false);
+    assert.equal(second.dispatch, false);
+    assert.equal(second.status, "OWNER_DECISION_REQUIRED");
+    assert.equal(second.candidate_ref, "cand-L1-1");
+    assert.equal(second.assurance_rounds, MAX_ASSURANCE_ROUNDS);
   });
 
   it("Expedition route spends the same final repair before stopping review", () => {
-    const played = playAssuranceRoute("expedition", "navigator", [
-      "REPAIR_REQUIRED",
-      "REPAIR_REQUIRED",
-      "FAIL",
-    ]);
+    const played = playAssuranceRoute("expedition", "navigator", ["FAIL"]);
     const last = played.steps[played.steps.length - 1];
     assert.equal(last.status, "CORRECTION_REQUIRED");
     assert.equal(last.code, "final_repair_closes_gate");
     assert.equal(last.repair, true);
-    assert.equal(last.candidate_ref, "cand-L1-2");
+    assert.equal(last.candidate_ref, "cand-L1-0");
     assert.equal(last.assurance_rounds, MAX_ASSURANCE_ROUNDS);
   });
 
   it("PASS or ACCEPT_WITH_FINDINGS at the bound is terminal, not another repair", () => {
-    const passAtBound = playAssuranceRoute("direct", "router", ["FAIL", "FAIL", "PASS"]);
+    const passAtBound = playAssuranceRoute("direct", "router", ["PASS"]);
     const passLast = passAtBound.steps[passAtBound.steps.length - 1];
     assert.equal(passLast.status, "COMPLETE");
     assert.equal(passLast.terminal, true);
     assert.equal(passLast.assurance_rounds, MAX_ASSURANCE_ROUNDS);
 
-    const residual = playAssuranceRoute("expedition", "navigator", [
-      "REPAIR_REQUIRED",
-      "REPAIR_REQUIRED",
-      "ACCEPT_WITH_FINDINGS",
-    ]);
+    const residual = playAssuranceRoute("expedition", "navigator", ["ACCEPT_WITH_FINDINGS"]);
     const residualLast = residual.steps[residual.steps.length - 1];
     assert.equal(residualLast.status, "COMPLETE");
     assert.equal(residualLast.terminal, true);
     assert.equal(residualLast.dispatch, false);
   });
 
-  it("a new candidate lineage resets the visible count", () => {
-    const exhausted = playAssuranceRoute("direct", "router", [
-      "FAIL",
-      "FAIL",
-      "FAIL",
-    ]);
+  it("a replacement candidate does not reset the Journey-wide count", () => {
+    const exhausted = playAssuranceRoute("direct", "router", ["FAIL"]);
     assert.equal(exhausted.record.assurance_rounds, MAX_ASSURANCE_ROUNDS);
     const nextLine = admitAssuranceRound(exhausted.record, {
       action: "dispatch",
@@ -1569,9 +1551,9 @@ describe("CMD-TASK-01 assurance-round bound", () => {
       candidate_ref: "cand-new",
       lineage: "L2",
     });
-    assert.equal(nextLine.ok, true);
-    assert.equal(nextLine.dispatch, true);
-    assert.equal(nextLine.assurance_rounds, 0);
+    assert.equal(nextLine.ok, false);
+    assert.equal(nextLine.dispatch, false);
+    assert.equal(nextLine.assurance_rounds, MAX_ASSURANCE_ROUNDS);
     assert.equal(nextLine.lineage, "L2");
   });
 

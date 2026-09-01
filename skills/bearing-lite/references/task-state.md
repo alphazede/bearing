@@ -27,7 +27,7 @@ The project's human-readable plan is the only task-state record. Diagrams explai
 - `IN_PROGRESS` → `EVIDENCE_READY` with candidate and handoff; → `CORRECTION_REQUIRED` on correctable failure; → `OWNER_DECISION_REQUIRED` on security, authority, or integrity guard.
 - `CORRECTION_REQUIRED` → `READY` on attempt 1 or 2 with a new hypothesis and evidence; → `OWNER_DECISION_REQUIRED` on the third failed correction or out-of-contract amendment.
 - `EVIDENCE_READY` → `VALIDATING` | `REVIEWING` | `ACCEPTANCE` for the next missing required role; → `WAITING_ON` if assurance dispatch is unavailable.
-- After accepted Validator or Park Ranger handoff, return to `EVIDENCE_READY` and select the next missing assurance role in declared order.
+- During the single assurance round, an accepted Validator or Park Ranger handoff returns to `EVIDENCE_READY` to select the next missing assurance role in declared order.
 - `VALIDATING` → `CORRECTION_REQUIRED` when more evidence or repair is needed; otherwise back through `EVIDENCE_READY` for remaining assurance.
 - `REVIEWING` → `CORRECTION_REQUIRED` | `EVIDENCE_READY` | `OWNER_DECISION_REQUIRED` by verdict.
 - `ACCEPTANCE` → `COMPLETE` when every required assurance accepted the same candidate; when `required_assurance` is `none`, parent-coordinator confirmation satisfies the assurance requirement; → `CORRECTION_REQUIRED` on acceptance gap.
@@ -40,6 +40,8 @@ The project's human-readable plan is the only task-state record. Diagrams explai
 - Workers and assurance roles return handoffs; they do not race plan edits.
 - Candidate authors never provide their own Validator, Park Ranger, or Surveyor verdict.
 - Waiting on a prerequisite consumes no correction attempt. Each task has its own three-attempt correction counter; identical retries without new evidence are invalid.
+- One Journey receives at most one assurance round and one review-directed repair. Replacement candidates do not reset the count. The coordinator verifies that repair deterministically and does not dispatch assurance again.
+- `COMPLETE` is terminal for Bearing assurance. An already authorized deployment keeps operational verification and rollback readiness but does not reopen review; candidate-changing deployment work requires separate scope.
 
 ## Checkout lease
 

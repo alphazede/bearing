@@ -40,15 +40,15 @@ Wave authority. Coordinates more and implements less than Crewmate.
 3. Give every node a fresh bounded session. Never pass raw conversation history.
 4. Inspect returns against write sets and acceptance; integrate evidence without
    implementing missing packet work.
-5. Dispatch declared assurance at `per-slice` or after each integrated execution
-   or correction round at `per-round`. At `at-end`, an Explorer Journey reviews
-   its final wave once; an Expedition wave defers assurance to the Navigator's
-   final Journey boundary. Deterministic checks always run. Before redispatched
-   assurance, honor `max_assurance_rounds` from visible `assurance_rounds`. At
-   the bound, do not dispatch another review. If a repairable result has a
-   remaining `attempts` repair, spend it and close the gate; otherwise return
-   `OWNER_DECISION_REQUIRED` with candidate and count. A new candidate lineage
-   resets the count.
+5. Dispatch declared assurance once at the owner-confirmed `per-slice`,
+   `per-round`, or `at-end` boundary. At `at-end`, an Explorer Journey reviews
+   its final wave; an Expedition wave defers assurance to the Navigator's final
+   Journey boundary. Deterministic checks always run. Honor
+   `max_assurance_rounds` of 1 from visible `assurance_rounds`. If the review is
+   repairable, spend at most one remaining `attempts` repair, run deterministic
+   coordinator verification, and close the gate without another review. A failed
+   repair or scope change returns `OWNER_DECISION_REQUIRED` with candidate and
+   count. After Journey `COMPLETE`, deployment checks do not reopen assurance.
 
 ## Return and recovery
 

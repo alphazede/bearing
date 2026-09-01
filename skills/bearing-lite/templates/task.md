@@ -13,11 +13,12 @@ Record these plan-level choices once, above the task blocks:
 - lineup_snapshot: <named active, standby, and unused role instances>
 ```
 
-`review_cadence` controls independent review frequency, not task-level tests or
-author self-checks. Never infer it from `required_assurance` on an individual
-task. `per-round` means after each integrated execution or correction round;
-`at-end` means one review of the final integrated candidate. The Router asks the
-owner to confirm both the applicable lineup and cadence before implementation.
+`review_cadence` selects where the Journey's single independent review runs,
+not task-level tests or author self-checks. Never infer it from
+`required_assurance` on an individual task. `per-slice` and `per-round` select
+one declared boundary; `at-end` selects the final integrated candidate. The
+Router asks the owner to confirm both the applicable lineup and boundary before
+implementation.
 `lineup_snapshot` is authoritative for this Journey after recording. Later
 edits to `~/.agents/bearing-lite/default-role-lineup.md` have no effect.
 Replace it only through an explicit owner-confirmed dated visible amendment.
@@ -87,18 +88,17 @@ Field rules:
 ```markdown
 - candidate_ref: <strongest native revision or changed-path reference available>
 - evidence: <commands run, results observed, and inferences labeled separately>
-- assurance_rounds: <0-3 completed assurance rounds for this candidate lineage>
+- assurance_rounds: <0-1 completed assurance rounds for this Journey>
 ```
 
 `candidate_ref` must not claim stronger provenance than the client can prove.
-`assurance_rounds` counts each candidate version submitted to required assurance
-in one candidate lineage against Bearing Lite `max_assurance_rounds`. A repair
-of the same work stays in the lineage. A new candidate lineage resets the count
-to 0. The parent coordinator writes the count and checks it before redispatched
-assurance. Review and repair rounds are separate budgets, and the cycle ends on
-a repair: `assurance_rounds` counts reviews while `attempts` counts repairs.
-When the last review permits a remaining repair, spend it and close the gate
-without another review.
+`assurance_rounds` counts the Journey's single submission to required assurance
+against Bearing Lite `max_assurance_rounds`. A repair or replacement candidate
+does not reset it; only a separately scoped new Journey starts at 0. The parent
+coordinator writes the count before dispatch. If the review permits correction, spend at
+most one remaining `attempts` repair, run deterministic coordinator verification,
+and close the gate without another review. A failed repair or scope change
+returns `OWNER_DECISION_REQUIRED`.
 
 ## Waiting or correcting only
 
@@ -108,6 +108,10 @@ without another review.
 ```
 
 Omit `blocker` and `attempts` when the task is not waiting or correcting. Waiting does not consume correction attempts.
+
+`COMPLETE` ends Bearing assurance. An already authorized deployment keeps its
+own operational checks and rollback evidence but does not reopen independent
+review. Any source or candidate change during deployment is separately scoped.
 
 ## Single-writer reminder
 

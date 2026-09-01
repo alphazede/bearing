@@ -43,7 +43,7 @@ describe("Journey defaults", () => {
       path.join(ROOT, "skills/bearing-lite/SKILL.md"),
       "utf8"
     );
-    assert.match(router, /`max_assurance_rounds` is 3/);
+    assert.match(router, /`max_assurance_rounds` is\s+1/);
     assert.doesNotMatch(CONFIG, /max_assurance_rounds|assurance_rounds/);
     assert.doesNotMatch(CONFIG, /assurance budget|review-round limit/i);
   });
