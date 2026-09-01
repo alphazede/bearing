@@ -9,8 +9,9 @@ It ships portable skills, references, templates, and optional client hooks.
 
 An agent cannot certify its own work. The stateful Router owns the planning
 conversation and visible Journey state, then dispatches fresh bounded sessions.
-Independent assurance runs at the owner's selected cadence: per slice, per
-execution/correction round, or once at the end. Owner Authority remains human-only.
+Independent assurance runs once at the owner's selected boundary: after a
+slice, after an integrated round, or at the end. One repair may follow; it is
+verified deterministically without another review. Owner Authority remains human-only.
 
 Bearing Lite was created by William Rumph.
 
@@ -82,7 +83,7 @@ register hooks. That path remains first-class. See
 1. **Ask** whether the Journey is an Explorer Journey or an Expedition.
 2. **Fill only missing planning stages:** Repository Fit → Set Bearings → Gather
    Supplies → Map the Route.
-3. **Confirm** the user-owned primary/fallback lineup and review cadence.
+3. **Confirm** the user-owned primary/fallback lineup and single review boundary.
 4. **Dispatch fresh sessions** with bounded context, authority, and return types.
 5. **Record state visibly** in human-readable Markdown artifacts only.
 
@@ -114,10 +115,9 @@ Bearing Lite Router is the stateful planning controller, not a work role. It
 invokes only missing planning stages in fresh sessions, confirms the owner's
 lineup and cadence, then dispatches an Explorer Journey or Expedition. Explorer
 coordinates proven-independent in-wave lanes without a nested coordinator.
-Validator, Park Ranger,
-and Surveyor appear only when declared and when the selected per-slice,
-per-round, or at-end boundary is reached. Diagrams explain orientation; they
-never authorize a transition.
+Validator, Park Ranger, and Surveyor appear only when declared and when the
+single selected per-slice, per-round, or at-end boundary is reached. Diagrams
+explain orientation; they never authorize a transition.
 
 ## Roles and authority
 
@@ -155,59 +155,29 @@ Normal progress is `PROPOSED` → `READY` → `IN_PROGRESS` → `EVIDENCE_READY`
 optional `VALIDATING` / `REVIEWING` when required, then `ACCEPTANCE` →
 `COMPLETE`. `WAITING_ON` holds for missing prerequisites, checkout-lease
 conflict, or assurance dispatch.
-`CORRECTION_REQUIRED` allows two in-authority repairs; a third failed correction
-escalates to `OWNER_DECISION_REQUIRED`. Diagrams never create state or authorize
-transitions.
+Ordinary execution corrections remain bounded. The assurance gate allows one
+review-directed repair, followed by deterministic coordinator verification and
+no second review. Diagrams never create state or authorize transitions.
 
 ## Implementation process (explanatory)
 
-Owner-approved multi-phase work follows four phases: Inventory, Foundation,
-Proof and Documentation, and Final Audit. Default slice completion is author
-self-check plus coordinator confirmation when `required_assurance` is `none`.
-Fresh Validator then separate Park Ranger is mandatory only on exact integrated
-phase candidates, not on every packet.
-
-![Bearing Lite implementation process: four phases with default self-check slices, optional owner slice assurance, mandatory integrated phase gates, bounded correction, and final Surveyor acceptance](docs/plans/2026-08-09-bearing-skills-first-architecture/assets/implementation-process.png)
-
-Mermaid source:
-[`docs/plans/2026-08-09-bearing-skills-first-architecture/assets/implementation-process.mmd`](docs/plans/2026-08-09-bearing-skills-first-architecture/assets/implementation-process.mmd).
-
-<details>
-<summary>Diagram source (implementation process)</summary>
+Default packet completion is author self-check plus coordinator confirmation.
+Declared independent assurance runs once at the selected boundary. A repairable
+verdict permits one repair; deterministic coordinator verification then closes
+the gate without another review. Once the Journey is `COMPLETE`, an already
+authorized deployment proceeds with operational checks and rollback readiness,
+not a new assurance round. Source-changing deployment work is separate work.
 
 ```mermaid
-flowchart TD
-    P1[Phase 1 Inventory S1-S4 complete] --> P2[Phase 2 Foundation S4A-S7]
-    P2 --> SLICE[Crewmate then author self-check]
-    SLICE --> CC[Coordinator scope and dependency confirmation]
-    CC --> OPT{Owner slice assurance?}
-    OPT -->|Yes| V[Fresh Validator then optional Park Ranger]
-    OPT -->|No| MORE{More Foundation slices?}
-    V -->|Fail or repair| R[Bounded Correction Attempt]
-    V -->|Pass| MORE
-    R -->|Attempt 1 or 2| SLICE
-    R -->|3rd Failure| O[OWNER_DECISION_REQUIRED]
-    MORE -->|Yes| SLICE
-    MORE -->|No: integrated Foundation| FG[Fresh Validator then separate Park Ranger]
-    FG --> P3[Phase 3 Proof and Documentation S8-S10]
-    P3 --> SLICE3[Crewmate then author self-check]
-    SLICE3 --> CC3[Coordinator confirmation]
-    CC3 --> OPT3{Owner slice assurance?}
-    OPT3 -->|Yes| V3[Fresh Validator then optional Park Ranger]
-    OPT3 -->|No| MORE3{More Proof and Documentation slices?}
-    V3 -->|Fail or repair| R
-    V3 -->|Pass| MORE3
-    MORE3 -->|Yes| SLICE3
-    MORE3 -->|No: integrated Proof and Documentation| PG[Fresh Validator then separate Park Ranger]
-    PG --> P4[Phase 4 Final Audit S11-S12]
-    P4 --> S11[S11 Skill and State Alignment Audit]
-    S11 --> S12[S12 Integrated Acceptance]
-    S12 --> S[Fresh Surveyor Final Acceptance]
-    S -->|Pass| CMP[COMPLETE]
-    O -->|Owner Decision| MORE
+flowchart LR
+    W[Bounded work] --> C[Deterministic checks]
+    C --> R[Single independent review]
+    R -->|Pass| X[COMPLETE]
+    R -->|Repairable| F[One repair]
+    F --> V[Coordinator verification]
+    V --> X
+    X --> D[Authorized deploy and operational verification]
 ```
-
-</details>
 
 ## Package layout
 

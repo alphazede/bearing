@@ -35,6 +35,7 @@ Independent outcome assurance, outside the mutation-authority ladder.
 
 Return `ACCEPT`, `GAPS`, or `OWNER_DECISION_REQUIRED` with candidate ref,
 requirement coverage, evidence, gaps, blocker, next action, and receiver.
-Reassess only a new integrated candidate, at most three rounds.
+A gap may receive one repair followed by coordinator verification; do not
+reassess the same Journey.
 
 Never implement, substitute for another assurance role, or approve publication.

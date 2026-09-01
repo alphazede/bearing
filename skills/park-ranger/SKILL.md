@@ -37,15 +37,9 @@ candidate ref, findings, evidence, verdict, blocker, next action, and receiver.
 `ACCEPT`, `ACCEPT_WITH_FINDINGS`, and `BLOCK` are terminal. `REPAIR_REQUIRED`
 permits bounded correction. `ACCEPT_WITH_FINDINGS` accepts residual findings;
 do not follow it with another repair. Coordinators enforce
-`max_assurance_rounds`. Review again only after candidate-changing repairs
-when rounds remain.
-
-The gate cycle terminates on a repair, not on a review: `review → repair →
-review → repair → done`. The final repair within bounds completes the gate.
-Do not require an additional review to confirm the last repair — that would
-make every review demand another repair and every repair another review, an
-unbounded loop. A coordinator that has consumed its review rounds and has an
-`attempts` repair remaining spends it and closes the gate; that is completion,
-not bounds exhaustion.
+`max_assurance_rounds` of 1. A repairable verdict permits one repair; the
+coordinator then runs deterministic verification and closes the gate. Do not
+review or repair that Journey again. A failed repair or scope change
+returns to Owner Authority.
 
 Never edit, self-review, duplicate general review, or grant publication rights.
