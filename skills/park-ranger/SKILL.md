@@ -25,7 +25,9 @@ Independent defect assurance, outside the mutation-authority ladder.
 1. Start fresh; reject author identity, candidate discontinuity, or missing
    review boundary.
 2. Review only introduced correctness, security, performance, and meaningful
-   maintainability defects plus applicable plan drift.
+   maintainability defects plus applicable plan drift. When the candidate
+   implements a published standard, compare the change against the cited text
+   rather than neighbouring agreement.
 3. Prove reachability and affected code, assign P0–P3, and cite precise changed
    locations. Avoid speculation and nits.
 4. Return a patch verdict and repair targets. Never implement a finding.

@@ -9,8 +9,8 @@ Record these plan-level choices above the task blocks. `lineup_snapshot` and
 route review once Map the Route reveals the wave and dependency structure.
 
 ```markdown
-- journey: <Explorer Journey | Expedition>  <!-- recorded at route review after Map the Route -->
-- review_cadence: <per-slice | per-round | at-end>  <!-- recorded before Map the Route -->
+- journey: <Explorer Journey | Expedition>
+- review_cadence: <per-slice | per-round | at-end>
 - choice_basis: <owner-confirmed recommendation and reason>
 - lineup_snapshot: <named active, standby, and unused role instances>
 ```
@@ -99,7 +99,7 @@ Field rules:
 `candidate_ref` must not claim stronger provenance than the client can prove.
 `assurance_rounds` counts the Journey's single submission to required assurance
 against Bearing Lite `max_assurance_rounds`. A repair or replacement candidate
-does not reset it; only a separately scoped new Journey starts at 0. The parent
+does not reset it; only a separately scoped, materially changed new Journey starts at 0, and a new Journey is not a way around the bound. The parent
 coordinator writes the count before dispatch. If the review permits correction, spend at
 most one remaining `attempts` repair, run deterministic coordinator verification,
 and close the gate without another review. A failed repair or scope change

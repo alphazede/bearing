@@ -368,8 +368,8 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.ok(lineup >= 0 && lineup < map, "lineup gate must precede task mapping");
     assert.ok(cadence >= 0 && cadence < map, "cadence gate must precede task mapping");
     assert.match(router, /re-specify the failed boundary/);
-    assert.match(router, /diversify the reviewer family/);
-    assert.match(router, /Model-tier escalation is not the default/);
+    assert.match(router, /Diversify the reviewer family/i);
+    assert.match(router, /Model-tier\s+escalation is not the default/);
     assert.match(router, /materially changed new Journey/);
   });
 
@@ -526,16 +526,23 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     const gather = readFileSync(path.join(SKILLS_DIR, "gather-supplies", "SKILL.md"), "utf8");
     const crewmate = readFileSync(path.join(SKILLS_DIR, "crewmate", "SKILL.md"), "utf8");
     const validator = readFileSync(path.join(SKILLS_DIR, "validator", "SKILL.md"), "utf8");
+    const parkRanger = readFileSync(path.join(SKILLS_DIR, "park-ranger", "SKILL.md"), "utf8");
     const grammar = readFileSync(
       path.join(SKILLS_DIR, "map-the-route", "references", "artifact-grammar.md"),
       "utf8"
     );
-    assert.match(router, /defer the Explorer-versus-Expedition question to the route review/);
+    assert.match(router, /defer the Explorer-versus-Expedition question to the\s+route\s+review/);
+    assert.match(
+      router,
+      /Diversify the reviewer family only\s+through an explicit owner-confirmed dated visible amendment/
+    );
     assert.match(mapRoute, /requirements register/);
     assert.match(mapRoute, /Never infer one/);
+    assert.match(mapRoute, /4\. Route review: when the implementation graph/);
     assert.match(mapRoute, /route-review\s+recommendation/);
     assert.match(mapRoute, /Journey type is not recorded/);
     assert.match(mapRoute, /register references versus Journey-local\s+requirements/);
+    assert.match(mapRoute, /Owner-decision pauses do\s+not consume correction rounds/);
     assert.match(gather, /route review after Map the Route/);
     assert.match(grammar, /## Requirements register/);
     assert.match(grammar, /Do not restate registered content/);
@@ -545,6 +552,7 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(grammar, /passing cross-boundary test does not substitute/);
     assert.match(crewmate, /published standard/);
     assert.match(validator, /published\s+standard/);
+    assert.match(parkRanger, /published standard/);
   });
 
   it("Codex metadata keeps the router explicitly invoked", () => {

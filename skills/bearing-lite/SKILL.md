@@ -11,8 +11,7 @@ or hidden ledger. plugin hosts are partial; skill-copy is skills-only.
    resume a generation-bound checkout lease before any planning write or dispatch.
    A live same-checkout competitor returns `WAITING_ON` with sanitized competing identity;
    Distinct explicitly approved compatible worktrees may proceed.
-2. New Journey: defer the Explorer-versus-Expedition question to the route review
-   after Map the Route; run only embarkation decisions knowable before mapping.
+2. New Journey: defer the Explorer-versus-Expedition question to the route review; run embarkation decisions knowable before mapping.
 3. On resume, keep the same lease generation and next incomplete stage. Parent-proven
    same-Journey progress refreshes `candidate_revision` on that generation.
    Never replay accepted stages or duplicate a dispatch.
@@ -40,6 +39,7 @@ or hidden ledger. plugin hosts are partial; skill-copy is skills-only.
    or buys from the mapped wave and dependency structure. Record the Journey type
    before dispatch; Navigator activation is gated on an Expedition answer.
 9. Every ready node gets a fresh session with lineup identity from the recorded snapshot.
+
 Return `READY`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`, or `COMPLETE`. Fallback
 requires primary unavailability; both failing returns to owner. Allow three
 evidence-changing corrections outside assurance. `max_assurance_rounds` is 1
@@ -47,11 +47,13 @@ per Journey; the sole review may authorize one repair. Direct route checks
 `assurance_rounds`; Navigator is not required. After repair, run deterministic
 coordinator verification and close the gate without another review. Failed repair
 or scope change returns `OWNER_DECISION_REQUIRED` naming the candidate and count.
-Reconsider the packet first: re-specify the failed boundary with exact facts,
-diversify the reviewer family, and verify against the cited external standard.
-Model-tier escalation is not the default; it needs evidence of capacity limits
-and an explicit owner-confirmed dated visible amendment. Only a separately
+Reconsider the packet first: re-specify the failed boundary with exact facts and
+verify against the cited external standard. Diversify the reviewer family only
+through an explicit owner-confirmed dated visible amendment. Model-tier
+escalation is not the default; it needs evidence of capacity limits and the same
+amendment path. Only a separately
 scoped, materially changed new Journey resets the review allowance; a new Journey
 is not a way around the bound. `COMPLETE` ends Bearing assurance: authorized
-deployment keeps deployment checks and rollback readiness without reopening review. Candidate-changing deployment work starts a new Journey. release the checkout lease exactly once on `COMPLETE` or `CANCELLED`. Recover by explicit recorded generation increment; it cannot steal a live lease. Process discovery
+deployment keeps deployment checks and rollback readiness without reopening review.
+Candidate-changing deployment work starts a new Journey. release the checkout lease exactly once on `COMPLETE` or `CANCELLED`. Recover by explicit recorded generation increment; it cannot steal a live lease. Process discovery
 cannot replace the lease. Never implement, self-assure, select models, or publish.

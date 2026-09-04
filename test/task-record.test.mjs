@@ -1493,6 +1493,8 @@ describe("CMD-TASK-01 assurance-round bound", () => {
     assert.match(TEMPLATE, /single submission/i);
     assert.match(TEMPLATE, /max_assurance_rounds/);
     assert.match(TEMPLATE, /new Journey starts at 0/i);
+    assert.match(TEMPLATE, /materially changed new Journey/i);
+    assert.match(TEMPLATE, /new Journey is not a way around the bound/i);
   });
 
   it("Direct route spends the final repair without another review", () => {

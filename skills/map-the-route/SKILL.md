@@ -13,8 +13,9 @@ Fresh planning node. The Router remains the plan-state writer and user contact.
 
 ## Inputs and match
 
-- **Inputs:** confirmed decisions, repository map, artifact status, requirements
-  and requirements-register status, lineup/cadence snapshot, repository rules, and return schema.
+- **Inputs:** confirmed decisions plus owner-answered register and route-review
+  answers, repository map, artifact status, requirements, repository evidence,
+  lineup/cadence snapshot, repository rules, and return schema.
 - **Match:** first specification gate or post-approval planning package is missing.
 - **Non-match:** executable tasks already map to current approved artifacts.
 
@@ -31,7 +32,7 @@ Fresh planning node. The Router remains the plan-state writer and user contact.
    `implementation.md`. Run prospective checks internally; interrupt owner only on material
    intent, scope, risk, or authority decisions. With a register, `seit.md` references existing
    verification allocations rather than inventing parallel proof; keep only Journey-level rows.
-4. When the implementation graph reveals the actual wave and dependency structure and the
+4. Route review: when the implementation graph reveals the actual wave and dependency structure and the
    Journey type is not recorded, return `NEEDS_OWNER_DECISION` with a route-review
    recommendation: Explorer Journey or Expedition, citing the mapped structure and what each
    gives up or buys. Never infer the Journey type from the lineup or graph.
@@ -49,6 +50,7 @@ Fresh planning node. The Router remains the plan-state writer and user contact.
 
 Return `PLAN_REVIEW_READY`, `NEEDS_OWNER_DECISION`, or `VALIDATION_FAILED` with artifact
 paths, evidence, blocker, and next action. `NEEDS_OWNER_DECISION` pauses for a register or
-route-review question; resume with the owner's answer. After approval, `review.html` is
+route-review question; resume with the owner's answer. Owner-decision pauses do
+not consume correction rounds. After approval, `review.html` is
 authoritative. At most three evidence-changing correction rounds; never invent approval or
 implement.
