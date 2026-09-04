@@ -15,8 +15,7 @@ amendment.
 - journey: <Explorer Journey | Expedition>
 - review_cadence: <per-slice | per-round | at-end>
 - choice_basis: <owner-confirmed recommendation and reason>
-- lineup_identities: <named primary/fallback instances>
-- lineup_snapshot: <active, standby, and unused classification completed at route review>
+- lineup_snapshot: <named primary/fallback instances; role-state classification completed at route review>
 ```
 
 `review_cadence` selects where the Journey's single independent review runs,

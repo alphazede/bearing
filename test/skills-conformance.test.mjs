@@ -537,8 +537,9 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       /Diversify the reviewer family only\s+through an explicit owner-confirmed dated visible amendment/
     );
     assert.match(router, /Defer active\/standby\/unused classification to route review/);
-    assert.match(router, /Record Journey type and role states before dispatch/);
-    assert.match(router, /Reject an Explorer choice that\s+cannot execute the mapped graph/);
+    assert.match(router, /Record Journey type and role states/);
+    assert.match(router, /dispatch only after owner approval/);
+    assert.match(router, /Reject Explorer choices the\s+mapped\s+graph cannot execute/);
     assert.match(router, /when the packet implements a published standard, verify against the cited text/);
     assert.match(mapRoute, /requirements register/);
     assert.match(mapRoute, /Never infer one/);
@@ -556,6 +557,7 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(grammar, /Where the register provides none for a referenced requirement/);
     assert.match(grammar, /`review\.html` marks every requirement as either a register reference or\s+Journey-local/);
     assert.match(grammar, /## Published standards/);
+    assert.match(grammar, /Published standard \(`doc#clause`\) when applicable/);
     assert.match(grammar, /cite the exact document and clause/);
     assert.match(grammar, /passing cross-boundary test does not substitute/);
     assert.match(crewmate, /published standard/);
