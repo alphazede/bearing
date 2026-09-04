@@ -390,6 +390,26 @@ describe("verified host mapping", () => {
     assert.notEqual(response.decision, "block");
   });
 
+  it("present but invalid verdict is not reported as a missing field", () => {
+    const cwd = path.join(tmp, "invalid-verdict");
+    mkdirSync(cwd);
+    writePlan(cwd, INTENT_AS_RECEIPT_PLAN.replace(
+      "- findings: none\n- blocker: none",
+      "- findings: none\n- verdict: add host mapping\n- blocker: none"
+    ));
+    const response = host.handle({
+      session_id: "s-invalid-verdict",
+      cwd,
+      hook_event_name: "Stop",
+    });
+    const context = response.hookSpecificOutput.additionalContext;
+    assert.match(context, /handoff_invalid:verdict/);
+    assert.match(context, /PASS/);
+    assert.doesNotMatch(context, /handoff_incomplete:verdict/);
+    assert.doesNotMatch(context, /handoff_complete/);
+    assert.notEqual(response.decision, "block");
+  });
+
   it("active complete Journey preserves documented advisory closeout", () => {
     const cwd = path.join(tmp, "complete-journey");
     mkdirSync(cwd);

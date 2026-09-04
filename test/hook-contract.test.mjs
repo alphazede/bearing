@@ -142,6 +142,34 @@ describe("CMD-HOOK-01 hook-contract (SEIT-HOOK-CLASS-01, SEIT-HOOK-COVERAGE-01)"
     assert.equal(intentOnly.outcome, "ADVISE");
     assert.equal(intentOnly.reason, "handoff_incomplete:verdict");
 
+    const invalidVerdict = closeout.evaluate({
+      verdict: "pass",
+      candidate_ref: "cand-abc",
+      changed_paths: ["test/hook-contract.test.mjs"],
+      tests: "ok",
+      findings: "none",
+      blocker: "none",
+    });
+    assert.equal(invalidVerdict.outcome, "ADVISE");
+    assert.equal(invalidVerdict.reason, "handoff_invalid:verdict");
+    assert.match(String(invalidVerdict.recovery), /PASS/);
+    assert.notEqual(invalidVerdict.reason, "handoff_incomplete:verdict");
+
+    const protectedInvalid = closeout.evaluate({
+      mode: "protected_completion",
+      verdict: "pass",
+      candidate_ref: "cand-abc",
+      changed_paths: ["test/hook-contract.test.mjs"],
+      tests: "ok",
+      findings: "none",
+      blocker: "none",
+      required_assurance: [],
+      assurance_accepted: [],
+      candidate_matched: true,
+    });
+    assert.equal(protectedInvalid.outcome, "BLOCK");
+    assert.match(String(protectedInvalid.reason), /protected_completion_invalid:handoff:verdict/);
+
     const blocked = closeout.evaluate({
       mode: "protected_completion",
       handoff,
