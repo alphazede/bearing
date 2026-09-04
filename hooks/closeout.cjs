@@ -42,6 +42,9 @@ const RECOVERY_UNAVAILABLE =
   "Report UNAVAILABLE, complete the handoff checklist manually, and do not request protected completion until required fields and assurance are present";
 const RECOVERY_HANDOFF =
   "Complete the compact receipt (verdict, candidate_ref, changed_paths, tests, findings, blocker) in the project plan";
+const RECOVERY_INVALID_VERDICT =
+  "Replace verdict with a closed role-return token: " +
+  [...VERDICT_VALUES].join(", ");
 const RECOVERY_COMPLETE =
   "Handoff is complete; parent coordinator may advance using the project plan only";
 const RECOVERY_BLOCK_COMPLETION =
@@ -88,9 +91,10 @@ function normalizeAssurance(value) {
   return [String(value)].filter((s) => s && s !== "none");
 }
 
-function missingHandoffFields(input) {
+function inspectHandoffFields(input) {
   const handoff = isPlainObject(input.handoff) ? input.handoff : input;
   const missing = [];
+  const invalid = [];
   for (const field of HANDOFF_FIELDS) {
     const value = handoff[field];
     if (value === undefined || value === null) {
@@ -102,11 +106,11 @@ function missingHandoffFields(input) {
       continue;
     }
     if (field === "verdict" && (typeof value !== "string" || !VERDICT_VALUES.has(value.trim()))) {
-      missing.push(field);
+      invalid.push(field);
     }
   }
   // blocker may be the string "none"; that is present and valid.
-  return missing;
+  return { missing, invalid };
 }
 
 /**
@@ -141,7 +145,7 @@ function evaluate(input) {
         ? "protected_completion"
         : "advisory";
 
-    const missing = missingHandoffFields(input);
+    const { missing, invalid } = inspectHandoffFields(input);
     const required = normalizeAssurance(input.required_assurance);
     const accepted = Array.isArray(input.assurance_accepted)
       ? input.assurance_accepted.map(String)
@@ -158,7 +162,8 @@ function evaluate(input) {
 
     if (mode === "protected_completion") {
       const blockers = [];
-      if (missing.length > 0) blockers.push("handoff:" + missing.join(","));
+      const handoffProblems = [...missing, ...invalid];
+      if (handoffProblems.length > 0) blockers.push("handoff:" + handoffProblems.join(","));
       if (missingAssurance.length > 0) {
         blockers.push("assurance:" + missingAssurance.join(","));
       }
@@ -188,6 +193,14 @@ function evaluate(input) {
         "ADVISE",
         "handoff_incomplete:" + missing.join(","),
         RECOVERY_HANDOFF
+      );
+    }
+
+    if (invalid.length > 0) {
+      return result(
+        "ADVISE",
+        "handoff_invalid:" + invalid.join(","),
+        RECOVERY_INVALID_VERDICT
       );
     }
 
