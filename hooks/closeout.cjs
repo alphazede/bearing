@@ -12,7 +12,7 @@ const OUTCOMES = Object.freeze(["ADVISE", "REROUTE", "BLOCK", "UNAVAILABLE"]);
 const ENFORCEMENT = "procedural";
 
 const HANDOFF_FIELDS = Object.freeze([
-  "outcome",
+  "verdict",
   "candidate_ref",
   "changed_paths",
   "tests",
@@ -20,10 +20,28 @@ const HANDOFF_FIELDS = Object.freeze([
   "blocker",
 ]);
 
+/** Closed role-return tokens. Task-block `outcome` is intent and cannot satisfy this. */
+const VERDICT_VALUES = new Set([
+  "ACCEPT",
+  "ACCEPT_WITH_FINDINGS",
+  "BLOCK",
+  "CANDIDATE_READY",
+  "FAIL",
+  "GAPS",
+  "NEEDS_MORE_EVIDENCE",
+  "OWNER_DECISION_REQUIRED",
+  "PARTIAL",
+  "PASS",
+  "READY",
+  "REPAIR_REQUIRED",
+  "REROUTED",
+  "WAITING_ON",
+]);
+
 const RECOVERY_UNAVAILABLE =
   "Report UNAVAILABLE, complete the handoff checklist manually, and do not request protected completion until required fields and assurance are present";
 const RECOVERY_HANDOFF =
-  "Complete the compact receipt (outcome, candidate_ref, changed_paths, tests, findings, blocker) in the project plan";
+  "Complete the compact receipt (verdict, candidate_ref, changed_paths, tests, findings, blocker) in the project plan";
 const RECOVERY_COMPLETE =
   "Handoff is complete; parent coordinator may advance using the project plan only";
 const RECOVERY_BLOCK_COMPLETION =
@@ -80,6 +98,10 @@ function missingHandoffFields(input) {
       continue;
     }
     if (typeof value === "string" && value.trim() === "") {
+      missing.push(field);
+      continue;
+    }
+    if (field === "verdict" && (typeof value !== "string" || !VERDICT_VALUES.has(value.trim()))) {
       missing.push(field);
     }
   }
@@ -229,6 +251,7 @@ module.exports = {
   OUTCOMES,
   ENFORCEMENT,
   HANDOFF_FIELDS,
+  VERDICT_VALUES,
   evaluate,
 };
 

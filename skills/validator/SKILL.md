@@ -34,7 +34,7 @@ Independent assurance responsibility, outside the mutation-authority ladder.
 
 ## Return and recovery
 
-Return `PASS`, `NEEDS_MORE_EVIDENCE`, or `FAIL` with outcome, candidate_ref,
+Return `PASS`, `NEEDS_MORE_EVIDENCE`, or `FAIL` with verdict, candidate_ref,
 changed_paths, tests, findings, and blocker. `PASS` is terminal.
 `NEEDS_MORE_EVIDENCE` and `FAIL` permit bounded correction. Coordinators
 enforce `max_assurance_rounds` of 1; this role does not redispatch or re-evaluate

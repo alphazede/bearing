@@ -47,7 +47,7 @@ trees) and sets only:
 | `router_invoked` | a non-placeholder `- journey:` setting is present, including the Journey identity nested inside the `checkout_lease` block |
 | `assigned_role` | active task `assigned_role` when not `unassigned` or `<…>` |
 | `next_action` / `next_action_known` | active task `next_action` when not a placeholder |
-| closeout handoff fields | matching task-record keys when present |
+| closeout handoff fields | matching task-record keys when present. Receipt `verdict` is a closed role-return token; task `outcome` is approved intent and is not mapped into the receipt |
 
 `assigned_role` and `router_invoked` are **not** inferred from the tool-call
 payload. Missing values stay missing, so activation advises the router instead

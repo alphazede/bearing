@@ -36,7 +36,7 @@ Independent defect assurance, outside the mutation-authority ladder.
 ## Return and recovery
 
 Return `BLOCK`, `REPAIR_REQUIRED`, `ACCEPT_WITH_FINDINGS`, or `ACCEPT` with
-outcome, candidate_ref, changed_paths, tests, findings, and blocker.
+verdict, candidate_ref, changed_paths, tests, findings, and blocker.
 `ACCEPT`, `ACCEPT_WITH_FINDINGS`, and `BLOCK` are terminal. `REPAIR_REQUIRED`
 permits bounded correction. `ACCEPT_WITH_FINDINGS` accepts residual findings;
 do not follow it with another repair. Coordinators enforce

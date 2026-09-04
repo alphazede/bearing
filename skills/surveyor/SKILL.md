@@ -34,7 +34,7 @@ Independent outcome assurance, outside the mutation-authority ladder.
 
 ## Return and recovery
 
-Return `ACCEPT`, `GAPS`, or `OWNER_DECISION_REQUIRED` with outcome,
+Return `ACCEPT`, `GAPS`, or `OWNER_DECISION_REQUIRED` with verdict,
 candidate_ref, changed_paths, tests, findings, and blocker.
 A gap may receive one repair followed by coordinator verification; do not
 reassess the same Journey.

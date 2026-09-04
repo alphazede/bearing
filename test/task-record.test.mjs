@@ -28,6 +28,7 @@ const AFTER_CANDIDATE_FIELDS = [
   "changed_paths",
   "tests",
   "findings",
+  "verdict",
   "assurance_rounds",
 ];
 const WAITING_CORRECTING_FIELDS = ["blocker", "attempts"];
@@ -750,8 +751,10 @@ describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)",
     assert.match(TEMPLATE, /Router alone changes cross-wave/);
     assert.match(
       TEMPLATE,
-      /```markdown\n- candidate_ref:[\s\S]*- changed_paths:[\s\S]*- tests:[\s\S]*- findings:/
+      /```markdown\n- candidate_ref:[\s\S]*- changed_paths:[\s\S]*- tests:[\s\S]*- findings:[\s\S]*- verdict:/
     );
+    assert.match(TEMPLATE, /Never a role-return token/);
+    assert.match(TEMPLATE, /Do not copy task `outcome` into `verdict`/);
     assert.match(TEMPLATE, /once per wave/);
   });
 
@@ -824,6 +827,7 @@ describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)",
         changed_paths: ["test/"],
         tests: "node --test exit 0",
         findings: "none",
+        verdict: "CANDIDATE_READY",
         assurance_rounds: 0,
       },
       { phase: "after_candidate" }
