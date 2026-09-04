@@ -115,17 +115,12 @@ describe("CMD-HOOK-01 hook-contract (SEIT-HOOK-CLASS-01, SEIT-HOOK-COVERAGE-01)"
 
   it("closeout advisory vs narrow BLOCK for protected completion", () => {
     const handoff = {
-      plan_ref: "plan",
-      role: "crewmate",
-      subject: "S8",
-      depends_on: [],
-      scope: "test/",
-      authority: "S8",
       outcome: "PASS",
-      evidence: "ok",
+      candidate_ref: "cand-abc",
+      changed_paths: ["test/hook-contract.test.mjs"],
+      tests: "ok",
+      findings: "none",
       blocker: "none",
-      next_action: "confirm",
-      receiving_role: "explorer",
     };
     const advisory = closeout.evaluate({
       handoff,

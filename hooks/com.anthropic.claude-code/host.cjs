@@ -52,7 +52,7 @@ const SKIP_DIRS = new Set([
 const TASK_MARK = /(?:^|\n)###\s*task_id:\s*\S+/;
 const TASK_LINE = /^###\s*task_id:\s*(\S+)\s*$/;
 const FIELD_LINE =
-  /^-\s*(assigned_role|next_action|status|required_assurance|blocker|evidence|candidate_ref|scope|authority|outcome|depends_on|receiving_role|plan_ref|role|subject):\s*(.*)$/;
+  /^-\s*(assigned_role|next_action|status|required_assurance|blocker|evidence|candidate_ref|scope|authority|outcome|depends_on|receiving_role|plan_ref|role|subject|changed_paths|tests|findings):\s*(.*)$/;
 // Matches both the plan-level Journey type and the lease-nested Journey
 // identity; either non-placeholder value marks the Router as invoked.
 const JOURNEY_LINE = /^\s*-\s*journey:\s*(.+)$/i;
@@ -327,17 +327,12 @@ function evaluateForHost(eventName, derived) {
   if (classForEvent(eventName) === "closeout") {
     const task = derived.active_task || {};
     return closeout.evaluate({
-      plan_ref: derived.plan_present ? "project-plan" : undefined,
-      role: presentString(task.assigned_role) || presentString(task.role),
-      subject: presentString(task.task_id) || presentString(task.subject),
-      depends_on: task.depends_on,
-      scope: presentString(task.scope),
-      authority: presentString(task.authority),
       outcome: presentString(task.outcome),
-      evidence: presentString(task.evidence),
+      candidate_ref: presentString(task.candidate_ref),
+      changed_paths: presentString(task.changed_paths),
+      tests: presentString(task.tests),
+      findings: presentString(task.findings),
       blocker: presentString(task.blocker) || "none",
-      next_action: presentString(task.next_action),
-      receiving_role: presentString(task.receiving_role),
       required_assurance: task.required_assurance,
     });
   }

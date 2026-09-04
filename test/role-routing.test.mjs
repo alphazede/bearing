@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
  *   explorerImplements?: boolean,
  *   forceControllersOnSinglePacket?: boolean,
  *   omitWaveCoordination?: boolean,
+ *   assignNavigator?: boolean,
  * }} RouteInput
  *
  * @typedef {{
@@ -66,7 +67,14 @@ export function selectRoute(input) {
     return {
       ok: false,
       code: "expedition_omits_wave_coordination",
-      message: "Expedition requires Navigator wave coordination",
+      message: "Expedition requires Router wave coordination",
+    };
+  }
+  if (input.assignNavigator === true) {
+    return {
+      ok: false,
+      code: "navigator_not_normal_role",
+      message: "Navigator is a compatibility diagnostic; Router owns sequencing",
     };
   }
 
@@ -78,7 +86,7 @@ export function selectRoute(input) {
   } else if (input.kind === "explorer_wave") {
     active.push("explorer", "crewmate");
   } else if (input.kind === "expedition") {
-    active.push("navigator", "explorer", "crewmate");
+    active.push("explorer", "crewmate");
   } else {
     return {
       ok: false,
@@ -99,7 +107,7 @@ export function selectRoute(input) {
 
   const activeSet = new Set(active);
   const dormant = ALL_ROLES.filter((r) => !activeSet.has(r));
-  const coordinators = active.filter((r) => ["explorer", "navigator"].includes(r));
+  const coordinators = active.filter((r) => r === "explorer");
   const workers = active.filter((r) => r === "crewmate");
 
   // Direct never activates controllers.
@@ -145,14 +153,15 @@ describe("CMD-ROUTING-01 role-routing (SEIT-ROUTING-01)", () => {
     }
   });
 
-  it("Expedition: Navigator sequences waves and conflicts; Explorer owns lanes", () => {
+  it("Expedition: Router sequences waves; Explorer owns lanes; Navigator stays dormant", () => {
     const simple = selectRoute({ kind: "expedition", packetCount: 4 });
     assert.equal(simple.ok, true);
     if (simple.ok) {
-      assert.ok(simple.active.includes("navigator"));
+      assert.ok(!simple.active.includes("navigator"));
       assert.ok(simple.active.includes("explorer"));
       assert.ok(simple.active.includes("crewmate"));
-      assert.deepEqual(simple.coordinators, ["navigator", "explorer"]);
+      assert.deepEqual(simple.coordinators, ["explorer"]);
+      assert.ok(simple.dormant.includes("navigator"));
     }
     const conflicted = selectRoute({
       kind: "expedition",
@@ -161,9 +170,15 @@ describe("CMD-ROUTING-01 role-routing (SEIT-ROUTING-01)", () => {
     });
     assert.equal(conflicted.ok, true);
     if (conflicted.ok) {
-      assert.deepEqual(conflicted.active, ["navigator", "explorer", "crewmate"]);
-      assert.deepEqual(conflicted.coordinators, ["navigator", "explorer"]);
+      assert.deepEqual(conflicted.active, ["explorer", "crewmate"]);
+      assert.deepEqual(conflicted.coordinators, ["explorer"]);
     }
+  });
+
+  it("negative: assigning Navigator is a compatibility diagnostic, not a route", () => {
+    const verdict = selectRoute({ kind: "expedition", assignNavigator: true });
+    assert.equal(verdict.ok, false);
+    if (!verdict.ok) assert.equal(verdict.code, "navigator_not_normal_role");
   });
 
   it("negative: removed delegated route is rejected", () => {
@@ -240,18 +255,12 @@ const LEASE_IDENTITY_FIELDS = Object.freeze([
   "generation",
 ]);
 
-/** @typedef {'navigator'|'explorer'|'crewmate'} ExecutionRole */
-/** @typedef {'first_write'|'mutation'|'dispatch'|'integration'|'cross_wave_transition'} LeaseBoundary */
+/** @typedef {'explorer'|'crewmate'} ExecutionRole */
+/** @typedef {'wave_start'|'external_change'|'commit'|'mutation'|'first_write'|'dispatch'|'integration'|'cross_wave_transition'} LeaseBoundary */
 
 export const REQUIRED_LEASE_BOUNDARIES = Object.freeze({
-  navigator: Object.freeze([
-    "first_write",
-    "dispatch",
-    "integration",
-    "cross_wave_transition",
-  ]),
-  explorer: Object.freeze(["first_write", "dispatch", "integration"]),
-  crewmate: Object.freeze(["first_write", "mutation"]),
+  explorer: Object.freeze(["wave_start", "external_change", "commit"]),
+  crewmate: Object.freeze(["wave_start", "external_change", "commit"]),
 });
 
 /**
@@ -338,7 +347,7 @@ export function revalidateExecutionLease(input) {
     return leaseMismatch(
       input.role,
       "unknown_execution_role",
-      "only Navigator, Explorer, and Crewmate revalidate at execution boundaries"
+      "only Explorer and Crewmate revalidate at execution boundaries"
     );
   }
   if (!required.includes(input.boundary)) {
@@ -447,7 +456,7 @@ export function revalidateExecutionLease(input) {
   return {
     ok: true,
     write: input.role === "crewmate",
-    dispatch: input.boundary === "dispatch" && input.alreadyDispatched !== true,
+    dispatch: input.boundary === "wave_start" && input.alreadyDispatched !== true,
     lease: nextLease,
   };
 }
@@ -480,19 +489,19 @@ function fixtureApproved(overrides = {}) {
 }
 
 describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
-  it("every execution role revalidates identity before its first write", () => {
-    for (const role of /** @type {const} */ (["navigator", "explorer", "crewmate"])) {
-      assert.ok(REQUIRED_LEASE_BOUNDARIES[role].includes("first_write"), role);
+  it("every execution role revalidates identity at wave start", () => {
+    for (const role of /** @type {const} */ (["explorer", "crewmate"])) {
+      assert.ok(REQUIRED_LEASE_BOUNDARIES[role].includes("wave_start"), role);
       const ok = revalidateExecutionLease({
         role,
-        boundary: "first_write",
+        boundary: "wave_start",
         lease: fixtureLease(),
         approved: fixtureApproved(),
       });
       assert.equal(ok.ok, true, role);
       const drifted = revalidateExecutionLease({
         role,
-        boundary: "first_write",
+        boundary: "wave_start",
         lease: fixtureLease(),
         approved: fixtureApproved({ repository: "other/repo" }),
       });
@@ -506,35 +515,28 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
     }
   });
 
-  it("Navigator revalidates before dispatch, integration, and cross-wave transition", () => {
-    assert.deepEqual(REQUIRED_LEASE_BOUNDARIES.navigator, [
-      "first_write",
-      "dispatch",
-      "integration",
-      "cross_wave_transition",
-    ]);
-    for (const boundary of REQUIRED_LEASE_BOUNDARIES.navigator) {
-      const verdict = revalidateExecutionLease({
-        role: "navigator",
-        boundary,
-        lease: fixtureLease({ state: "released" }),
-        approved: fixtureApproved(),
-      });
-      assert.equal(verdict.ok, false, boundary);
-      if (!verdict.ok) {
-        assert.equal(verdict.write, false);
-        assert.equal(verdict.dispatch, false);
-      }
+  it("Navigator is not an execution revalidation role", () => {
+    const verdict = revalidateExecutionLease({
+      role: /** @type {ExecutionRole} */ ("navigator"),
+      boundary: "wave_start",
+      lease: fixtureLease(),
+      approved: fixtureApproved(),
+    });
+    assert.equal(verdict.ok, false);
+    if (!verdict.ok) {
+      assert.equal(verdict.code, "unknown_execution_role");
+      assert.equal(verdict.write, false);
+      assert.equal(verdict.dispatch, false);
     }
   });
 
-  it("Explorer revalidates before dispatch and integration", () => {
+  it("Explorer revalidates at wave start, external change, and commit", () => {
     assert.deepEqual(REQUIRED_LEASE_BOUNDARIES.explorer, [
-      "first_write",
-      "dispatch",
-      "integration",
+      "wave_start",
+      "external_change",
+      "commit",
     ]);
-    for (const boundary of ["dispatch", "integration"]) {
+    for (const boundary of ["external_change", "commit"]) {
       const verdict = revalidateExecutionLease({
         role: "explorer",
         boundary: /** @type {LeaseBoundary} */ (boundary),
@@ -549,11 +551,26 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
     }
   });
 
-  it("Crewmate revalidates before every mutation and returns WAITING_ON without writing", () => {
-    assert.deepEqual(REQUIRED_LEASE_BOUNDARIES.crewmate, ["first_write", "mutation"]);
-    const mismatch = revalidateExecutionLease({
+  it("Crewmate does not revalidate before every mutation", () => {
+    assert.deepEqual(REQUIRED_LEASE_BOUNDARIES.crewmate, [
+      "wave_start",
+      "external_change",
+      "commit",
+    ]);
+    const mutation = revalidateExecutionLease({
       role: "crewmate",
       boundary: "mutation",
+      lease: fixtureLease(),
+      approved: fixtureApproved(),
+    });
+    assert.equal(mutation.ok, false);
+    if (!mutation.ok) {
+      assert.equal(mutation.code, "undeclared_execution_boundary");
+      assert.equal(mutation.write, false);
+    }
+    const mismatch = revalidateExecutionLease({
+      role: "crewmate",
+      boundary: "wave_start",
       lease: fixtureLease({ journey: "J-B" }),
       approved: fixtureApproved(),
     });
@@ -566,7 +583,7 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
     }
     const allowed = revalidateExecutionLease({
       role: "crewmate",
-      boundary: "mutation",
+      boundary: "commit",
       lease: fixtureLease(),
       approved: fixtureApproved(),
     });
@@ -596,7 +613,7 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
     for (const fixture of cases) {
       const verdict = revalidateExecutionLease({
         role: "explorer",
-        boundary: "dispatch",
+        boundary: "external_change",
         lease: fixtureLease(),
         approved: fixture.approved ?? fixtureApproved(),
         observed: fixture.observed,
@@ -612,8 +629,8 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
 
   it("released, stale, and forged leases fail closed", () => {
     const released = revalidateExecutionLease({
-      role: "navigator",
-      boundary: "integration",
+      role: "explorer",
+      boundary: "commit",
       lease: fixtureLease({ state: "released" }),
       approved: fixtureApproved(),
     });
@@ -621,8 +638,8 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
     if (!released.ok) assert.equal(released.code, "lease_not_active");
 
     const stale = revalidateExecutionLease({
-      role: "navigator",
-      boundary: "dispatch",
+      role: "explorer",
+      boundary: "wave_start",
       lease: fixtureLease({ generation: 3 }),
       approved: fixtureApproved({ generation: 3 }),
       observed: { generation: 1 },
@@ -632,7 +649,7 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
 
     const forged = revalidateExecutionLease({
       role: "crewmate",
-      boundary: "mutation",
+      boundary: "wave_start",
       lease: fixtureLease({
         // @ts-expect-error intentional fixture
         pid: 999,
@@ -649,8 +666,8 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
 
   it("same valid lease continues without duplicate dispatch", () => {
     const first = revalidateExecutionLease({
-      role: "navigator",
-      boundary: "dispatch",
+      role: "explorer",
+      boundary: "wave_start",
       lease: fixtureLease(),
       approved: fixtureApproved(),
     });
@@ -658,8 +675,8 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
     if (first.ok) assert.equal(first.dispatch, true);
 
     const resume = revalidateExecutionLease({
-      role: "navigator",
-      boundary: "dispatch",
+      role: "explorer",
+      boundary: "wave_start",
       lease: fixtureLease(),
       approved: fixtureApproved(),
       alreadyDispatched: true,
@@ -672,7 +689,7 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
 
     const wave = revalidateExecutionLease({
       role: "explorer",
-      boundary: "integration",
+      boundary: "commit",
       lease: fixtureLease(),
       approved: fixtureApproved(),
       alreadyDispatched: true,
@@ -685,7 +702,7 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
     const lease = fixtureLease({ candidate_revision: "4040dfe", generation: 1 });
     const integrate = revalidateExecutionLease({
       role: "explorer",
-      boundary: "integration",
+      boundary: "commit",
       lease,
       approved: fixtureApproved({ candidate_revision: "cafebabe" }),
       observed: {
@@ -702,7 +719,7 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
 
     const nextDispatch = revalidateExecutionLease({
       role: "explorer",
-      boundary: "dispatch",
+      boundary: "wave_start",
       lease: integrate.lease,
       approved: fixtureApproved({ candidate_revision: "cafebabe" }),
     });
@@ -714,7 +731,7 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
 
     const nextWrite = revalidateExecutionLease({
       role: "crewmate",
-      boundary: "mutation",
+      boundary: "commit",
       lease: integrate.lease,
       approved: fixtureApproved({ candidate_revision: "cafebabe" }),
     });
@@ -726,7 +743,7 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
   it("foreign controller, unrelated HEAD, and released lease stay WAITING_ON without mutation", () => {
     const foreignController = revalidateExecutionLease({
       role: "explorer",
-      boundary: "integration",
+      boundary: "commit",
       lease: fixtureLease(),
       approved: fixtureApproved({ controller: "Other" }),
     });
@@ -739,7 +756,7 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
 
     const unrelatedHead = revalidateExecutionLease({
       role: "explorer",
-      boundary: "integration",
+      boundary: "external_change",
       lease: fixtureLease({ candidate_revision: "4040dfe" }),
       approved: fixtureApproved({ candidate_revision: "deadbeef" }),
       observed: {
@@ -755,8 +772,8 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
     }
 
     const released = revalidateExecutionLease({
-      role: "navigator",
-      boundary: "integration",
+      role: "explorer",
+      boundary: "commit",
       lease: fixtureLease({ state: "released" }),
       approved: fixtureApproved(),
       observed: {
@@ -770,5 +787,111 @@ describe("CMD-ROUTING-01 checkout-lease revalidation", () => {
       assert.equal(released.code, "lease_not_active");
       assert.equal(released.write, false);
     }
+  });
+});
+
+/**
+ * @typedef {{
+ *   role: Role,
+ *   envelopeUnchanged?: boolean,
+ *   independentWork?: boolean,
+ *   ownerChoiceFresh?: boolean,
+ *   boundary?: 'slice' | 'round' | 'at-end',
+ *   reuseAuthor?: boolean,
+ * }} ContinuationInput
+ */
+
+/**
+ * Skill-contract model of session reuse. Hosts start sessions; this only
+ * says when a fresh session is required.
+ * @param {ContinuationInput} input
+ */
+export function selectContinuation(input) {
+  const assurance = new Set(["validator", "park-ranger", "surveyor"]);
+  if (input.role === "navigator") {
+    return { ok: false, code: "navigator_not_normal_role", fresh: false, continue: false };
+  }
+  if (assurance.has(input.role)) {
+    if (input.boundary && input.boundary !== "at-end") {
+      return { ok: false, code: "assurance_not_at_end", fresh: true, continue: false };
+    }
+    if (input.reuseAuthor) {
+      return { ok: false, code: "assurance_reuses_author", fresh: true, continue: false };
+    }
+    return { ok: true, fresh: true, continue: false };
+  }
+  if (input.role === "crewmate" || input.role === "explorer") {
+    if (input.independentWork || input.ownerChoiceFresh || input.envelopeUnchanged === false) {
+      return { ok: true, fresh: true, continue: false };
+    }
+    return { ok: true, fresh: false, continue: true };
+  }
+  return { ok: false, code: "unknown_role", fresh: false, continue: false };
+}
+
+/**
+ * @param {{ receipt?: boolean, rereadAllAccepted?: boolean, redispatchCompleted?: boolean }} input
+ */
+export function resumeFromWaveReceipt(input) {
+  if (!input.receipt) return { ok: false, code: "missing_wave_receipt" };
+  if (input.rereadAllAccepted) return { ok: false, code: "receipt_avoids_full_reread" };
+  if (input.redispatchCompleted) return { ok: false, code: "completed_slices_stay_complete" };
+  return { ok: true };
+}
+
+describe("CMD-ROUTING-01 same-wave continuation and at-end assurance", () => {
+  it("matching: three dependent slices plus one correction reuse one Crewmate", () => {
+    const slices = ["T1", "T2", "T3", "T3-repair"].map(() =>
+      selectContinuation({ role: "crewmate", envelopeUnchanged: true })
+    );
+    for (const step of slices) {
+      assert.equal(step.ok, true);
+      assert.equal(step.continue, true);
+      assert.equal(step.fresh, false);
+    }
+    const receipt = resumeFromWaveReceipt({ receipt: true });
+    assert.equal(receipt.ok, true);
+  });
+
+  it("non-matching: assurance cannot reuse author context or run before the end", () => {
+    for (const role of /** @type {const} */ (["validator", "park-ranger", "surveyor"])) {
+      const slice = selectContinuation({ role, boundary: "slice" });
+      assert.equal(slice.ok, false);
+      if (!slice.ok) assert.equal(slice.code, "assurance_not_at_end");
+      const reuse = selectContinuation({ role, boundary: "at-end", reuseAuthor: true });
+      assert.equal(reuse.ok, false);
+      if (!reuse.ok) assert.equal(reuse.code, "assurance_reuses_author");
+      const ok = selectContinuation({ role, boundary: "at-end" });
+      assert.equal(ok.ok, true);
+      assert.equal(ok.fresh, true);
+    }
+  });
+
+  it("interruption resumes from the visible receipt without rereading or redispatch", () => {
+    assert.equal(resumeFromWaveReceipt({ receipt: true }).ok, true);
+    const reread = resumeFromWaveReceipt({ receipt: true, rereadAllAccepted: true });
+    assert.equal(reread.ok, false);
+    if (!reread.ok) assert.equal(reread.code, "receipt_avoids_full_reread");
+    const redispatch = resumeFromWaveReceipt({ receipt: true, redispatchCompleted: true });
+    assert.equal(redispatch.ok, false);
+    if (!redispatch.ok) assert.equal(redispatch.code, "completed_slices_stay_complete");
+  });
+
+  it("external change or envelope change forces revalidation or a fresh session", () => {
+    const fresh = selectContinuation({
+      role: "crewmate",
+      envelopeUnchanged: false,
+    });
+    assert.equal(fresh.ok, true);
+    assert.equal(fresh.fresh, true);
+    const drift = revalidateExecutionLease({
+      role: "crewmate",
+      boundary: "external_change",
+      lease: fixtureLease(),
+      approved: fixtureApproved(),
+      observed: { branch: "other" },
+    });
+    assert.equal(drift.ok, false);
+    if (!drift.ok) assert.equal(drift.code, "lease_identity_drift");
   });
 });

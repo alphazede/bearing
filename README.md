@@ -8,10 +8,11 @@ planning, routing, bounded execution, and independent review of repository work.
 It ships portable skills, references, templates, and optional client hooks.
 
 An agent cannot certify its own work. The stateful Router owns the planning
-conversation and visible Journey state, then dispatches fresh bounded sessions.
-Independent assurance runs once at the owner's selected boundary: after a
-slice, after an integrated round, or at the end. One repair may follow; it is
-verified deterministically without another review. Owner Authority remains human-only.
+conversation, visible Journey state, and Expedition sequencing. Crewmate and
+Explorer may continue in-wave when the envelope is unchanged. Independent
+assurance runs once at the end on the final integrated candidate. One repair
+may follow; it is verified deterministically without another review. Owner
+Authority remains human-only.
 
 Bearing Lite was created by William Rumph.
 
@@ -28,9 +29,9 @@ Then give your agent a real task:
 > Use Bearing Lite to add rate limiting to this API without changing its public
 > responses. Require one independent review at the end.
 
-Bearing Lite fills only the missing planning stages, confirms the agent lineup
-and review cadence, maps the route, then asks whether the work should run as an
-Explorer Journey or an Expedition before dispatching bounded sessions with
+Bearing Lite fills only the missing planning stages, confirms the agent lineup,
+records at-end review, maps the route, then asks whether the work should run as
+an Explorer Journey or an Expedition before dispatching bounded sessions with
 visible Markdown state.
 
 If Bearing Lite helps keep a long agent task scoped and reviewable,
@@ -83,11 +84,12 @@ register hooks. That path remains first-class. See
 
 1. **Fill only missing planning stages:** Repository Fit → Set Bearings → Gather
    Supplies.
-2. **Confirm** the user-owned primary/fallback lineup and single review boundary.
+2. **Confirm** the user-owned primary/fallback lineup and record at-end review.
 3. **Invoke Map the Route.** At its route-review pause, ask whether the Journey is
    an Explorer Journey or an Expedition using the mapped wave and dependency
    structure, then finalize `review.html`.
-4. **Dispatch fresh sessions** with bounded context, authority, and return types.
+4. **Dispatch bounded sessions** with compact receipts. Crewmate and Explorer may
+   continue in-wave; assurance always starts fresh at the end.
 5. **Record state visibly** in human-readable Markdown artifacts only.
 
 Bearing Lite never selects models, providers, credentials, or launchers. The
@@ -100,11 +102,11 @@ the applicable Journey snapshot before implementation.
 | Route | When | Cost |
 |---|---|---|
 | **Explorer Journey** | One bounded packet or one wave | Direct Crewmate or one Explorer |
-| **Expedition** | Multi-phase or concurrent independent lanes | Navigator |
+| **Expedition** | Multi-phase or concurrent independent lanes | Router sequences; Explorer owns waves |
 
 An **Explorer Journey** uses a direct Crewmate for one ready packet or one
 Explorer over a compact/sequential wave.
-**Expedition** adds navigation so independent lanes
+**Expedition** lets the Router sequence waves so independent lanes
 stay small and sharp instead of degrading in one long context. Either shape can
 use substantial tokens; the product does not impose a default budget ceiling.
 
@@ -115,20 +117,20 @@ The text below remains authoritative for clients that do not render Mermaid.
 
 **Authoritative text (vision optional):** Owner Authority remains human-only. The
 Bearing Lite Router is the stateful planning controller, not a work role. It
-invokes only missing planning stages in fresh sessions, confirms the owner's
-lineup and cadence, asks Explorer-versus-Expedition at Map the Route's route
+invokes only missing planning stages, confirms the owner's
+lineup, records `review_cadence: at-end`, asks Explorer-versus-Expedition at Map the Route's route
 review, and then dispatches an Explorer Journey or Expedition. Explorer
 coordinates proven-independent in-wave lanes without a nested coordinator.
-Validator, Park Ranger, and Surveyor appear only when declared and when the
-single selected per-slice, per-round, or at-end boundary is reached. Diagrams
+Validator, Park Ranger, and Surveyor appear only when declared and only at the
+end on the final integrated candidate. Diagrams
 explain orientation; they never authorize a transition.
 
 ## Roles and authority
 
 | Role | What it is | Executes | Notes |
 |---|---|---|---|
-| **Router** | Stateful planning controller | no | User-facing; planning-state writer |
-| **Navigator** | Expedition orchestrator | no | Owns cross-wave sequencing and conflicts |
+| **Router** | Stateful planning controller | no | User-facing; planning-state writer; Expedition sequencing |
+| **Navigator** | Compatibility diagnostic | no | Not a normal role; existing plans reroute to Router |
 | **Explorer** | One-wave controller | no | Dispatches Crewmates; owns proven-independent lanes |
 | **Crewmate** | Bounded implementer | yes | Most hands-on work; exact write set |
 | **Validator** | Evidence sufficiency | no | Independent of the author |
@@ -145,7 +147,7 @@ Failure escalates to the nearest role whose scope can see it:
 |---|---|
 | Within one slice or packet | Explorer or nearest parent |
 | Across slices in a wave | Explorer |
-| Across waves or phases | Navigator |
+| Across waves or phases | Router |
 | Contract, security, or authority change | Owner Authority |
 
 ## Task state (explanatory)
@@ -166,7 +168,7 @@ no second review. Diagrams never create state or authorize transitions.
 ## Implementation process (explanatory)
 
 Default packet completion is author self-check plus coordinator confirmation.
-Declared independent assurance runs once at the selected boundary. A repairable
+Declared independent assurance runs once at the end. A repairable
 verdict permits one repair; deterministic coordinator verification then closes
 the gate without another review. Once the Journey is `COMPLETE`, an already
 authorized deployment proceeds with operational checks and rollback readiness,

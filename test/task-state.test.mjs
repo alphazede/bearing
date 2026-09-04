@@ -44,7 +44,7 @@ export const STATE_OWNERS = Object.freeze({
   REVIEWING: "Park Ranger when required",
   ACCEPTANCE:
     "Surveyor, Owner Authority, or parent coordinator when required_assurance is none",
-  CORRECTION_REQUIRED: "Navigator or nearest parent coordinator",
+  CORRECTION_REQUIRED: "Router or nearest parent coordinator",
   OWNER_DECISION_REQUIRED: "Owner Authority",
   COMPLETE: "Parent coordinator after assurance",
   CANCELLED: "Owner Authority or authorized parent",

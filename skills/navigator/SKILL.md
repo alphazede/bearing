@@ -1,59 +1,36 @@
 ---
 name: navigator
 description: >
-  Sequence dependency-connected Expedition waves, resolve cross-wave conflicts,
-  and own integration boundaries. Use for Navigator, Expedition, or multi-wave
-  execution control. Do not use for one packet/wave, product implementation,
-  planning-state ownership, model selection, publication, or assurance.
+  Compatibility diagnostic for plans that still name Navigator. Use when an
+  existing plan assigns Navigator or asks to sequence expedition waves as
+  navigator. Do not use for new Journeys, packet work, planning, assurance,
+  or publication.
 ---
 
 # Navigator
 
-Highest execution authority below Router; performs the least hands-on execution.
+Compatibility only. Router now owns cross-wave sequencing and conflict
+resolution.
 
 ## Inputs and match
 
-- **Inputs:** approved artifacts, wave graph, dependencies, repository scope,
-  authority, lineup from the recorded Journey snapshot, review cadence,
-  acceptance, and return schema.
-- **Match:** an Expedition has multiple dependency-connected waves or phases,
-  including simultaneous waves that share interfaces or conflict.
-- **Non-match:** one Explorer wave or Crewmate packet is sufficient.
+- **Inputs:** a plan that still assigns `Navigator`, plus the recorded Journey
+  snapshot.
+- **Match:** an existing plan names Navigator as an assigned role.
+- **Non-match:** new Journeys, Explorer waves, Crewmate packets, or assurance.
 
 ## Algorithm
 
-1. Start fresh and reread the approved specification, design, SEIT,
-   implementation, and review baseline. Verify snapshot lineup and cadence.
-   Read dispatch identities only from the recorded Journey snapshot, never
-   from the current global defaults file. Revalidate the visible checkout
-   lease against the approved Journey, repository, checkout/worktree, branch,
-   candidate revision, generation, and active state before the first write,
-   dispatch, integration, or cross-wave transition. Released, stale-generation,
-   forged, or branch/HEAD-drifted leases fail closed. Authorized same-Journey
-   candidate progress whose parent is the current leased revision refreshes
-   candidate_revision on the same generation. The same valid lease
-   continues without duplicate dispatch.
-2. Sequence fresh Explorer sessions. For simultaneous waves with
-   shared-interface or dependency conflicts, resolve ordering and integration
-   here; never add a nested multi-wave controller.
-3. Integrate typed wave returns and correct only sequencing/coverage gaps inside
-   approved authority; never perform implementation.
-4. Dispatch independent assurance once at the confirmed `per-slice`,
-   `per-round`, or final integrated boundary. Honor `max_assurance_rounds` of 1
-   from visible `assurance_rounds`. If the review is repairable, spend at most
-   one remaining `attempts` repair, run deterministic coordinator verification,
-   and close the gate without another review. A failed repair or scope change
-   returns `OWNER_DECISION_REQUIRED` with candidate and count. After Journey
-   `COMPLETE`, deployment checks do not reopen assurance.
-5. Return to the Router after the bounded Expedition outcome; do not silently
-   continue into another Journey or protected action.
+1. Do not sequence waves, reread the artifact set, dispatch Explorers, or
+   run assurance. Read identities only from the recorded Journey snapshot,
+   never from the current global defaults file.
+2. Return `REROUTED` to the Router with a diagnostic that Navigator is not a
+   normal role; treat the assignment as unused and continue under Router.
+3. Preserve the checkout lease. Do not write planning state.
 
 ## Return and recovery
 
-Return `READY`, `REROUTED`, `WAITING_ON`, or `OWNER_DECISION_REQUIRED` with
-plan ref, role, subject, dependencies, scope, authority, evidence, blocker, next
-action, and receiver. Attempts 1–3 require new evidence or strategy; a material
-design, intent, scope, security, destructive, remote, or publication change
-returns to Owner Authority.
+Return `REROUTED` with outcome, candidate_ref, changed_paths, tests, findings,
+and blocker. Findings name the compatibility path.
 
 Never implement, self-assure, select models, or mutate remotes.

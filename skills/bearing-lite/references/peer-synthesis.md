@@ -11,7 +11,7 @@ copy peer text, runtimes, state stores, or authority assumptions.
 | Set Bearings | [Kiro steering](https://kiro.dev/docs/steering/) | durable human-readable workspace context |
 | Gather Supplies | [Matt Pocock grilling](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md) | relentless dependency-ordered interview, one recommended question at a time |
 | Map the Route | [Kiro Quick Spec](https://kiro.dev/docs/specs/quick-spec/) and [GitHub Spec Kit](https://github.com/github/spec-kit/blob/main/workflows/speckit/workflow.yml) | staged requirements/design/tasks and explicit gates |
-| Navigator | LangChain subagents | central sequencing, context isolation, and conflict-aware wave integration |
+| Navigator | compatibility diagnostic | unused on new Journeys; Router owns sequencing |
 | Explorer | LangChain subagents | bounded worker dispatch, proven-independent lane coordination, and result integration |
 | Crewmate | Spec Kit implement step | bounded execution after approved planning |
 | Validator | Spec Kit gate | evidence gate on a stable candidate |

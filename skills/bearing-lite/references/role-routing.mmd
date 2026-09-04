@@ -6,17 +6,16 @@ flowchart TD
     P -->|Gather Supplies| GS[Fresh Gather Supplies]
     P -->|Map the Route| MR[Fresh Map the Route]
     PF & SB & GS & MR -->|typed return| R
-    R --> L[Owner confirms lineup and review cadence before Map the Route]
+    R --> L[Owner confirms lineup; review_cadence is at-end]
     L --> R
     R --> J{Route review after mapped graph: Explorer Journey or Expedition?}
-    J -->|Explorer Journey: one packet| C[Fresh Crewmate]
-    J -->|Explorer Journey: one wave| E[Fresh Explorer]
-    J -->|Expedition| N[Fresh Navigator]
-    N --> E
+    J -->|Explorer Journey: one packet| C[Crewmate may continue in-wave]
+    J -->|Explorer Journey: one wave| E[Explorer may continue in-wave]
+    J -->|Expedition: Router sequences waves| E
     E --> C
-    C --> A{Selected cadence boundary?}
+    C --> A{Final integrated candidate at-end?}
     A -->|Validator declared| V[Fresh Validator]
     A -->|Park Ranger declared| PK[Fresh Park Ranger]
     A -->|Surveyor declared| S[Fresh Surveyor]
     A -->|not yet| E
-    V & PK & S -->|typed verdict| R
+    V & PK & S -->|compact receipt| R

@@ -11,14 +11,15 @@ const CONFIG = readFileSync(
 );
 
 const ROLES = [
-  "Router", "Navigator", "Explorer",
+  "Router", "Explorer",
   "Crewmate", "Validator", "Park Ranger", "Surveyor",
 ];
 
 describe("Journey defaults", () => {
-  it("offers exactly the owner-selected review boundaries", () => {
-    assert.match(CONFIG, /review_cadence: <per-slice \| per-round \| at-end>/);
-    assert.doesNotMatch(CONFIG, /once-at-end|per-phase|review_cadence:\s*none/);
+  it("records at-end review only", () => {
+    assert.match(CONFIG, /review_cadence:\s*at-end/);
+    assert.doesNotMatch(CONFIG, /per-slice|per-round|per-phase|review_cadence:\s*none/);
+    assert.match(CONFIG, /Navigator is not a normal lineup role/);
   });
 
   it("requires primary and fallback identity, model, and reasoning for every role", () => {

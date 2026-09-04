@@ -1,7 +1,7 @@
 interface:
   display_name: "Bearing Lite"
   short_description: "Route a stateful repository Journey"
-  default_prompt: "Use $bearing-lite to start or resume this Journey, resolve planning one stage at a time, confirm the lineup and review cadence, then dispatch fresh bounded sessions."
+  default_prompt: "Use $bearing-lite to start or resume this Journey, resolve planning one stage at a time, confirm the lineup, record at-end review, then dispatch bounded sessions."
 
 policy:
   allow_implicit_invocation: false

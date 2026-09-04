@@ -17,8 +17,9 @@ Bearing rejects deviations with typed findings.
    IDs. `seit.md` declares SEIT rows and commands.
 4. Preserve stable IDs. Every implementation reference resolves to a declared
    requirement, design contract, SEIT row, and command.
-5. Owner-confirmed lineup identities and review cadence are required before
+5. Owner-confirmed lineup identities and `review_cadence: at-end` are required before
    implementation drafting; missing identities or cadence block drafting.
+   Do not offer `per-slice` or `per-round`.
    Active/standby/unused role states may remain provisional until route review
    resolves the Journey type. The final implementation and `review.html` then
    record the route-determined active, standby, and unused instances.

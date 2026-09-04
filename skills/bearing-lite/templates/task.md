@@ -5,7 +5,7 @@ Use one compact Markdown block per task in the project's existing plan or progre
 ## Journey settings
 
 Record these plan-level choices above the task blocks. Lineup identities and
-`review_cadence` are recorded before Map the Route; `journey` is recorded at the
+`review_cadence: at-end` are recorded before Map the Route; `journey` is recorded at the
 route review, where active/standby/unused role states are finalized once Map the
 Route reveals the wave and dependency structure. Completing role states at the
 route review is part of the initial `lineup_snapshot`, not a replacement
@@ -13,17 +13,16 @@ amendment.
 
 ```markdown
 - journey: <Explorer Journey | Expedition>
-- review_cadence: <per-slice | per-round | at-end>
+- review_cadence: at-end
 - choice_basis: <owner-confirmed recommendation and reason>
 - lineup_snapshot: <named primary/fallback instances; role-state classification completed at route review>
 ```
 
-`review_cadence` selects where the Journey's single independent review runs,
-not task-level tests or author self-checks. Never infer it from
-`required_assurance` on an individual task. `per-slice` and `per-round` select
-one declared boundary; `at-end` selects the final integrated candidate. The
-Router asks the owner to confirm both the applicable lineup and boundary before
-implementation.
+`review_cadence` is `at-end` only. The single independent review runs on the
+final integrated candidate, not at a slice or round boundary, and not as
+task-level tests or author self-checks. Never infer it from
+`required_assurance` on an individual task. The Router records at-end before
+implementation and does not offer `per-slice` or `per-round`.
 `journey` stays unrecorded until the mapped implementation graph exists; a
 resumed Journey without a recorded type does not re-ask early or block
 Repository Fit, Set Bearings, or Gather Supplies.
@@ -60,6 +59,26 @@ parent is the current leased revision refreshes `candidate_revision` on the
 same generation. `COMPLETE` or `CANCELLED` releases the lease exactly
 once. Stale recovery is explicit, recorded, increments generation, and cannot
 steal a live lease. Process discovery cannot replace this durable lease.
+
+## Wave receipt (record at wave start)
+
+Continuations reuse this visible record beside the checkout lease. Validate at
+wave start, after detected drift, and before commit — not before every
+mutation. Resume from it; do not reread every accepted artifact or redispatch
+completed slices.
+
+```markdown
+- wave_receipt:
+  - wave: <wave id>
+  - lease_generation: <generation>
+  - branch: <branch>
+  - candidate_revision: <revision at last check>
+  - authority: <envelope>
+  - checked_at: <wave_start | external_change | commit>
+```
+
+Stale, forged, or drifted receipts fail closed. Changed HEAD, authority,
+generation, route, or writer overlap forces revalidation or a fresh session.
 
 ## Always present
 
@@ -123,4 +142,4 @@ review. Any source or candidate change during deployment is separately scoped.
 
 ## Single-writer reminder
 
-Only the parent coordinator updates this block after rereading it. Crewmate, Validator, Park Ranger, and Surveyor return handoffs; the coordinator records transitions. Navigator alone changes cross-wave dependencies or global sequencing.
+Only the parent coordinator updates this block after rereading it. Crewmate, Validator, Park Ranger, and Surveyor return compact receipts (`outcome`, `candidate_ref`, `changed_paths`, `tests`, `findings`, `blocker`); the coordinator records transitions. Router alone changes cross-wave dependencies or global sequencing. Update `implementation.md` and `review.html` once per wave, plus owner-decision or blocker changes.

@@ -244,15 +244,17 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     }
   });
 
-  it("Explorer owns proven-independent lanes; Navigator owns cross-wave conflicts", () => {
+  it("Explorer owns proven-independent lanes; Router owns cross-wave conflicts", () => {
     const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
     const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
     const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
     assert.match(explorer, /proven-independent/);
-    assert.match(explorer, /never add a\s+nested coordinator/);
+    assert.match(explorer, /never add a nested coordinator/);
     assert.doesNotMatch(explorer, /Trail Boss|Sub-Explorer|trail-boss|sub-explorer/);
+    assert.match(router, /Router owns\s+Expedition sequencing/);
     assert.match(navigator, /cross-wave/);
     assert.match(navigator, /conflict/);
+    assert.match(navigator, /Compatibility only/);
     assert.doesNotMatch(navigator, /Trail Boss|Sub-Explorer|trail-boss|sub-explorer/);
     assert.doesNotMatch(router, /Trail Boss|Sub-Explorer|trail-boss|sub-explorer/);
   });
@@ -347,21 +349,22 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       /What Journey shall\s+we Embark on—an Explorer Journey or an Expedition\?/
     );
     assert.match(router, /Is this a\s+good lineup for the roles on this Journey\?/);
-    assert.match(router, /after a\s+slice, after an integrated round, or at the end\?/);
+    assert.match(router, /review_cadence: at-end/);
+    assert.doesNotMatch(router, /after a\s+slice, after an integrated round, or at the end\?/);
     assert.match(router, /Router alone writes Journey\s+planning state/);
     assert.match(router, /plugin\s+hosts are partial/);
     assert.match(router, /skill-copy is skills-only/);
-    assert.match(router, /Every ready node gets a fresh session/);
+    assert.match(router, /may continue in-wave/);
     assert.match(router, /If .*default-role-lineup\.md` is absent, create a\s+proposed copy/);
     assert.match(router, /Never infer identity values/);
     assert.match(router, /planning\s+nodes return owner questions/);
     assert.match(router, /one cheaper and one more expensive alternative/);
-    assert.match(router, /what each gives up or buys/);
+    assert.match(router, /what each gives up\s+or buys/);
     assert.match(router, /record the named default explicitly/);
     const route = router.indexOf("What Journey shall");
     const planning = router.indexOf("Repository Fit");
     const lineup = router.indexOf("Is this a");
-    const cadence = router.indexOf("Where should the single independent");
+    const cadence = router.indexOf("review_cadence: at-end");
     const map = router.indexOf("Invoke Map the Route");
     assert.ok(route >= 0 && route > planning, "route choice must follow planning stages");
     assert.ok(route >= 0 && route > map, "route choice must follow Map the Route invocation");
@@ -373,37 +376,29 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(router, /materially changed new Journey/);
   });
 
-  it("execution roles revalidate the visible checkout lease at every acting boundary", () => {
-    const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
+  it("execution roles revalidate the visible checkout lease at wave-scoped boundaries", () => {
     const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
     const crewmate = readFileSync(path.join(SKILLS_DIR, "crewmate", "SKILL.md"), "utf8");
     const identity =
       /Revalidate the visible checkout\s+lease against the approved Journey,\s+repository, checkout\/worktree, branch,\s+candidate revision, generation,\s+and active state/;
     const failClosed =
       /Released, stale-generation,\s+forged, or\s+branch\/HEAD-drifted leases fail closed/;
+    const waveScoped = /at wave start, after\s+detected drift, and before commit/;
     for (const [name, text] of [
-      ["navigator", navigator],
       ["explorer", explorer],
       ["crewmate", crewmate],
     ]) {
       assert.match(text, identity, `${name} must revalidate the full lease identity`);
-      assert.match(text, /before the first write/, `${name} must revalidate before first write`);
+      assert.match(text, waveScoped, `${name} must revalidate at wave-scoped boundaries`);
       assert.match(text, failClosed, `${name} must fail closed on drifted or forged leases`);
     }
-    assert.match(
-      navigator,
-      /before the first write,\s+dispatch, integration, or cross-wave transition/
-    );
-    assert.match(navigator, /same valid lease\s+continues\s+without duplicate dispatch/);
-    assert.match(explorer, /before the first write,\s+dispatch, or integration/);
-    assert.match(explorer, /same valid lease\s+continues\s+without duplicate dispatch/);
-    assert.match(crewmate, /before the first write\s+and\s+every mutation/);
+    assert.match(explorer, /same valid lease continues\s+without duplicate dispatch/);
     assert.match(crewmate, /return WAITING_ON without writing/);
+    assert.doesNotMatch(crewmate, /every mutation/);
   });
 
   it("recorded Journey lineup snapshot outranks later global-default edits", () => {
     const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
-    const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
     const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
     const crewmate = readFileSync(path.join(SKILLS_DIR, "crewmate", "SKILL.md"), "utf8");
     assert.match(router, /recorded snapshot is authoritative for this Journey/);
@@ -414,7 +409,6 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(router, /explicit owner-confirmed\s+dated visible amendment/);
     assert.match(router, /lineup identity from the recorded snapshot/);
     for (const [name, text] of [
-      ["navigator", navigator],
       ["explorer", explorer],
       ["crewmate", crewmate],
     ]) {
@@ -433,29 +427,27 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
 
   it("at-end assurance occurs once at the Journey boundary", () => {
     const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
-    const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
-    assert.match(explorer, /Expedition wave defers assurance to the Navigator's final\s+Journey boundary/);
-    assert.match(navigator, /final integrated\s+boundary/);
+    const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
+    assert.match(explorer, /Expedition waves defer assurance to the Router's final\s+Journey boundary/);
+    assert.match(explorer, /only at-end on the final integrated candidate/);
+    assert.match(router, /review_cadence: at-end/);
+    assert.doesNotMatch(explorer, /per-slice|per-round/);
   });
 
   it("Bearing Lite permits one review and one repair without re-review", () => {
     const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
     const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
-    const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
     assert.match(router, /`max_assurance_rounds` is\s+1/);
     assert.match(router, /per Journey/);
     assert.match(router, /assurance_rounds/);
     assert.match(router, /Direct route/);
-    assert.match(router, /Navigator is not\s+required|does not depend on Navigator/);
+    assert.match(router, /do not dispatch Navigator/);
     assert.match(
       router,
       /OWNER_DECISION_REQUIRED` naming the candidate\s+and count/
     );
     assert.match(router, /new Journey resets/);
-    for (const [name, text] of [
-      ["explorer", explorer],
-      ["navigator", navigator],
-    ]) {
+    for (const [name, text] of [["explorer", explorer]]) {
       assert.match(text, /max_assurance_rounds/, `${name} must honor the Lite bound`);
       assert.match(text, /of 1/, `${name} must fix the Lite bound at one review`);
       assert.match(text, /assurance_rounds/, `${name} must read the visible count`);
@@ -563,6 +555,45 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(crewmate, /published standard/);
     assert.match(validator, /published\s+standard/);
     assert.match(parkRanger, /published standard/);
+  });
+
+  it("same-wave continuation, compact receipts, and at-end-only assurance are stated", () => {
+    const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
+    const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
+    const crewmate = readFileSync(path.join(SKILLS_DIR, "crewmate", "SKILL.md"), "utf8");
+    const navigator = readFileSync(path.join(SKILLS_DIR, "navigator", "SKILL.md"), "utf8");
+    const validator = readFileSync(path.join(SKILLS_DIR, "validator", "SKILL.md"), "utf8");
+    const park = readFileSync(path.join(SKILLS_DIR, "park-ranger", "SKILL.md"), "utf8");
+    const surveyor = readFileSync(path.join(SKILLS_DIR, "surveyor", "SKILL.md"), "utf8");
+    const compact =
+      /outcome,\s*candidate_ref,\s*changed_paths,\s*tests,\s*findings,\s*and blocker/;
+    assert.match(router, /may continue in-wave/);
+    assert.match(router, /visible wave receipt/);
+    assert.match(router, /once per wave/);
+    assert.match(crewmate, /Continue the current session/);
+    assert.match(explorer, /Permit Crewmate continuation/);
+    assert.match(explorer, /do not\s+reread every accepted artifact/);
+    assert.match(navigator, /Compatibility only/);
+    assert.match(navigator, /REROUTED/);
+    for (const [name, text] of [
+      ["crewmate", crewmate],
+      ["explorer", explorer],
+      ["navigator", navigator],
+      ["validator", validator],
+      ["park-ranger", park],
+      ["surveyor", surveyor],
+    ]) {
+      assert.match(text, compact, `${name} must return the six-field receipt`);
+    }
+    for (const [name, text] of [
+      ["validator", validator],
+      ["park-ranger", park],
+      ["surveyor", surveyor],
+    ]) {
+      assert.match(text, /fresh session/, `${name} must start fresh`);
+      assert.match(text, /author ancestry/, `${name} must reject author ancestry`);
+      assert.match(text, /slice or round/, `${name} must refuse slice/round boundaries`);
+    }
   });
 
   it("Codex metadata keeps the router explicitly invoked", () => {
