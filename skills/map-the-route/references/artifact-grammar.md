@@ -17,8 +17,11 @@ Bearing rejects deviations with typed findings.
    IDs. `seit.md` declares SEIT rows and commands.
 4. Preserve stable IDs. Every implementation reference resolves to a declared
    requirement, design contract, SEIT row, and command.
-5. The owner-confirmed lineup and review cadence supply named active, standby,
-   and unused instances. Missing values block implementation drafting.
+5. Owner-confirmed lineup identities and review cadence are required before
+   implementation drafting; missing identities or cadence block drafting.
+   Active/standby/unused role states may remain provisional until route review
+   resolves the Journey type. The final implementation and `review.html` then
+   record the route-determined active, standby, and unused instances.
 
 ## Requirements register
 
@@ -31,9 +34,11 @@ Bearing rejects deviations with typed findings.
    to registered identities (no restated text), derivations from them
    (`AC-X derives from REG-ID`), or Journey-local `AC-*`/`RISK-*` criteria about
    write sets, seams, gates, or concurrency. Do not restate registered content.
-4. `seit.md` references verification already allocated by the register; it
-   authors only Journey-level proof rows such as write-set containment,
-   concurrent-Journey disturbance, or contract freeze.
+4. `seit.md` references verification allocations where the register provides
+   them. Where the register provides none for a referenced requirement, author
+   Journey-level proof for it or return `NEEDS_OWNER_DECISION` when register
+   authority is unclear; do not silently drop coverage. Journey-level proof
+   rows remain Journey-local.
 5. `review.html` marks every requirement as either a register reference or
    Journey-local, so a reviewer can tell which artifact owns each statement.
 6. `design.md` is unaffected: it records how the work is built, which no

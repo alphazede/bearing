@@ -4,15 +4,19 @@ Use one compact Markdown block per task in the project's existing plan or progre
 
 ## Journey settings
 
-Record these plan-level choices above the task blocks. `lineup_snapshot` and
+Record these plan-level choices above the task blocks. Lineup identities and
 `review_cadence` are recorded before Map the Route; `journey` is recorded at the
-route review once Map the Route reveals the wave and dependency structure.
+route review, where active/standby/unused role states are finalized once Map the
+Route reveals the wave and dependency structure. Completing role states at the
+route review is part of the initial `lineup_snapshot`, not a replacement
+amendment.
 
 ```markdown
 - journey: <Explorer Journey | Expedition>
 - review_cadence: <per-slice | per-round | at-end>
 - choice_basis: <owner-confirmed recommendation and reason>
-- lineup_snapshot: <named active, standby, and unused role instances>
+- lineup_identities: <named primary/fallback instances>
+- lineup_snapshot: <active, standby, and unused classification completed at route review>
 ```
 
 `review_cadence` selects where the Journey's single independent review runs,

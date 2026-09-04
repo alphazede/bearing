@@ -13,9 +13,10 @@ Fresh planning node. The Router remains the plan-state writer and user contact.
 
 ## Inputs and match
 
-- **Inputs:** confirmed decisions plus owner-answered register and route-review
-  answers, repository map, artifact status, requirements, repository evidence,
-  lineup/cadence snapshot, repository rules, and return schema.
+- **Inputs:** confirmed decisions, repository map, artifact status, requirements,
+  repository evidence, lineup/cadence snapshot, repository rules, and return
+  schema. On resume, include owner-answered register and route-review decisions
+  already recorded.
 - **Match:** first specification gate or post-approval planning package is missing.
 - **Non-match:** executable tasks already map to current approved artifacts.
 
@@ -30,8 +31,11 @@ Fresh planning node. The Router remains the plan-state writer and user contact.
    identities and keep only Journey-local criteria in the specification.
 3. Author in dependency order: testable specification, `design.md`, `seit.md`, then
    `implementation.md`. Run prospective checks internally; interrupt owner only on material
-   intent, scope, risk, or authority decisions. With a register, `seit.md` references existing
-   verification allocations rather than inventing parallel proof; keep only Journey-level rows.
+   intent, scope, risk, or authority decisions. With a register, `seit.md`
+   references verification allocations where the register provides them; where
+   absent, author the needed Journey-level proof or return
+   `NEEDS_OWNER_DECISION` when register authority is unclear. Do not silently
+   drop coverage. Journey-level proof rows remain Journey-local.
 4. Route review: when the implementation graph reveals the actual wave and dependency structure and the
    Journey type is not recorded, return `NEEDS_OWNER_DECISION` with a route-review
    recommendation: Explorer Journey or Expedition, citing the mapped structure and what each

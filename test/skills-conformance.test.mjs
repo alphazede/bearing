@@ -536,8 +536,14 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       router,
       /Diversify the reviewer family only\s+through an explicit owner-confirmed dated visible amendment/
     );
+    assert.match(router, /Defer active\/standby\/unused classification to route review/);
+    assert.match(router, /Record Journey type and role states before dispatch/);
+    assert.match(router, /Reject an Explorer choice that\s+cannot execute the mapped graph/);
+    assert.match(router, /when the packet implements a published standard, verify against the cited text/);
     assert.match(mapRoute, /requirements register/);
     assert.match(mapRoute, /Never infer one/);
+    assert.match(mapRoute, /On resume, include owner-answered register and route-review decisions/);
+    assert.match(mapRoute, /author the needed Journey-level proof or return\s+`NEEDS_OWNER_DECISION`/);
     assert.match(mapRoute, /4\. Route review: when the implementation graph/);
     assert.match(mapRoute, /route-review\s+recommendation/);
     assert.match(mapRoute, /Journey type is not recorded/);
@@ -545,7 +551,9 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(mapRoute, /Owner-decision pauses do\s+not consume correction rounds/);
     assert.match(gather, /route review after Map the Route/);
     assert.match(grammar, /## Requirements register/);
+    assert.match(grammar, /Active\/standby\/unused role states may remain provisional until route review/);
     assert.match(grammar, /Do not restate registered content/);
+    assert.match(grammar, /Where the register provides none for a referenced requirement/);
     assert.match(grammar, /`review\.html` marks every requirement as either a register reference or\s+Journey-local/);
     assert.match(grammar, /## Published standards/);
     assert.match(grammar, /cite the exact document and clause/);
