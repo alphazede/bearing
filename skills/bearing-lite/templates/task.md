@@ -114,7 +114,9 @@ Field rules:
 
 ```markdown
 - candidate_ref: <strongest native revision or changed-path reference available>
-- evidence: <commands run, results observed, and inferences labeled separately>
+- changed_paths: <paths changed in this candidate>
+- tests: <commands run and observed results>
+- findings: <labeled inferences and gaps>
 - assurance_rounds: <0-1 completed assurance rounds for this Journey>
 ```
 

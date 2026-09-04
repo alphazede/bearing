@@ -23,7 +23,13 @@ const ALWAYS_FIELDS = [
   "next_action",
 ];
 const BEFORE_EXECUTION_FIELDS = ["scope", "authority", "required_assurance"];
-const AFTER_CANDIDATE_FIELDS = ["candidate_ref", "evidence", "assurance_rounds"];
+const AFTER_CANDIDATE_FIELDS = [
+  "candidate_ref",
+  "changed_paths",
+  "tests",
+  "findings",
+  "assurance_rounds",
+];
 const WAITING_CORRECTING_FIELDS = ["blocker", "attempts"];
 const KNOWN_FIELDS = new Set([
   ...ALWAYS_FIELDS,
@@ -744,7 +750,7 @@ describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)",
     assert.match(TEMPLATE, /Router alone changes cross-wave/);
     assert.match(
       TEMPLATE,
-      /outcome.*candidate_ref.*changed_paths.*tests.*findings.*blocker/s
+      /```markdown\n- candidate_ref:[\s\S]*- changed_paths:[\s\S]*- tests:[\s\S]*- findings:/
     );
     assert.match(TEMPLATE, /once per wave/);
   });
@@ -815,7 +821,9 @@ describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)",
         authority: "S8",
         required_assurance: "none",
         candidate_ref: "cand-1",
-        evidence: "tests pass",
+        changed_paths: ["test/"],
+        tests: "node --test exit 0",
+        findings: "none",
         assurance_rounds: 0,
       },
       { phase: "after_candidate" }

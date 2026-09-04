@@ -57,7 +57,6 @@ const COMPLETE_PLAN = `# Journey
 - scope: hooks/
 - authority: S7
 - required_assurance: none
-- outcome: PASS
 - candidate_ref: cand-host
 - changed_paths: hooks/
 - tests: host-mapping tests
