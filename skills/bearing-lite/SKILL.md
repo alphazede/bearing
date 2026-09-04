@@ -11,17 +11,18 @@ or hidden ledger. plugin hosts are partial; skill-copy is skills-only.
    resume a generation-bound checkout lease before any planning write or dispatch.
    A live same-checkout competitor returns `WAITING_ON` with sanitized competing identity;
    Distinct explicitly approved compatible worktrees may proceed.
-2. New Journey: defer the Explorer-versus-Expedition question to the route review; run embarkation decisions knowable.
-3. On resume, keep the same lease generation and next incomplete stage. Parent-proven
-   same-Journey progress refreshes `candidate_revision` on that generation.
+2. New Journey: defer the Explorer-versus-Expedition question to the route review; run now-knowable embarkation decisions.
+3. On resume, keep the same lease generation and next incomplete stage.
+   Same-Journey progress refreshes `candidate_revision`.
    Never replay accepted stages or duplicate a dispatch.
 4. If `~/.agents/bearing-lite/default-role-lineup.md` is absent, create a
-   proposed copy from `templates/default-role-lineup.md`; confirm one role at a
-   time. Never infer identity values.
+   proposed copy from `templates/default-role-lineup.md`; confirm it.
+   Never infer identity values.
 5. Run one missing stage in order: Repository Fit → Set Bearings → Gather
-   Supplies. The Router holds owner conversation inline; Gather Supplies is
-   Router-led. Dispatch a fresh session only for mechanical legwork on a cheaper
-   lower-reasoning model; integrate returns.
+   Supplies. The Router holds owner conversation inline; Gather Supplies is a
+   Router-led interview, never dispatched. Dispatch a fresh session only for
+   bounded mechanical legwork after stage intent is clear, on a cheaper
+   lower-reasoning model than the Router; integrate returns.
 6. Before Map the Route, display each role's primary/fallback, model, and
    reasoning. Defer active/standby/unused classification to route review. Ask
    `Is this a good lineup for the roles on this Journey?`; never choose.
@@ -30,13 +31,14 @@ or hidden ledger. plugin hosts are partial; skill-copy is skills-only.
 7. Record lineup identities and cadence before task mapping; if declined, record the named default explicitly.
    The recorded snapshot is authoritative for this Journey. Later edits to `~/.agents/bearing-lite/default-role-lineup.md` have no effect on it.
    Replace only through an explicit owner-confirmed dated visible amendment.
-   Do not record Journey type or role states. Invoke Map the Route with the snapshot.
+   Invoke Map the Route with the snapshot.
 8. At route review, recommend Explorer Journey or Expedition and say when the
    other fits; ask exactly: `What Journey shall
    we Embark on—an Explorer Journey or an Expedition?` State mapped wave and
-   dependency tradeoffs. Record Journey type and role states before dispatch;
-   Navigator activates only for Expedition. Reject an Explorer choice that
-   cannot execute the mapped graph; return to Map the Route instead.
+   dependency tradeoffs. Record Journey type and role states. Map the Route
+   finalizes `review.html`; dispatch only after owner approval. Navigator
+   activates only for Expedition. Reject Explorer choices the mapped
+   graph cannot execute; return to Map the Route.
 9. Every ready node gets a fresh session with lineup identity from the recorded snapshot.
 
 Return `READY`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`, or `COMPLETE`. Fallback

@@ -76,7 +76,8 @@ Bearing rejects deviations with typed findings.
    reasoning level, and review path. Goals are at most 512 characters.
 3. Every manifest declares Write set, Command IDs, Stop condition, and Human
    decision. Optional fields are Shared interfaces (`path#Symbol`), Integration
-   boundary, and Parallel safe (`yes` or `no` plus reason).
+   boundary, Published standard (`doc#clause`) when applicable, and Parallel
+   safe (`yes` or `no` plus reason).
 4. Write sets use one line: `Write only `path``. Paths are bounded, normalized,
    repository-relative literals. Put prohibitions in prose, not the write set.
 5. Multi-slice plans declare consecutive `Wave <n>: <ids>` lines. Every slice
