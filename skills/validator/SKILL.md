@@ -25,7 +25,8 @@ Independent assurance responsibility, outside the mutation-authority ladder.
 1. Start fresh and reject author identity, candidate discontinuity, or a missing
    cadence boundary.
 2. Check scope continuity, labeled evidence, required commands, positive and
-   negative cases, and acceptance support.
+   negative cases, and acceptance support. Where the candidate cites a published
+   standard, verify against that text rather than neighbouring agreement.
 3. Apply `references/grading-rubric.md` only when explicit scoring is requested.
 4. Return the smallest missing proof or exact failing criterion. Never mutate the
    candidate or manufacture evidence.

@@ -15,7 +15,8 @@ Planning node, not a persona or plan-state writer.
 
 - **Match:** a material scope, behavior, authority, risk, or acceptance
   decision is unresolved. The Explorer-versus-Expedition route choice is not
-  gathered here; the Router asks it at the pre-implementation gate.
+  gathered here; the Router asks it at the route review after Map the Route
+  maps the implementation graph.
 - **Non-match:** evidence can answer it, the owner already decided it, or a work
   packet is ready.
 - **Inputs:** goal, visible plan state, repository evidence, prior decisions,

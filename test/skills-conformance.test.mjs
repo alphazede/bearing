@@ -363,9 +363,14 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     const lineup = router.indexOf("Is this a");
     const cadence = router.indexOf("Where should the single independent");
     const map = router.indexOf("Invoke Map the Route");
-    assert.ok(route >= 0 && route < planning, "route choice must precede planning stages");
+    assert.ok(route >= 0 && route > planning, "route choice must follow planning stages");
+    assert.ok(route >= 0 && route > map, "route choice must follow Map the Route invocation");
     assert.ok(lineup >= 0 && lineup < map, "lineup gate must precede task mapping");
     assert.ok(cadence >= 0 && cadence < map, "cadence gate must precede task mapping");
+    assert.match(router, /re-specify the failed boundary/);
+    assert.match(router, /diversify the reviewer family/);
+    assert.match(router, /Model-tier escalation is not the default/);
+    assert.match(router, /materially changed new Journey/);
   });
 
   it("execution roles revalidate the visible checkout lease at every acting boundary", () => {
@@ -506,13 +511,40 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       path.join(SKILLS_DIR, "map-the-route", "references", "artifact-grammar.md"),
       "utf8"
     );
-    assert.match(mapRoute, /Author in dependency order: testable specification, `design\.md`, `seit\.md`,\s+then `implementation\.md`/);
+    assert.match(mapRoute, /Author in dependency order: testable specification, `design\.md`, `seit\.md`,\s+then\s+`implementation\.md`/);
     assert.match(mapRoute, /one complete self-contained offline `review\.html`/);
     assert.match(mapRoute, /request one\s+integrated owner approval/);
     assert.match(mapRoute, /staged owner approvals only when the owner\s+explicitly requests them/);
     assert.doesNotMatch(mapRoute, /After specification approval/);
     assert.match(grammar, /owner review gate requires all four\s+artifacts plus the complete `review\.html`/);
     assert.match(grammar, /do not insert a specification-only\s+owner gate/);
+  });
+
+  it("route review, requirements-register, and published-standard contracts are stated", () => {
+    const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
+    const mapRoute = readFileSync(path.join(SKILLS_DIR, "map-the-route", "SKILL.md"), "utf8");
+    const gather = readFileSync(path.join(SKILLS_DIR, "gather-supplies", "SKILL.md"), "utf8");
+    const crewmate = readFileSync(path.join(SKILLS_DIR, "crewmate", "SKILL.md"), "utf8");
+    const validator = readFileSync(path.join(SKILLS_DIR, "validator", "SKILL.md"), "utf8");
+    const grammar = readFileSync(
+      path.join(SKILLS_DIR, "map-the-route", "references", "artifact-grammar.md"),
+      "utf8"
+    );
+    assert.match(router, /defer the Explorer-versus-Expedition question to the route review/);
+    assert.match(mapRoute, /requirements register/);
+    assert.match(mapRoute, /Never infer one/);
+    assert.match(mapRoute, /route-review\s+recommendation/);
+    assert.match(mapRoute, /Journey type is not recorded/);
+    assert.match(mapRoute, /register references versus Journey-local\s+requirements/);
+    assert.match(gather, /route review after Map the Route/);
+    assert.match(grammar, /## Requirements register/);
+    assert.match(grammar, /Do not restate registered content/);
+    assert.match(grammar, /`review\.html` marks every requirement as either a register reference or\s+Journey-local/);
+    assert.match(grammar, /## Published standards/);
+    assert.match(grammar, /cite the exact document and clause/);
+    assert.match(grammar, /passing cross-boundary test does not substitute/);
+    assert.match(crewmate, /published standard/);
+    assert.match(validator, /published\s+standard/);
   });
 
   it("Codex metadata keeps the router explicitly invoked", () => {

@@ -2,13 +2,15 @@
 
 Use one compact Markdown block per task in the project's existing plan or progress document. Omit unused conditional fields. Prefer the project's format; add only missing fields. Do not create a Bearing-owned state file or hidden ledger.
 
-## Journey settings (record before task mapping)
+## Journey settings
 
-Record these plan-level choices once, above the task blocks:
+Record these plan-level choices above the task blocks. `lineup_snapshot` and
+`review_cadence` are recorded before Map the Route; `journey` is recorded at the
+route review once Map the Route reveals the wave and dependency structure.
 
 ```markdown
-- journey: <Explorer Journey | Expedition>
-- review_cadence: <per-slice | per-round | at-end>
+- journey: <Explorer Journey | Expedition>  <!-- recorded at route review after Map the Route -->
+- review_cadence: <per-slice | per-round | at-end>  <!-- recorded before Map the Route -->
 - choice_basis: <owner-confirmed recommendation and reason>
 - lineup_snapshot: <named active, standby, and unused role instances>
 ```
@@ -19,6 +21,9 @@ not task-level tests or author self-checks. Never infer it from
 one declared boundary; `at-end` selects the final integrated candidate. The
 Router asks the owner to confirm both the applicable lineup and boundary before
 implementation.
+`journey` stays unrecorded until the mapped implementation graph exists; a
+resumed Journey without a recorded type does not re-ask early or block
+Repository Fit, Set Bearings, or Gather Supplies.
 `lineup_snapshot` is authoritative for this Journey after recording. Later
 edits to `~/.agents/bearing-lite/default-role-lineup.md` have no effect.
 Replace it only through an explicit owner-confirmed dated visible amendment.

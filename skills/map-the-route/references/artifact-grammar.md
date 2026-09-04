@@ -7,9 +7,11 @@ Bearing rejects deviations with typed findings.
 
 1. Frontmatter declares `type` as `plan-spec`, `design`, `seit`, or
    `implementation`, and `status` as `complete` or `amended`.
-2. Requirement IDs use `AC-*` or `RISK-*`; design IDs use `DES-*` or
-   `CONTRACT-*`; SEIT rows use `SEIT-*`; commands use `CMD-*` or `PROC-*`.
-   Suffixes contain only uppercase letters, digits, dots, or hyphens.
+2. Journey-authored requirement IDs use `AC-*` or `RISK-*`; references to an
+   existing requirements register keep that register's identities verbatim.
+   Design IDs use `DES-*` or `CONTRACT-*`; SEIT rows use `SEIT-*`; commands
+   use `CMD-*` or `PROC-*`. Suffixes contain only uppercase letters, digits,
+   dots, or hyphens.
 3. `<journey-topic>-spec.md` declares requirements, Entry criteria, Exit criteria,
    Rollback or repair, and Accountable controller. `design.md` declares design
    IDs. `seit.md` declares SEIT rows and commands.
@@ -17,6 +19,33 @@ Bearing rejects deviations with typed findings.
    requirement, design contract, SEIT row, and command.
 5. The owner-confirmed lineup and review cadence supply named active, standby,
    and unused instances. Missing values block implementation drafting.
+
+## Requirements register
+
+1. Before authoring a Journey specification, establish whether the target
+   repository or system already has a requirements register and where. When the
+   repository cannot answer, ask the owner; never infer.
+2. Where no register exists, author requirements as today; this section does not
+   apply.
+3. Where a register exists, specification requirement rows are either references
+   to registered identities (no restated text), derivations from them
+   (`AC-X derives from REG-ID`), or Journey-local `AC-*`/`RISK-*` criteria about
+   write sets, seams, gates, or concurrency. Do not restate registered content.
+4. `seit.md` references verification already allocated by the register; it
+   authors only Journey-level proof rows such as write-set containment,
+   concurrent-Journey disturbance, or contract freeze.
+5. `review.html` marks every requirement as either a register reference or
+   Journey-local, so a reviewer can tell which artifact owns each statement.
+6. `design.md` is unaffected: it records how the work is built, which no
+   requirements register covers.
+
+## Published standards
+
+1. When a slice, command, or proof implements a published standard, the plan and
+   its execution manifest cite the exact document and clause.
+2. Verification is against the standard's text, not against neighbouring
+   implementation agreement; a passing cross-boundary test does not substitute
+   for clause conformance.
 
 ## SEIT rules
 
