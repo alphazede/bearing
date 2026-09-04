@@ -14,7 +14,7 @@ The project's human-readable plan is the only task-state record. Diagrams explai
 | `VALIDATING` | Validator | Evidence sufficiency under validation |
 | `REVIEWING` | Park Ranger when required | Independent defect review active |
 | `ACCEPTANCE` | Surveyor, Owner Authority, or parent coordinator when `required_assurance` is `none` | User-facing acceptance or coordinator completion confirmation is active |
-| `CORRECTION_REQUIRED` | Navigator or nearest parent coordinator | Agent-owned in-authority correction required |
+| `CORRECTION_REQUIRED` | Router or nearest parent coordinator | Agent-owned in-authority correction required |
 | `OWNER_DECISION_REQUIRED` | Owner Authority | Authority, scope, security, or replacement-path judgment required |
 | `COMPLETE` | Parent coordinator after assurance | Outcome and required assurance satisfied |
 | `CANCELLED` | Owner Authority or authorized parent | Task will not proceed |
@@ -36,7 +36,7 @@ The project's human-readable plan is the only task-state record. Diagrams explai
 ## Ownership rules
 
 - One parent coordinator writes each task block and its transitions.
-- Navigator alone writes cross-wave dependencies and Expedition-wide sequencing.
+- Router alone writes cross-wave dependencies and Expedition-wide sequencing.
 - Workers and assurance roles return handoffs; they do not race plan edits.
 - Candidate authors never provide their own Validator, Park Ranger, or Surveyor verdict.
 - Waiting on a prerequisite consumes no correction attempt. Each task has its own three-attempt correction counter; identical retries without new evidence are invalid.

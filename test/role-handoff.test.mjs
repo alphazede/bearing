@@ -14,17 +14,12 @@ const require = createRequire(import.meta.url);
 const closeout = require(path.join(ROOT, "hooks", "closeout.cjs"));
 
 export const HANDOFF_FIELDS = Object.freeze([
-  "plan_ref",
-  "role",
-  "subject",
-  "depends_on",
-  "scope",
-  "authority",
   "outcome",
-  "evidence",
+  "candidate_ref",
+  "changed_paths",
+  "tests",
+  "findings",
   "blocker",
-  "next_action",
-  "receiving_role",
 ]);
 
 /**
@@ -66,44 +61,21 @@ export function validateHandoff(handoff, ctx = {}) {
       });
     }
   }
-  if (Array.isArray(handoff.depends_on)) {
-    for (const dep of handoff.depends_on) {
-      if (typeof dep !== "string" || !/^T[\w-]+$/.test(dep)) {
-        diagnostics.push({
-          code: "malformed_depends_on",
-          message: `depends_on entry must be task_id, got ${JSON.stringify(dep)}`,
-          field: "depends_on",
-        });
-      }
-    }
-  } else if (handoff.depends_on !== undefined && handoff.depends_on !== null) {
-    // allow string "[]" style only if array; otherwise reject non-array lists of prose
-    if (typeof handoff.depends_on === "string" && handoff.depends_on.trim() !== "[]") {
-      // string form of empty list is not preferred; non-array with prose fails
-      if (!/^\[\s*\]$/.test(handoff.depends_on.trim())) {
-        diagnostics.push({
-          code: "malformed_depends_on",
-          message: "depends_on must be a task_id list",
-          field: "depends_on",
-        });
-      }
-    }
-  }
-
-  if (ctx.expectedSubject && handoff.subject !== ctx.expectedSubject) {
+  const narrativeOnly =
+    ["plan_ref", "role", "subject", "depends_on", "scope", "authority", "evidence", "next_action", "receiving_role"].some(
+      (field) => handoff[field] !== undefined && handoff[field] !== null && String(handoff[field]).trim() !== ""
+    ) &&
+    HANDOFF_FIELDS.every((field) => {
+      const value = handoff[field];
+      return value === undefined || value === null || (typeof value === "string" && value.trim() === "");
+    });
+  if (narrativeOnly) {
     diagnostics.push({
-      code: "stale_subject",
-      message: `subject "${String(handoff.subject)}" does not match expected "${ctx.expectedSubject}"`,
-      field: "subject",
+      code: "narrative_only_handoff",
+      message: "narrative-only handoffs are rejected; return the six-field compact receipt",
     });
   }
 
-  const candidate =
-    typeof handoff.candidate_ref === "string"
-      ? handoff.candidate_ref
-      : typeof handoff.subject === "string"
-        ? null
-        : null;
   if (ctx.expectedCandidate) {
     const provided =
       typeof handoff.candidate_ref === "string" ? handoff.candidate_ref : ctx.planCandidate;
@@ -115,9 +87,6 @@ export function validateHandoff(handoff, ctx = {}) {
       });
     }
   }
-  // silence unused if subject-only path
-  void candidate;
-
   if (diagnostics.length) {
     return { ok: false, action: "reroute", diagnostics };
   }
@@ -126,30 +95,23 @@ export function validateHandoff(handoff, ctx = {}) {
 
 function validHandoff(overrides = {}) {
   return {
-    plan_ref: "docs/plans/2026-08-09-bearing-skills-first-architecture",
-    role: "crewmate",
-    subject: "S8-packet-A",
-    depends_on: [],
-    scope: "test/*.test.mjs",
-    authority: "slice S8 write set only",
     outcome: "PASS",
-    evidence: "node --test exit 0",
-    blocker: "none",
-    next_action: "coordinator confirmation",
-    receiving_role: "explorer",
     candidate_ref: "cand-abc",
+    changed_paths: ["test/role-handoff.test.mjs"],
+    tests: "node --test exit 0",
+    findings: "none",
+    blocker: "none",
     ...overrides,
   };
 }
 
 describe("CMD-HANDOFF-01 role-handoff (SEIT-HANDOFF-01)", () => {
-  it("valid return requires all eleven fields and may advance", () => {
+  it("valid return requires the six-field compact receipt and may advance", () => {
     const handoff = validHandoff();
     for (const field of HANDOFF_FIELDS) {
       assert.ok(field in handoff, field);
     }
     const verdict = validateHandoff(handoff, {
-      expectedSubject: "S8-packet-A",
       expectedCandidate: "cand-abc",
     });
     assert.equal(verdict.ok, true);
@@ -171,25 +133,33 @@ describe("CMD-HANDOFF-01 role-handoff (SEIT-HANDOFF-01)", () => {
 
   it("negative: missing field reroutes with typed diagnostic (not silent advance)", () => {
     const handoff = validHandoff();
-    delete handoff.evidence;
+    delete handoff.findings;
     const verdict = validateHandoff(handoff);
     assert.equal(verdict.ok, false);
     if (!verdict.ok) {
       assert.equal(verdict.action, "reroute");
       assert.ok(
-        verdict.diagnostics.some((d) => d.code === "missing_field" && d.field === "evidence")
+        verdict.diagnostics.some((d) => d.code === "missing_field" && d.field === "findings")
       );
     }
   });
 
-  it("negative: stale subject rejects/reroutes", () => {
-    const verdict = validateHandoff(validHandoff({ subject: "S8-packet-OLD" }), {
-      expectedSubject: "S8-packet-A",
+  it("negative: narrative-only handoff rejects/reroutes", () => {
+    const verdict = validateHandoff({
+      plan_ref: "plan",
+      role: "crewmate",
+      subject: "S8-packet-A",
+      depends_on: [],
+      scope: "test/",
+      authority: "S8",
+      evidence: "long narrative",
+      next_action: "continue",
+      receiving_role: "explorer",
     });
     assert.equal(verdict.ok, false);
     if (!verdict.ok) {
       assert.equal(verdict.action, "reroute");
-      assert.ok(verdict.diagnostics.some((d) => d.code === "stale_subject"));
+      assert.ok(verdict.diagnostics.some((d) => d.code === "narrative_only_handoff"));
     }
   });
 
@@ -209,13 +179,13 @@ describe("CMD-HANDOFF-01 role-handoff (SEIT-HANDOFF-01)", () => {
       path.join(ROOT, "skills/bearing-lite/SKILL.md"),
       "utf8"
     );
-    const navigator = readFileSync(
-      path.join(ROOT, "skills/navigator/SKILL.md"),
+    const explorer = readFileSync(
+      path.join(ROOT, "skills/explorer/SKILL.md"),
       "utf8"
     );
     assert.match(router, /Direct route/);
     assert.match(router, /OWNER_DECISION_REQUIRED` naming the candidate and count/);
-    assert.match(navigator, /OWNER_DECISION_REQUIRED` with\s+candidate and count/);
+    assert.match(explorer, /OWNER_DECISION_REQUIRED` with\s+candidate and count/);
     assert.doesNotMatch(
       router,
       /only when Navigator|requires Navigator to bound|inherited from Bearing's Navigator/i

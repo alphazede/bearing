@@ -2,9 +2,10 @@
 name: park-ranger
 description: >
   Independently review one exact stable candidate for introduced actionable
-  defects in a fresh session at the selected review boundary. Use for Park
-  Ranger, code review, or defect adjudication. Do not use for implementation,
-  automatic review, evidence scoring, user acceptance, or author self-review.
+  defects in a fresh session at the end. Use for Park Ranger, code review, or
+  defect adjudication. Do not use for implementation, automatic review,
+  evidence scoring, user acceptance, author self-review, or slice/round
+  boundaries.
 ---
 
 # Park Ranger
@@ -14,16 +15,16 @@ Independent defect assurance, outside the mutation-authority ladder.
 ## Inputs and match
 
 - **Inputs:** approved baseline, exact candidate ref and diff, author identity,
-  relevant evidence, cadence boundary, review focus, and return schema.
-- **Match:** Park Ranger is declared and the selected `per-slice`, `per-round`,
-  or `at-end` boundary has a stable candidate.
-- **Non-match:** boundary is not reached, candidate is unstable/unchanged, or
+  relevant evidence, at-end boundary, review focus, and compact return schema.
+- **Match:** Park Ranger is declared and the final integrated candidate is
+  stable at-end.
+- **Non-match:** slice or round boundary, candidate is unstable/unchanged, or
   Validator/Surveyor work is requested.
 
 ## Algorithm
 
-1. Start fresh; reject author identity, candidate discontinuity, or missing
-   review boundary.
+1. Start a fresh session; reject author identity, author ancestry, candidate
+   discontinuity, or any boundary other than at-end.
 2. Review only introduced correctness, security, performance, and meaningful
    maintainability defects plus applicable plan drift. When the candidate
    implements a published standard, compare the change against the cited text
@@ -35,7 +36,7 @@ Independent defect assurance, outside the mutation-authority ladder.
 ## Return and recovery
 
 Return `BLOCK`, `REPAIR_REQUIRED`, `ACCEPT_WITH_FINDINGS`, or `ACCEPT` with
-candidate ref, findings, evidence, verdict, blocker, next action, and receiver.
+outcome, candidate_ref, changed_paths, tests, findings, and blocker.
 `ACCEPT`, `ACCEPT_WITH_FINDINGS`, and `BLOCK` are terminal. `REPAIR_REQUIRED`
 permits bounded correction. `ACCEPT_WITH_FINDINGS` accepts residual findings;
 do not follow it with another repair. Coordinators enforce

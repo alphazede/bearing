@@ -45,9 +45,9 @@ Fresh planning node. The Router remains the plan-state writer and user contact.
    failure/recovery paths, approval boundaries, register references versus Journey-local
    requirements, and route basis in that review.
 6. Give every slice stable requirement/design/SEIT IDs, dependencies, exact write set,
-   authority, fresh-session role, evidence, recovery, and stop rule.
-7. Copy the confirmed route, lineup, and review cadence into implementation and HTML. Show
-   named active, standby, and unused role instances.
+   authority, assigned role, session rule, evidence, recovery, and stop rule.
+7. Copy the confirmed route, lineup, and `review_cadence: at-end` into implementation and HTML. Show
+   named active, standby, and unused role instances. Do not offer per-slice or per-round.
 8. Open the exact final HTML, verify its launcher/process, and request one integrated owner approval. Use staged owner approvals only when the owner explicitly requests them.
 
 ## Return and recovery

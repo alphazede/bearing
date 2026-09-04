@@ -20,7 +20,7 @@ const HOST_BIN = path.join(ROOT, "hooks/com.anthropic.claude-code/host.cjs");
 const READY_PLAN = `# Journey
 
 - journey: Explorer Journey
-- review_cadence: per-round
+- review_cadence: at-end
 
 ### task_id: T1
 - outcome: add host mapping
@@ -46,7 +46,7 @@ const INCOMPLETE_PLAN = `# Notes
 const COMPLETE_PLAN = `# Journey
 
 - journey: Explorer Journey
-- review_cadence: per-round
+- review_cadence: at-end
 
 ### task_id: T1
 - outcome: PASS
@@ -57,8 +57,11 @@ const COMPLETE_PLAN = `# Journey
 - scope: hooks/
 - authority: S7
 - required_assurance: none
-- evidence: host-mapping tests
-- receiving_role: explorer
+- outcome: PASS
+- candidate_ref: cand-host
+- changed_paths: hooks/
+- tests: host-mapping tests
+- findings: none
 - blocker: none
 `;
 
@@ -193,7 +196,7 @@ describe("verified host mapping", () => {
     mkdirSync(cwd);
     writePlan(
       cwd,
-      `# Journey template copy\n\n- journey: <Explorer Journey | Expedition>\n- review_cadence: <per-slice | per-round | at-end>\n- choice_basis: <owner-confirmed recommendation and reason>\n- lineup_snapshot: <named active, standby, and unused role instances>\n`
+      `# Journey template copy\n\n- journey: <Explorer Journey | Expedition>\n- review_cadence: at-end\n- choice_basis: <owner-confirmed recommendation and reason>\n- lineup_snapshot: <named active, standby, and unused role instances>\n`
     );
     const derived = host.deriveContext(cwd);
     assert.equal(derived.router_invoked, false);
@@ -339,11 +342,10 @@ describe("verified host mapping", () => {
     });
     const context = response.hookSpecificOutput.additionalContext;
     assert.match(context, /handoff_incomplete:/);
-    assert.match(context, /role/);
-    assert.match(context, /scope/);
-    assert.match(context, /authority/);
-    assert.match(context, /evidence/);
-    assert.match(context, /receiving_role/);
+    assert.match(context, /candidate_ref/);
+    assert.match(context, /changed_paths/);
+    assert.match(context, /tests/);
+    assert.match(context, /findings/);
     assert.notEqual(response.decision, "block");
   });
 

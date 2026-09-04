@@ -703,7 +703,7 @@ describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)",
     assert.match(TEMPLATE, /journey:\s*<Explorer Journey \| Expedition>/i);
     assert.match(
       TEMPLATE,
-      /review_cadence:\s*<per-slice \| per-round \| at-end>/i
+      /review_cadence:\s*at-end/i
     );
     assert.match(TEMPLATE, /lineup_snapshot:/i);
     assert.match(TEMPLATE, /recorded before Map the Route/i);
@@ -735,6 +735,18 @@ describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)",
     assert.match(TEMPLATE, /same generation/i);
     assert.match(TEMPLATE, /exactly\s+once/i);
     assert.match(TEMPLATE, /cannot\s+steal a live lease/i);
+  });
+
+  it("template records a wave receipt and compact six-field returns", () => {
+    assert.match(TEMPLATE, /wave_receipt:/);
+    assert.match(TEMPLATE, /checked_at:\s*<wave_start \| external_change \| commit>/);
+    assert.match(TEMPLATE, /not before every/);
+    assert.match(TEMPLATE, /Router alone changes cross-wave/);
+    assert.match(
+      TEMPLATE,
+      /outcome.*candidate_ref.*changed_paths.*tests.*findings.*blocker/s
+    );
+    assert.match(TEMPLATE, /once per wave/);
   });
 
   it("Router inventories visible nonterminal Journeys before planning write or dispatch", () => {
@@ -1522,7 +1534,7 @@ describe("CMD-TASK-01 assurance-round bound", () => {
   });
 
   it("Expedition route spends the same final repair before stopping review", () => {
-    const played = playAssuranceRoute("expedition", "navigator", ["FAIL"]);
+    const played = playAssuranceRoute("expedition", "router", ["FAIL"]);
     const last = played.steps[played.steps.length - 1];
     assert.equal(last.status, "CORRECTION_REQUIRED");
     assert.equal(last.code, "final_repair_closes_gate");
@@ -1538,7 +1550,7 @@ describe("CMD-TASK-01 assurance-round bound", () => {
     assert.equal(passLast.terminal, true);
     assert.equal(passLast.assurance_rounds, MAX_ASSURANCE_ROUNDS);
 
-    const residual = playAssuranceRoute("expedition", "navigator", ["ACCEPT_WITH_FINDINGS"]);
+    const residual = playAssuranceRoute("expedition", "router", ["ACCEPT_WITH_FINDINGS"]);
     const residualLast = residual.steps[residual.steps.length - 1];
     assert.equal(residualLast.status, "COMPLETE");
     assert.equal(residualLast.terminal, true);

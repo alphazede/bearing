@@ -12,23 +12,18 @@ const OUTCOMES = Object.freeze(["ADVISE", "REROUTE", "BLOCK", "UNAVAILABLE"]);
 const ENFORCEMENT = "procedural";
 
 const HANDOFF_FIELDS = Object.freeze([
-  "plan_ref",
-  "role",
-  "subject",
-  "depends_on",
-  "scope",
-  "authority",
   "outcome",
-  "evidence",
+  "candidate_ref",
+  "changed_paths",
+  "tests",
+  "findings",
   "blocker",
-  "next_action",
-  "receiving_role",
 ]);
 
 const RECOVERY_UNAVAILABLE =
   "Report UNAVAILABLE, complete the handoff checklist manually, and do not request protected completion until required fields and assurance are present";
 const RECOVERY_HANDOFF =
-  "Complete the role return envelope (plan_ref, role, subject, depends_on, scope, authority, outcome, evidence, blocker, next_action, receiving_role) in the project plan";
+  "Complete the compact receipt (outcome, candidate_ref, changed_paths, tests, findings, blocker) in the project plan";
 const RECOVERY_COMPLETE =
   "Handoff is complete; parent coordinator may advance using the project plan only";
 const RECOVERY_BLOCK_COMPLETION =
