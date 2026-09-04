@@ -94,7 +94,7 @@ generation, route, or writer overlap forces revalidation or a fresh session.
 Field rules:
 
 - `task_id` — stable identifier unique within the plan.
-- `outcome` — approved intent for this task only.
+- `outcome` — approved intent for this task only. Never a role-return token and never copied into `verdict`.
 - `status` — one of `PROPOSED`, `READY`, `WAITING_ON`, `IN_PROGRESS`, `EVIDENCE_READY`, `VALIDATING`, `REVIEWING`, `ACCEPTANCE`, `CORRECTION_REQUIRED`, `OWNER_DECISION_REQUIRED`, `COMPLETE`, `CANCELLED`.
 - `assigned_role` — current role contract for the active step, or unassigned while proposing.
 - `depends_on` — list of other `task_id` values only, never prose.
@@ -117,9 +117,11 @@ Field rules:
 - changed_paths: <paths changed in this candidate>
 - tests: <commands run and observed results>
 - findings: <labeled inferences and gaps>
+- verdict: <closed role-return token>
 - assurance_rounds: <0-1 completed assurance rounds for this Journey>
 ```
 
+`verdict` is one of `ACCEPT`, `ACCEPT_WITH_FINDINGS`, `BLOCK`, `CANDIDATE_READY`, `FAIL`, `GAPS`, `NEEDS_MORE_EVIDENCE`, `OWNER_DECISION_REQUIRED`, `PARTIAL`, `PASS`, `READY`, `REPAIR_REQUIRED`, `REROUTED`, `WAITING_ON`. Do not copy task `outcome` into `verdict`.
 `candidate_ref` must not claim stronger provenance than the client can prove.
 `assurance_rounds` counts the Journey's single submission to required assurance
 against Bearing Lite `max_assurance_rounds`. A repair or replacement candidate
@@ -144,4 +146,4 @@ review. Any source or candidate change during deployment is separately scoped.
 
 ## Single-writer reminder
 
-Only the parent coordinator updates this block after rereading it. Crewmate, Validator, Park Ranger, and Surveyor return compact receipts (`outcome`, `candidate_ref`, `changed_paths`, `tests`, `findings`, `blocker`); the coordinator records transitions. Router alone changes cross-wave dependencies or global sequencing. Update `implementation.md` and `review.html` once per wave, plus owner-decision or blocker changes.
+Only the parent coordinator updates this block after rereading it. Crewmate, Validator, Park Ranger, and Surveyor return compact receipts (`verdict`, `candidate_ref`, `changed_paths`, `tests`, `findings`, `blocker`); the coordinator records transitions. Router alone changes cross-wave dependencies or global sequencing. Update `implementation.md` and `review.html` once per wave, plus owner-decision or blocker changes.

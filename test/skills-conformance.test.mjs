@@ -566,7 +566,7 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     const park = readFileSync(path.join(SKILLS_DIR, "park-ranger", "SKILL.md"), "utf8");
     const surveyor = readFileSync(path.join(SKILLS_DIR, "surveyor", "SKILL.md"), "utf8");
     const compact =
-      /outcome,\s*candidate_ref,\s*changed_paths,\s*tests,\s*findings,\s*and blocker/;
+      /verdict,\s*candidate_ref,\s*changed_paths,\s*tests,\s*findings,\s*and blocker/;
     assert.match(router, /may continue in-wave/);
     assert.match(router, /visible wave receipt/);
     assert.match(router, /once per wave/);

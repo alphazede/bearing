@@ -49,7 +49,29 @@ const COMPLETE_PLAN = `# Journey
 - review_cadence: at-end
 
 ### task_id: T1
-- outcome: PASS
+- outcome: add host mapping
+- status: IN_PROGRESS
+- assigned_role: crewmate
+- depends_on: []
+- next_action: confirm closeout
+- scope: hooks/
+- authority: S7
+- required_assurance: none
+- candidate_ref: cand-host
+- changed_paths: hooks/
+- tests: host-mapping tests
+- findings: none
+- verdict: PASS
+- blocker: none
+`;
+
+const INTENT_AS_RECEIPT_PLAN = `# Journey
+
+- journey: Explorer Journey
+- review_cadence: at-end
+
+### task_id: T1
+- outcome: add host mapping
 - status: IN_PROGRESS
 - assigned_role: crewmate
 - depends_on: []
@@ -341,6 +363,7 @@ describe("verified host mapping", () => {
     });
     const context = response.hookSpecificOutput.additionalContext;
     assert.match(context, /handoff_incomplete:/);
+    assert.match(context, /verdict/);
     assert.match(context, /candidate_ref/);
     assert.match(context, /changed_paths/);
     assert.match(context, /tests/);
@@ -348,10 +371,32 @@ describe("verified host mapping", () => {
     assert.notEqual(response.decision, "block");
   });
 
+  it("task-block outcome intent cannot complete the compact receipt", () => {
+    const cwd = path.join(tmp, "intent-as-receipt");
+    mkdirSync(cwd);
+    writePlan(cwd, INTENT_AS_RECEIPT_PLAN);
+    const derived = host.deriveContext(cwd);
+    assert.equal(derived.active_task.outcome, "add host mapping");
+    assert.equal(derived.active_task.verdict, undefined);
+
+    const response = host.handle({
+      session_id: "s-intent-as-receipt",
+      cwd,
+      hook_event_name: "Stop",
+    });
+    const context = response.hookSpecificOutput.additionalContext;
+    assert.match(context, /handoff_incomplete:verdict/);
+    assert.doesNotMatch(context, /handoff_complete/);
+    assert.notEqual(response.decision, "block");
+  });
+
   it("active complete Journey preserves documented advisory closeout", () => {
     const cwd = path.join(tmp, "complete-journey");
     mkdirSync(cwd);
     writePlan(cwd, COMPLETE_PLAN);
+    const derived = host.deriveContext(cwd);
+    assert.equal(derived.active_task.outcome, "add host mapping");
+    assert.equal(derived.active_task.verdict, "PASS");
     const response = host.handle({
       session_id: "s-complete",
       cwd,
@@ -435,5 +480,7 @@ describe("verified host mapping", () => {
     assert.match(mapping, /additionalContext/);
     assert.match(mapping, /checkout_lease/);
     assert.match(mapping, /journey marker/);
+    assert.match(mapping, /Receipt `verdict`/);
+    assert.match(mapping, /task `outcome` is approved intent/);
   });
 });

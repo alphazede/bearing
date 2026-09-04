@@ -115,7 +115,7 @@ describe("CMD-HOOK-01 hook-contract (SEIT-HOOK-CLASS-01, SEIT-HOOK-COVERAGE-01)"
 
   it("closeout advisory vs narrow BLOCK for protected completion", () => {
     const handoff = {
-      outcome: "PASS",
+      verdict: "PASS",
       candidate_ref: "cand-abc",
       changed_paths: ["test/hook-contract.test.mjs"],
       tests: "ok",
@@ -129,6 +129,18 @@ describe("CMD-HOOK-01 hook-contract (SEIT-HOOK-CLASS-01, SEIT-HOOK-COVERAGE-01)"
       candidate_matched: true,
     });
     assert.equal(advisory.outcome, "ADVISE");
+    assert.equal(advisory.reason, "handoff_complete");
+
+    const intentOnly = closeout.evaluate({
+      outcome: "PASS",
+      candidate_ref: "cand-abc",
+      changed_paths: ["test/hook-contract.test.mjs"],
+      tests: "ok",
+      findings: "none",
+      blocker: "none",
+    });
+    assert.equal(intentOnly.outcome, "ADVISE");
+    assert.equal(intentOnly.reason, "handoff_incomplete:verdict");
 
     const blocked = closeout.evaluate({
       mode: "protected_completion",

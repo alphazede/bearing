@@ -48,7 +48,7 @@ Lowest mutation authority and highest hands-on work in the Bearing ladder.
 ## Return and recovery
 
 Return `CANDIDATE_READY`, `PARTIAL`, `WAITING_ON`, or
-`OWNER_DECISION_REQUIRED` with outcome, candidate_ref, changed_paths, tests,
+`OWNER_DECISION_REQUIRED` with verdict, candidate_ref, changed_paths, tests,
 findings, and blocker. Attempts 1–3 require new evidence, hypothesis, or
 narrower strategy.
 

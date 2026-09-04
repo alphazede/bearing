@@ -30,7 +30,7 @@ resolution.
 
 ## Return and recovery
 
-Return `REROUTED` with outcome, candidate_ref, changed_paths, tests, findings,
+Return `REROUTED` with verdict, candidate_ref, changed_paths, tests, findings,
 and blocker. Findings name the compatibility path.
 
 Never implement, self-assure, select models, or mutate remotes.

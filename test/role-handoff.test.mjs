@@ -13,14 +13,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const closeout = require(path.join(ROOT, "hooks", "closeout.cjs"));
 
-export const HANDOFF_FIELDS = Object.freeze([
-  "outcome",
-  "candidate_ref",
-  "changed_paths",
-  "tests",
-  "findings",
-  "blocker",
-]);
+export const HANDOFF_FIELDS = closeout.HANDOFF_FIELDS;
 
 /**
  * @typedef {{ code: string, message: string, field?: string }} HandoffDiagnostic
@@ -59,6 +52,14 @@ export function validateHandoff(handoff, ctx = {}) {
         message: `required handoff field "${field}" is empty`,
         field,
       });
+      continue;
+    }
+    if (field === "verdict" && (typeof value !== "string" || !closeout.VERDICT_VALUES.has(value.trim()))) {
+      diagnostics.push({
+        code: "invalid_verdict",
+        message: `verdict ${JSON.stringify(value)} is not a closed role-return token`,
+        field: "verdict",
+      });
     }
   }
   const narrativeOnly =
@@ -95,7 +96,7 @@ export function validateHandoff(handoff, ctx = {}) {
 
 function validHandoff(overrides = {}) {
   return {
-    outcome: "PASS",
+    verdict: "PASS",
     candidate_ref: "cand-abc",
     changed_paths: ["test/role-handoff.test.mjs"],
     tests: "node --test exit 0",
@@ -106,7 +107,26 @@ function validHandoff(overrides = {}) {
 }
 
 describe("CMD-HANDOFF-01 role-handoff (SEIT-HANDOFF-01)", () => {
+  it("closed verdict vocabulary is documented on the task template", () => {
+    const template = readFileSync(
+      path.join(ROOT, "skills/bearing-lite/templates/task.md"),
+      "utf8"
+    );
+    assert.ok(closeout.VERDICT_VALUES.size > 0);
+    for (const token of closeout.VERDICT_VALUES) {
+      assert.match(template, new RegExp("`" + token + "`"), token);
+    }
+  });
+
   it("valid return requires the six-field compact receipt and may advance", () => {
+    assert.deepEqual([...HANDOFF_FIELDS], [
+      "verdict",
+      "candidate_ref",
+      "changed_paths",
+      "tests",
+      "findings",
+      "blocker",
+    ]);
     const handoff = validHandoff();
     for (const field of HANDOFF_FIELDS) {
       assert.ok(field in handoff, field);
@@ -129,6 +149,39 @@ describe("CMD-HANDOFF-01 role-handoff (SEIT-HANDOFF-01)", () => {
     });
     assert.equal(result.hook_class, "closeout");
     assert.equal(result.outcome, "ADVISE");
+  });
+
+  it("prose task outcome cannot satisfy the compact receipt", () => {
+    const intentAsOutcome = validateHandoff(
+      validHandoff({
+        outcome: "add S8 tests",
+        verdict: undefined,
+      })
+    );
+    assert.equal(intentAsOutcome.ok, false);
+    if (!intentAsOutcome.ok) {
+      assert.equal(intentAsOutcome.action, "reroute");
+      assert.ok(
+        intentAsOutcome.diagnostics.some((d) => d.code === "missing_field" && d.field === "verdict")
+      );
+    }
+
+    const intentAsVerdict = validateHandoff(validHandoff({ verdict: "add S8 tests" }));
+    assert.equal(intentAsVerdict.ok, false);
+    if (!intentAsVerdict.ok) {
+      assert.ok(intentAsVerdict.diagnostics.some((d) => d.code === "invalid_verdict"));
+    }
+
+    const closed = closeout.evaluate({
+      outcome: "add S8 tests",
+      candidate_ref: "cand-abc",
+      changed_paths: ["test/role-handoff.test.mjs"],
+      tests: "ok",
+      findings: "none",
+      blocker: "none",
+    });
+    assert.equal(closed.reason, "handoff_incomplete:verdict");
+    assert.notEqual(closed.reason, "handoff_complete");
   });
 
   it("negative: missing field reroutes with typed diagnostic (not silent advance)", () => {
