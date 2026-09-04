@@ -28,9 +28,10 @@ Then give your agent a real task:
 > Use Bearing Lite to add rate limiting to this API without changing its public
 > responses. Require one independent review at the end.
 
-Bearing Lite asks whether the work is an Explorer Journey or an Expedition,
-fills only the missing planning stages, confirms the agent lineup and review
-cadence, and dispatches bounded sessions with visible Markdown state.
+Bearing Lite fills only the missing planning stages, confirms the agent lineup
+and review cadence, maps the route, then asks whether the work should run as an
+Explorer Journey or an Expedition before dispatching bounded sessions with
+visible Markdown state.
 
 If Bearing Lite helps keep a long agent task scoped and reviewable,
 [star the repository](https://github.com/alphazede/bearing-lite). It helps other
@@ -80,10 +81,12 @@ register hooks. That path remains first-class. See
 
 ## What it does
 
-1. **Ask** whether the Journey is an Explorer Journey or an Expedition.
-2. **Fill only missing planning stages:** Repository Fit → Set Bearings → Gather
+1. **Fill only missing planning stages:** Repository Fit → Set Bearings → Gather
    Supplies → Map the Route.
-3. **Confirm** the user-owned primary/fallback lineup and single review boundary.
+2. **Confirm** the user-owned primary/fallback lineup and single review boundary.
+3. **Map the route**, then **ask at route review** whether the Journey is an
+   Explorer Journey or an Expedition using the mapped wave and dependency
+   structure.
 4. **Dispatch fresh sessions** with bounded context, authority, and return types.
 5. **Record state visibly** in human-readable Markdown artifacts only.
 

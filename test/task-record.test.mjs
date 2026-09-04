@@ -698,7 +698,7 @@ function baseTask(overrides = {}) {
 }
 
 describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)", () => {
-  it("template records journey and review cadence before task mapping", () => {
+  it("template records cadence before mapping and journey at the route review", () => {
     assert.match(TEMPLATE, /Journey settings/i);
     assert.match(TEMPLATE, /journey:\s*<Explorer Journey \| Expedition>/i);
     assert.match(
@@ -706,7 +706,9 @@ describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)",
       /review_cadence:\s*<per-slice \| per-round \| at-end>/i
     );
     assert.match(TEMPLATE, /lineup_snapshot:/i);
-    assert.match(TEMPLATE, /before task mapping/i);
+    assert.match(TEMPLATE, /recorded before Map the Route/i);
+    assert.match(TEMPLATE, /journey[\s\S]*recorded at the\s+route review/i);
+    assert.match(TEMPLATE, /does not re-ask early or block/i);
   });
 
   it("template records snapshot precedence and the dated amendment path", () => {

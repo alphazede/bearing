@@ -11,9 +11,8 @@ or hidden ledger. plugin hosts are partial; skill-copy is skills-only.
    resume a generation-bound checkout lease before any planning write or dispatch.
    A live same-checkout competitor returns `WAITING_ON` with sanitized competing identity;
    Distinct explicitly approved compatible worktrees may proceed.
-2. New Journey: recommend Explorer Journey or Expedition with reason; say when
-   the other fits. Ask exactly: `What Journey shall
-   we Embark on—an Explorer Journey or an Expedition?`
+2. New Journey: defer the Explorer-versus-Expedition question to the route review
+   after Map the Route; run only embarkation decisions knowable before mapping.
 3. On resume, keep the same lease generation and next incomplete stage. Parent-proven
    same-Journey progress refreshes `candidate_revision` on that generation.
    Never replay accepted stages or duplicate a dispatch.
@@ -23,20 +22,24 @@ or hidden ledger. plugin hosts are partial; skill-copy is skills-only.
 5. Run one missing stage in order: Repository Fit → Set Bearings → Gather
    Supplies. The Router holds every owner conversation inline; Gather Supplies
    is a Router-led interview, never dispatched. Dispatch a fresh session only
-   for bounded mechanical legwork (mapping, drafting) after stage intent is
-   clear, on a cheaper lower-reasoning model than the Router; integrate returns.
+   for bounded mechanical legwork after stage intent is clear, on a cheaper
+   lower-reasoning model than the Router; integrate returns.
 6. Before Map the Route, display each role's primary/fallback, model, reasoning,
    and active/standby/unused state. Ask `Is this a
    good lineup for the roles on this Journey?`; never choose. Recommend cadence
    with a reason plus one cheaper and one more expensive alternative stating
    what each gives up or buys. Ask `Where should the single independent
    review run—after a slice, after an integrated round, or at the end?`
-7. Record route, lineup, and cadence before task mapping; if declined, record the named default explicitly.
-   The recorded snapshot is authoritative for this Journey. Later edits to
-   `~/.agents/bearing-lite/default-role-lineup.md` have no effect on it. Replace
-   only through an explicit owner-confirmed dated visible amendment. Invoke Map the Route with the snapshot.
-8. Every ready node gets a fresh session with lineup identity from the recorded snapshot.
-
+7. Record lineup and cadence before task mapping; if declined, record the named default explicitly.
+   The recorded snapshot is authoritative for this Journey. Later edits to `~/.agents/bearing-lite/default-role-lineup.md` have no effect on it.
+   Replace only through an explicit owner-confirmed dated visible amendment.
+   Do not record a Journey type yet. Invoke Map the Route with the snapshot.
+8. At Map the Route's route review, recommend Explorer Journey or Expedition with
+   reason and say when the other fits; ask exactly: `What Journey shall
+   we Embark on—an Explorer Journey or an Expedition?` State what each gives up
+   or buys from the mapped wave and dependency structure. Record the Journey type
+   before dispatch; Navigator activation is gated on an Expedition answer.
+9. Every ready node gets a fresh session with lineup identity from the recorded snapshot.
 Return `READY`, `WAITING_ON`, `OWNER_DECISION_REQUIRED`, or `COMPLETE`. Fallback
 requires primary unavailability; both failing returns to owner. Allow three
 evidence-changing corrections outside assurance. `max_assurance_rounds` is 1
@@ -44,10 +47,11 @@ per Journey; the sole review may authorize one repair. Direct route checks
 `assurance_rounds`; Navigator is not required. After repair, run deterministic
 coordinator verification and close the gate without another review. Failed repair
 or scope change returns `OWNER_DECISION_REQUIRED` naming the candidate and count.
-Only a separately scoped new Journey resets the review allowance.
-`COMPLETE` ends Bearing assurance: authorized deployment keeps deployment checks
-and rollback readiness without reopening review. Candidate-changing deployment
-work starts a new Journey. release the checkout lease exactly once on `COMPLETE`
-or `CANCELLED`. Recover by explicit recorded generation increment; it cannot steal a live lease.
-Process discovery cannot replace the lease. Never implement,
-self-assure, select models, or publish.
+Reconsider the packet first: re-specify the failed boundary with exact facts,
+diversify the reviewer family, and verify against the cited external standard.
+Model-tier escalation is not the default; it needs evidence of capacity limits
+and an explicit owner-confirmed dated visible amendment. Only a separately
+scoped, materially changed new Journey resets the review allowance; a new Journey
+is not a way around the bound. `COMPLETE` ends Bearing assurance: authorized
+deployment keeps deployment checks and rollback readiness without reopening review. Candidate-changing deployment work starts a new Journey. release the checkout lease exactly once on `COMPLETE` or `CANCELLED`. Recover by explicit recorded generation increment; it cannot steal a live lease. Process discovery
+cannot replace the lease. Never implement, self-assure, select models, or publish.

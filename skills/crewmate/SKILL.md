@@ -34,6 +34,9 @@ Lowest mutation authority and highest hands-on work in the Bearing ladder.
    candidate_revision on the same generation. On mismatch, return WAITING_ON without writing.
 2. For a verified contract defect, create the smallest failing regression first.
 3. Make the smallest change that satisfies the packet inside the write set.
+   When the packet implements a published standard, verify against the cited
+   document and clause before changing code; neighbouring behavior is not the
+   authority.
 4. Run assigned focused commands and author self-checks. Review cadence never
    removes deterministic testing or grants independent-review identity.
 5. Preserve unrelated work and report every changed path and observed result.
