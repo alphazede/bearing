@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "bearing-lite",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Skills-first portable plugin that routes repository work through the smallest valid planning stages and agent roles, using project Markdown as the only task record.",
   "author": {
     "name": "William Rumph / AlphaZede",
