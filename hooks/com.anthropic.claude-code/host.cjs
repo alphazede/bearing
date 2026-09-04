@@ -53,6 +53,8 @@ const TASK_MARK = /(?:^|\n)###\s*task_id:\s*\S+/;
 const TASK_LINE = /^###\s*task_id:\s*(\S+)\s*$/;
 const FIELD_LINE =
   /^-\s*(assigned_role|next_action|status|required_assurance|blocker|evidence|candidate_ref|scope|authority|outcome|depends_on|receiving_role|plan_ref|role|subject):\s*(.*)$/;
+// Matches both the plan-level Journey type and the lease-nested Journey
+// identity; either non-placeholder value marks the Router as invoked.
 const JOURNEY_LINE = /^\s*-\s*journey:\s*(.+)$/i;
 const LEASE_MARK = /^\s*-\s*checkout_lease:/m;
 

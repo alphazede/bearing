@@ -188,6 +188,19 @@ describe("verified host mapping", () => {
     assert.equal(derived.next_action_known, false);
   });
 
+  it("unfilled Journey-settings placeholders do not mark the Router invoked", () => {
+    const cwd = path.join(tmp, "journey-settings-placeholder");
+    mkdirSync(cwd);
+    writePlan(
+      cwd,
+      `# Journey template copy\n\n- journey: <Explorer Journey | Expedition>\n- review_cadence: <per-slice | per-round | at-end>\n- choice_basis: <owner-confirmed recommendation and reason>\n- lineup_snapshot: <named active, standby, and unused role instances>\n`
+    );
+    const derived = host.deriveContext(cwd);
+    assert.equal(derived.router_invoked, false);
+    assert.equal(derived.journey, null);
+    assert.equal(derived.plan_present, false);
+  });
+
   it("SessionStart with a ready plan advises context_ready", () => {
     const cwd = path.join(tmp, "session-ready");
     mkdirSync(cwd);
@@ -397,6 +410,7 @@ describe("verified host mapping", () => {
     );
     const derived = host.deriveContext(cwd);
     assert.equal(derived.plan_present, true);
+    assert.equal(derived.router_invoked, true);
     assert.equal(derived.active_task, null);
 
     const response = host.handle({

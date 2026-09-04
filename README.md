@@ -82,11 +82,11 @@ register hooks. That path remains first-class. See
 ## What it does
 
 1. **Fill only missing planning stages:** Repository Fit → Set Bearings → Gather
-   Supplies → Map the Route.
+   Supplies.
 2. **Confirm** the user-owned primary/fallback lineup and single review boundary.
-3. **Map the route**, then **ask at route review** whether the Journey is an
-   Explorer Journey or an Expedition using the mapped wave and dependency
-   structure.
+3. **Invoke Map the Route.** At its route-review pause, ask whether the Journey is
+   an Explorer Journey or an Expedition using the mapped wave and dependency
+   structure, then finalize `review.html`.
 4. **Dispatch fresh sessions** with bounded context, authority, and return types.
 5. **Record state visibly** in human-readable Markdown artifacts only.
 
@@ -116,7 +116,8 @@ The text below remains authoritative for clients that do not render Mermaid.
 **Authoritative text (vision optional):** Owner Authority remains human-only. The
 Bearing Lite Router is the stateful planning controller, not a work role. It
 invokes only missing planning stages in fresh sessions, confirms the owner's
-lineup and cadence, then dispatches an Explorer Journey or Expedition. Explorer
+lineup and cadence, asks Explorer-versus-Expedition at Map the Route's route
+review, and then dispatches an Explorer Journey or Expedition. Explorer
 coordinates proven-independent in-wave lanes without a nested coordinator.
 Validator, Park Ranger, and Surveyor appear only when declared and when the
 single selected per-slice, per-round, or at-end boundary is reached. Diagrams

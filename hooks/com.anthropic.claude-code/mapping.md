@@ -44,7 +44,7 @@ trees) and sets only:
 | Bearing field | Source |
 |---|---|
 | `plan_present` | a Markdown file contains a `task_id`, `assigned_role`, non-placeholder journey marker, or `checkout_lease` block |
-| `router_invoked` | a `- journey:` setting is present and not a placeholder |
+| `router_invoked` | a non-placeholder `- journey:` setting is present, including the Journey identity nested inside the `checkout_lease` block |
 | `assigned_role` | active task `assigned_role` when not `unassigned` or `<…>` |
 | `next_action` / `next_action_known` | active task `next_action` when not a placeholder |
 | closeout handoff fields | matching task-record keys when present |
@@ -52,6 +52,11 @@ trees) and sets only:
 `assigned_role` and `router_invoked` are **not** inferred from the tool-call
 payload. Missing values stay missing, so activation advises the router instead
 of inventing context.
+
+The Router writes the visible `checkout_lease` before any planning write or
+dispatch; its nested non-placeholder Journey identity is the Router-invoked
+signal during planning. The plan-level Explorer-versus-Expedition value is
+recorded later at the route review.
 
 ## Outcome translation
 
