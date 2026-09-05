@@ -29,10 +29,10 @@ Then give your agent a real task:
 > Use Bearing Lite to add rate limiting to this API without changing its public
 > responses. Require one independent review at the end.
 
-Bearing Lite fills only the missing planning stages, confirms the agent lineup,
-records at-end review, maps the route, then asks whether the work should run as
-an Explorer Journey or an Expedition before dispatching bounded sessions with
-visible Markdown state.
+Bearing Lite fills missing planning stages, then Map the Route creates the
+complete five-artifact package with proposed route, lineup, role states,
+reasoning, and at-end cadence. One integrated owner review approves or changes
+that package before bounded sessions dispatch with visible Markdown state.
 
 If Bearing Lite helps keep a long agent task scoped and reviewable,
 [star the repository](https://github.com/alphazede/bearing-lite). It helps other
@@ -84,10 +84,10 @@ register hooks. That path remains first-class. See
 
 1. **Fill only missing planning stages:** Repository Fit → Set Bearings → Gather
    Supplies.
-2. **Confirm** the user-owned primary/fallback lineup and record at-end review.
-3. **Invoke Map the Route.** At its route-review pause, ask whether the Journey is
-   an Explorer Journey or an Expedition using the mapped wave and dependency
-   structure, then finalize `review.html`.
+2. **Invoke Map the Route** after material intent is settled. It creates
+   specification, design, SEIT, implementation, and `review.html` together.
+3. **Review once:** approve or change the proposed route, user-owned
+   primary/fallback lineup, role states, reasoning, at-end cadence, and plan.
 4. **Dispatch bounded sessions** with compact receipts. Crewmate and Explorer may
    continue in-wave; assurance always starts fresh at the end.
 5. **Record state visibly** in human-readable Markdown artifacts only.
@@ -117,9 +117,9 @@ The text below remains authoritative for clients that do not render Mermaid.
 
 **Authoritative text (vision optional):** Owner Authority remains human-only. The
 Bearing Lite Router is the stateful planning controller, not a work role. It
-invokes only missing planning stages, confirms the owner's
-lineup, records `review_cadence: at-end`, asks Explorer-versus-Expedition at Map the Route's route
-review, and then dispatches an Explorer Journey or Expedition. Explorer
+invokes only missing planning stages, has Map the Route generate all five
+artifacts with proposed lineup and `review_cadence: at-end`, then presents one
+integrated owner review before dispatching an Explorer Journey or Expedition. Explorer
 coordinates proven-independent in-wave lanes without a nested coordinator.
 Validator, Park Ranger, and Surveyor appear only when declared and only at the
 end on the final integrated candidate. Diagrams

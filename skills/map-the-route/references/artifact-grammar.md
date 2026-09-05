@@ -17,12 +17,11 @@ Bearing rejects deviations with typed findings.
    IDs. `seit.md` declares SEIT rows and commands.
 4. Preserve stable IDs. Every implementation reference resolves to a declared
    requirement, design contract, SEIT row, and command.
-5. Owner-confirmed lineup identities and `review_cadence: at-end` are required before
-   implementation drafting; missing identities or cadence block drafting.
-   Do not offer `per-slice` or `per-round`.
-   Active/standby/unused role states may remain provisional until route review
-   resolves the Journey type. The final implementation and `review.html` then
-   record the route-determined active, standby, and unused instances.
+5. Owner-supplied lineup identities and proposed `review_cadence: at-end` are
+   required before implementation drafting; missing identities or cadence block
+   drafting. Do not offer `per-slice` or `per-round`. Map the proposed Journey
+   type and active/standby/unused role states before generating implementation;
+   the final implementation and `review.html` record those proposals together.
 
 ## Requirements register
 
@@ -112,8 +111,9 @@ placeholders, bare negations, or deferral language.
 
 ## Completion boundary
 
-Author specification, design, SEIT, and implementation in that dependency order
-with internal prospective checks. The owner review gate requires all four
-artifacts plus the complete `review.html`; do not insert a specification-only
-owner gate unless the owner explicitly requests staged approvals. The HTML
-becomes authoritative only after integrated owner approval.
+Author specification, design, SEIT, implementation, and review HTML in that
+dependency order with internal prospective checks; generate implementation and
+HTML together after their stable inputs. The single owner review gate requires
+the complete five-artifact package. Do not insert a lineup, route, or
+specification-only owner gate unless the owner explicitly requests staged
+approvals. The HTML becomes authoritative only after integrated owner approval.

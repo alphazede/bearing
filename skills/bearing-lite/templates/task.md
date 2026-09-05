@@ -4,29 +4,27 @@ Use one compact Markdown block per task in the project's existing plan or progre
 
 ## Journey settings
 
-Record these plan-level choices above the task blocks. Lineup identities and
-`review_cadence: at-end` are recorded before Map the Route; `journey` is recorded at the
-route review, where active/standby/unused role states are finalized once Map the
-Route reveals the wave and dependency structure. Completing role states at the
-route review is part of the initial `lineup_snapshot`, not a replacement
-amendment.
+Map the Route records these plan-level proposals above the task blocks in the
+complete five-artifact package. The integrated owner review approves or changes
+the journey, lineup, role states, reasoning, cadence, and plan together; no
+pre-Map lineup or route-review gate is allowed.
 
 ```markdown
 - journey: <Explorer Journey | Expedition>
 - review_cadence: at-end
-- choice_basis: <owner-confirmed recommendation and reason>
-- lineup_snapshot: <named primary/fallback instances; role-state classification completed at route review>
+- choice_basis: <proposed recommendation and reason; owner-approved at integrated review>
+- lineup_snapshot: <named primary/fallback instances; proposed role-state classification and reasoning>
 ```
 
 `review_cadence` is `at-end` only. The single independent review runs on the
 final integrated candidate, not at a slice or round boundary, and not as
 task-level tests or author self-checks. Never infer it from
-`required_assurance` on an individual task. The Router records at-end before
-implementation and does not offer `per-slice` or `per-round`.
-`journey` stays unrecorded until the mapped implementation graph exists; a
-resumed Journey without a recorded type does not re-ask early or block
-Repository Fit, Set Bearings, or Gather Supplies.
-`lineup_snapshot` is authoritative for this Journey after recording. Later
+`required_assurance` on an individual task. The proposal is visible in
+`implementation.md` and `review.html`, then becomes authoritative only after
+the integrated owner approval; do not offer `per-slice` or `per-round`.
+`journey` stays a proposal until the mapped implementation graph exists and the
+integrated owner review approves it. `lineup_snapshot` is authoritative after
+that approval. Later
 edits to `~/.agents/bearing-lite/default-role-lineup.md` have no effect.
 Replace it only through an explicit owner-confirmed dated visible amendment.
 Record the amendment date beside the replacement values. Dispatch identities
