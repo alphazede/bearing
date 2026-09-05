@@ -705,7 +705,7 @@ function baseTask(overrides = {}) {
 }
 
 describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)", () => {
-  it("template records cadence before mapping and journey at the route review", () => {
+  it("template records planning proposals for one integrated review", () => {
     assert.match(TEMPLATE, /Journey settings/i);
     assert.match(TEMPLATE, /journey:\s*<Explorer Journey \| Expedition>/i);
     assert.match(
@@ -713,14 +713,14 @@ describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)",
       /review_cadence:\s*at-end/i
     );
     assert.match(TEMPLATE, /lineup_snapshot:/i);
-    assert.match(TEMPLATE, /recorded before Map the Route/i);
-    assert.match(TEMPLATE, /journey[\s\S]*recorded at the\s+route review/i);
-    assert.match(TEMPLATE, /does not re-ask early or block/i);
+    assert.match(TEMPLATE, /complete five-artifact package/i);
+    assert.match(TEMPLATE, /integrated owner review approves or changes/i);
+    assert.match(TEMPLATE, /no\s+pre-Map lineup or route-review gate/i);
   });
 
   it("template records snapshot precedence and the dated amendment path", () => {
     assert.match(TEMPLATE, /lineup_snapshot:/i);
-    assert.match(TEMPLATE, /authoritative for this Journey/i);
+    assert.match(TEMPLATE, /becomes authoritative only after\s+the integrated owner approval/i);
     assert.match(TEMPLATE, /explicit owner-confirmed dated visible amendment/i);
     assert.match(TEMPLATE, /not from the current global defaults file/i);
     assert.match(TEMPLATE, /amendment date/i);
@@ -758,21 +758,18 @@ describe("CMD-TASK-01 task-record (SEIT-TASK-RECORD-01, SEIT-SINGLE-WRITER-01)",
     assert.match(TEMPLATE, /once per wave/);
   });
 
-  it("Router inventories visible nonterminal Journeys before planning write or dispatch", () => {
+  it("Router acquires a checkout lease before planning or dispatch", () => {
     const router = readFileSync(
       path.join(ROOT, "skills/bearing-lite/SKILL.md"),
       "utf8"
     );
-    assert.match(router, /Inventory visible nonterminal Journeys/);
-    assert.match(router, /generation-bound checkout lease/);
-    assert.match(router, /before any planning write or dispatch/);
+    assert.match(router, /Acquire or resume a generation-bound checkout lease before\s+planning or dispatch/);
     assert.match(router, /WAITING_ON/);
-    assert.match(router, /sanitized competing/);
-    assert.match(router, /Distinct explicitly approved\s+compatible worktrees/);
-    assert.match(router, /same lease generation/);
-    assert.match(router, /duplicate a dispatch/);
-    assert.match(router, /release the checkout lease exactly once/i);
-    assert.match(router, /cannot steal a live lease/);
+    assert.match(router, /sanitized identity/);
+    assert.match(router, /same generation/);
+    assert.match(router, /duplicate dispatch/);
+    assert.match(router, /Release the lease once/);
+    assert.match(router, /recorded generation increment/);
   });
 
   it("template documents always-present, before-execution, after-candidate, waiting/correcting tiers", () => {

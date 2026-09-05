@@ -1,60 +1,55 @@
 ---
 name: map-the-route
 description: >
-  Create or resume Bearing's topic-specific specification, design, SEIT,
-  implementation graph, and self-contained review HTML after decisions are
-  resolved. Use for Map the Route or missing planning artifacts. Do not use to
-  implement, select agents/models, self-approve, or bypass owner review.
+  Create or resume Bearing's complete five-artifact planning package after
+  material decisions are settled. Use for Map the Route or missing planning
+  artifacts. Do not use to implement, select models, self-approve, or bypass
+  the single integrated owner review.
 ---
 
 # Map the Route
 
-Fresh planning node. The Router remains the plan-state writer and user contact.
+Fresh planning node. The Router writes Journey state and owns owner conversation.
 
-## Inputs and match
+## Match, inputs, and non-match
 
-- **Inputs:** confirmed decisions, repository map, artifact status, requirements,
-  repository evidence, lineup/cadence snapshot, repository rules, and return
-  schema. On resume, include owner-answered register and route-review decisions
-  already recorded.
-- **Match:** first specification gate or post-approval planning package is missing.
-- **Non-match:** executable tasks already map to current approved artifacts.
+- **Match:** material intent is settled and any specification, design, SEIT,
+  implementation graph, or review HTML is missing.
+- **Inputs:** confirmed decisions, repository map and evidence, artifact status,
+  requirements register, repository rules, proposed owner-supplied lineup and
+  `review_cadence: at-end`, plus the return schema.
+- **Non-match:** unresolved material scope, behavior, authority, risk, or
+  acceptance intent returns `REROUTE_GATHER_SUPPLIES`; generate no
+  `implementation.md` or `review.html`.
 
-## Algorithm
+## Procedure
 
-1. Derive and announce `<journey-topic>-spec.md` from the confirmed title; require owner
-   input only on ambiguity or collision. Never require generic `plan-spec.md`.
-2. Before authoring requirements, establish whether the target repository or system already
-   has a requirements register. Inspect repository evidence; when it cannot be determined,
-   return `NEEDS_OWNER_DECISION` asking where existing requirements live. Never infer one.
-   Where no register exists, author as today. Where a register exists, reference registered
-   identities and keep only Journey-local criteria in the specification.
-3. Author in dependency order: testable specification, `design.md`, `seit.md`, then
-   `implementation.md`. Run prospective checks internally; interrupt owner only on material
-   intent, scope, risk, or authority decisions. With a register, `seit.md`
-   references verification allocations where the register provides them; where
-   absent, author the needed Journey-level proof or return
-   `NEEDS_OWNER_DECISION` when register authority is unclear. Do not silently
-   drop coverage. Journey-level proof rows remain Journey-local.
-4. Route review: when the implementation graph reveals the actual wave and dependency structure and the
-   Journey type is not recorded, return `NEEDS_OWNER_DECISION` with a route-review
-   recommendation: Explorer Journey or Expedition, citing the mapped structure and what each
-   gives up or buys. Never infer the Journey type from the lineup or graph.
-5. Generate one complete self-contained offline `review.html` after all four artifacts and the
-   Journey type are current. Include implementation, traceability, roles, waves,
-   failure/recovery paths, approval boundaries, register references versus Journey-local
-   requirements, and route basis in that review.
-6. Give every slice stable requirement/design/SEIT IDs, dependencies, exact write set,
-   authority, assigned role, session rule, evidence, recovery, and stop rule.
-7. Copy the confirmed route, lineup, and `review_cadence: at-end` into implementation and HTML. Show
-   named active, standby, and unused role instances. Do not offer per-slice or per-round.
-8. Open the exact final HTML, verify its launcher/process, and request one integrated owner approval. Use staged owner approvals only when the owner explicitly requests them.
+1. Derive `<journey-topic>-spec.md` from the confirmed title; ask only on
+   ambiguity or collision. Establish whether a requirements register exists;
+   if repository evidence cannot decide, return `NEEDS_OWNER_DECISION`. Never
+   infer one. Registered identities remain references; author only Journey-local
+   criteria; author the needed Journey-level proof or return
+   `NEEDS_OWNER_DECISION` when register authority is unclear.
+2. Author and prospectively check, in dependency order, the testable
+   specification, `design.md`, and `seit.md`. Preserve IDs and do not drop
+   Journey-level proof or published-standard clause coverage.
+3. Map the implementation graph and propose the Explorer Journey or Expedition,
+   active/standby/unused role states, lineup, reasoning, and
+   `review_cadence: at-end`. Use supplied identities; never invent them.
+4. After those stable source inputs, generate `implementation.md` and the
+   self-contained offline `review.html` together. Each includes the proposed
+   route, lineup, role states, reasoning, cadence, traceability, waves,
+   recovery, approval boundaries, and register references versus Journey-local requirements.
+5. Give every slice stable requirement/design/SEIT IDs, dependencies, exact
+   write set, authority, role, session rule, evidence, recovery, and stop rule.
+6. Open and verify final HTML, then request exactly one integrated owner review
+   of outcome, design, route, lineup, cadence, and plan. Dispatch remains
+   prohibited until approval. An owner change regenerates affected artifacts,
+   then returns to this same gate; never insert a lineup or route-review pause.
 
 ## Return and recovery
 
-Return `PLAN_REVIEW_READY`, `NEEDS_OWNER_DECISION`, or `VALIDATION_FAILED` with artifact
-paths, evidence, blocker, and next action. `NEEDS_OWNER_DECISION` pauses for a register or
-route-review question; resume with the owner's answer. Owner-decision pauses do
-not consume correction rounds. After approval, `review.html` is
-authoritative. At most three evidence-changing correction rounds; never invent approval or
-implement.
+Return `PLAN_REVIEW_READY`, `REROUTE_GATHER_SUPPLIES`,
+`NEEDS_OWNER_DECISION`, or `VALIDATION_FAILED` with paths, evidence, blocker,
+and next action. Owner-decision pauses do not consume correction rounds. At
+most three evidence-changing correction rounds; never implement or invent approval.

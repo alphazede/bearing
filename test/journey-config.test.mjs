@@ -58,7 +58,7 @@ describe("Journey defaults", () => {
       path.join(ROOT, "skills/bearing-lite/templates/task.md"),
       "utf8"
     );
-    assert.match(router, /recorded snapshot is authoritative for this Journey/);
+    assert.match(router, /recorded\s+snapshot is authoritative for this Journey/);
     assert.match(
       router,
       /Later edits to\s+`~\/\.agents\/bearing-lite\/default-role-lineup\.md` have no effect on it/

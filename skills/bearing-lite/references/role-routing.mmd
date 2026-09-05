@@ -5,13 +5,13 @@ flowchart TD
     P -->|Set Bearings| SB[Fresh Set Bearings]
     P -->|Gather Supplies| GS[Fresh Gather Supplies]
     P -->|Map the Route| MR[Fresh Map the Route]
-    PF & SB & GS & MR -->|typed return| R
-    R --> L[Owner confirms lineup; review_cadence is at-end]
-    L --> R
-    R --> J{Route review after mapped graph: Explorer Journey or Expedition?}
-    J -->|Explorer Journey: one packet| C[Crewmate may continue in-wave]
-    J -->|Explorer Journey: one wave| E[Explorer may continue in-wave]
-    J -->|Expedition: Router sequences waves| E
+    PF & SB & GS -->|typed return| R
+    R --> MR
+    MR -->|five artifacts with proposed route, lineup, role states, reasoning, cadence| I{One integrated owner review}
+    I -->|change| MR
+    I -->|approve Explorer Journey: one packet| C[Crewmate may continue in-wave]
+    I -->|approve Explorer Journey: one wave| E[Explorer may continue in-wave]
+    I -->|approve Expedition: Router sequences waves| E
     E --> C
     C --> A{Final integrated candidate at-end?}
     A -->|Validator declared| V[Fresh Validator]

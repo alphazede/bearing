@@ -251,7 +251,7 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(explorer, /proven-independent/);
     assert.match(explorer, /never add a nested coordinator/);
     assert.doesNotMatch(explorer, /Trail Boss|Sub-Explorer|trail-boss|sub-explorer/);
-    assert.match(router, /Router owns\s+Expedition sequencing/);
+    assert.match(router, /owns\s+Expedition\s+sequencing/);
     assert.match(navigator, /cross-wave/);
     assert.match(navigator, /conflict/);
     assert.match(navigator, /Compatibility only/);
@@ -267,7 +267,8 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       const lines = text.trimEnd().split(/\r?\n/).length;
       const words = text.trim().split(/\s+/).length;
       assert.ok(lines <= 60, `${name}: ${lines} lines must be at most 60`);
-      assert.ok(words <= 600, `${name}: ${words} words must be at most 600`);
+      const maxWords = ["bearing-lite", "map-the-route"].includes(name) ? 400 : 600;
+      assert.ok(words <= maxWords, `${name}: ${words} words must be at most ${maxWords}`);
     }
   });
 
@@ -344,35 +345,21 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       );
     }
     assert.match(router, /Preparing this Journey\./);
-    assert.match(
-      router,
-      /What Journey shall\s+we Embark on—an Explorer Journey or an Expedition\?/
-    );
-    assert.match(router, /Is this a\s+good lineup for the roles on this Journey\?/);
     assert.match(router, /review_cadence: at-end/);
     assert.doesNotMatch(router, /after a\s+slice, after an integrated round, or at the end\?/);
     assert.match(router, /Router alone writes Journey\s+planning state/);
-    assert.match(router, /plugin\s+hosts are partial/);
+    assert.match(router, /plugin\s+hosts are partial/i);
     assert.match(router, /skill-copy is skills-only/);
     assert.match(router, /may continue in-wave/);
     assert.match(router, /If .*default-role-lineup\.md` is absent, create a\s+proposed copy/);
-    assert.match(router, /Never infer identity values/);
+    assert.match(router, /never infer identity values/i);
     assert.match(router, /planning\s+nodes return owner questions/);
-    assert.match(router, /one cheaper and one more expensive alternative/);
-    assert.match(router, /what each gives up\s+or buys/);
-    assert.match(router, /record the named default explicitly/);
-    const route = router.indexOf("What Journey shall");
     const planning = router.indexOf("Repository Fit");
-    const lineup = router.indexOf("Is this a");
-    const cadence = router.indexOf("review_cadence: at-end");
     const map = router.indexOf("Invoke Map the Route");
-    assert.ok(route >= 0 && route > planning, "route choice must follow planning stages");
-    assert.ok(route >= 0 && route > map, "route choice must follow Map the Route invocation");
-    assert.ok(lineup >= 0 && lineup < map, "lineup gate must precede task mapping");
-    assert.ok(cadence >= 0 && cadence < map, "cadence gate must precede task mapping");
-    assert.match(router, /re-specify the failed boundary/);
-    assert.match(router, /Diversify the reviewer family/i);
-    assert.match(router, /Model-tier\s+escalation is not the default/);
+    assert.ok(map >= 0 && map > planning, "Map the Route must follow planning stages");
+    assert.match(router, /Do not ask for lineup or route\s+before it/);
+    assert.match(router, /one integrated\s+approval-or-change gate/);
+    assert.match(router, /Never add a staged lineup or route-review gate/);
     assert.match(router, /materially changed new Journey/);
   });
 
@@ -401,7 +388,7 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
     const explorer = readFileSync(path.join(SKILLS_DIR, "explorer", "SKILL.md"), "utf8");
     const crewmate = readFileSync(path.join(SKILLS_DIR, "crewmate", "SKILL.md"), "utf8");
-    assert.match(router, /recorded snapshot is authoritative for this Journey/);
+    assert.match(router, /recorded\s+snapshot is authoritative for this Journey/);
     assert.match(
       router,
       /Later edits to\s+`~\/\.agents\/bearing-lite\/default-role-lineup\.md` have no effect on it/
@@ -441,7 +428,7 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.match(router, /per Journey/);
     assert.match(router, /assurance_rounds/);
     assert.match(router, /Direct route/);
-    assert.match(router, /do not dispatch Navigator/);
+    assert.match(router, /never\s+dispatch Navigator/);
     assert.match(
       router,
       /OWNER_DECISION_REQUIRED` naming the candidate\s+and count/
@@ -460,7 +447,7 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       assert.match(text, /one[\s\S]*repair/, `${name} must allow at most one repair`);
     }
     assert.match(router, /`COMPLETE` ends Bearing assurance/);
-    assert.match(router, /deployment[\s\S]*without reopening review/);
+    assert.match(router, /deployment[\s\S]*without reopening review/i);
   });
 
   it("Validator and Park Ranger declare terminal versus bounded-correction outcomes", () => {
@@ -494,7 +481,7 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
     assert.doesNotMatch(gather, /Return each confirmed decision immediately/);
   });
 
-  it("Map the Route presents one integrated owner review", () => {
+  it("matching settled intent produces five artifacts before one integrated owner review", () => {
     const mapRoute = readFileSync(
       path.join(SKILLS_DIR, "map-the-route", "SKILL.md"),
       "utf8"
@@ -503,16 +490,25 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       path.join(SKILLS_DIR, "map-the-route", "references", "artifact-grammar.md"),
       "utf8"
     );
-    assert.match(mapRoute, /Author in dependency order: testable specification, `design\.md`, `seit\.md`,\s+then\s+`implementation\.md`/);
-    assert.match(mapRoute, /one complete self-contained offline `review\.html`/);
-    assert.match(mapRoute, /request one\s+integrated owner approval/);
-    assert.match(mapRoute, /staged owner approvals only when the owner\s+explicitly requests them/);
-    assert.doesNotMatch(mapRoute, /After specification approval/);
-    assert.match(grammar, /owner review gate requires all four\s+artifacts plus the complete `review\.html`/);
-    assert.match(grammar, /do not insert a specification-only\s+owner gate/);
+    const implementation = mapRoute.indexOf("generate `implementation.md`");
+    const html = mapRoute.indexOf("`review.html` together");
+    const review = mapRoute.indexOf("exactly one integrated owner review");
+    assert.ok(implementation >= 0 && html >= implementation && review > html);
+    assert.match(mapRoute, /propose the Explorer Journey or Expedition,\s+active\/standby\/unused role states, lineup, reasoning/);
+    assert.match(mapRoute, /never insert a lineup or route-review pause/);
+    assert.match(grammar, /single owner review gate requires\s+the complete five-artifact package/);
+    assert.match(grammar, /Do not insert a lineup, route, or\s+specification-only owner gate/);
   });
 
-  it("route review, requirements-register, and published-standard contracts are stated", () => {
+  it("non-matching unresolved material intent returns to Gather Supplies without implementation or review", () => {
+    const mapRoute = readFileSync(path.join(SKILLS_DIR, "map-the-route", "SKILL.md"), "utf8");
+    const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
+    assert.match(mapRoute, /unresolved material scope, behavior, authority, risk, or\s+acceptance intent returns `REROUTE_GATHER_SUPPLIES`/);
+    assert.match(mapRoute, /generate no\s+`implementation\.md` or `review\.html`/);
+    assert.match(router, /Gather Supplies[\s\S]*unresolved\s+material intent blocks Map the Route/);
+  });
+
+  it("integrated-review, requirements-register, and published-standard contracts are stated", () => {
     const router = readFileSync(path.join(SKILLS_DIR, "bearing-lite", "SKILL.md"), "utf8");
     const mapRoute = readFileSync(path.join(SKILLS_DIR, "map-the-route", "SKILL.md"), "utf8");
     const gather = readFileSync(path.join(SKILLS_DIR, "gather-supplies", "SKILL.md"), "utf8");
@@ -523,28 +519,15 @@ describe("CMD-SKILLS-01 skills-conformance (SEIT-SKILLS-01, SEIT-ACTIVATION-01)"
       path.join(SKILLS_DIR, "map-the-route", "references", "artifact-grammar.md"),
       "utf8"
     );
-    assert.match(router, /defer the Explorer-versus-Expedition question to the\s+route\s+review/);
-    assert.match(
-      router,
-      /Diversify the reviewer family only\s+through an explicit owner-confirmed dated visible amendment/
-    );
-    assert.match(router, /Defer active\/standby\/unused classification to route review/);
-    assert.match(router, /Record Journey type and role states/);
-    assert.match(router, /dispatch only after owner approval/);
-    assert.match(router, /Reject Explorer choices the\s+mapped\s+graph cannot execute/);
-    assert.match(router, /when the packet implements a published standard, verify against the cited text/);
+    assert.match(router, /Record the approved Journey type and snapshot/);
+    assert.match(router, /Dispatch only after approval/);
     assert.match(mapRoute, /requirements register/);
-    assert.match(mapRoute, /Never infer one/);
-    assert.match(mapRoute, /On resume, include owner-answered register and route-review decisions/);
+    assert.match(mapRoute, /Never\s+infer one/);
     assert.match(mapRoute, /author the needed Journey-level proof or return\s+`NEEDS_OWNER_DECISION`/);
-    assert.match(mapRoute, /4\. Route review: when the implementation graph/);
-    assert.match(mapRoute, /route-review\s+recommendation/);
-    assert.match(mapRoute, /Journey type is not recorded/);
     assert.match(mapRoute, /register references versus Journey-local\s+requirements/);
     assert.match(mapRoute, /Owner-decision pauses do\s+not consume correction rounds/);
     assert.match(gather, /route review after Map the Route/);
     assert.match(grammar, /## Requirements register/);
-    assert.match(grammar, /Active\/standby\/unused role states may remain provisional until route review/);
     assert.match(grammar, /Do not restate registered content/);
     assert.match(grammar, /Where the register provides none for a referenced requirement/);
     assert.match(grammar, /`review\.html` marks every requirement as either a register reference or\s+Journey-local/);
